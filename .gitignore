@@ -82,3 +82,10 @@ coverage.xml
 # =========================
 uploads/
 recordings/
+
+# =========================
+# Temporary files
+# =========================
+PyEnv
+my_things.md
+implementation.md
