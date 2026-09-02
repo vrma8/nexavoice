@@ -84,8 +84,9 @@ uploads/
 recordings/
 
 # =========================
-# Temporary files
+# Temporary files & folder
 # =========================
+Docs/
 PyEnv
 my_things.md
 implementation.md
