@@ -5,7 +5,7 @@
 > **Status:** Planning / MVP Development
 > **Version:** 1.0
 > **Primary Languages:** Hindi, English, Hindi-English Code Switching
-> **Interaction:** Real-time phone call
+> **Interaction:** Normal customer-care style phone call (PSTN/telephony)
 > **Primary Real-Time Platform:** Agora
 > **Backend:** Python + FastAPI
 > **Database:** PostgreSQL
@@ -67,6 +67,8 @@ The AI agent should:
 
 The system is a **phone-based AI assistance line**.
 
+The caller interacts with the system through a **normal phone call**, just like calling an organization's customer-care/support number.
+
 The caller does NOT need:
 
 * A website.
@@ -77,10 +79,14 @@ The caller does NOT need:
 
 The caller simply:
 
-1. Calls a phone number.
-2. Speaks naturally.
-3. Receives AI responses through the phone.
-4. Gets transferred to a human when necessary.
+1. Calls the organization's assistance/customer-care phone number.
+2. The call is received through a telephony/PSTN provider.
+3. The caller speaks naturally over the phone.
+4. The AI voice agent listens, processes the speech, and responds through the phone.
+5. If required, the AI escalates the call to a human support representative.
+6. The human receives the conversation context and continues the call.
+
+The phone call is the **primary user interface**. Agora is used behind the scenes for the real-time audio/voice-agent layer and human handoff; the caller does not directly interact with an Agora application.
 
 The human support representative uses a web dashboard.
 
@@ -365,9 +371,49 @@ When uncertain:
 
 # 9. TECHNOLOGY STACK
 
+## 9.0 APPLICATION LANGUAGES
+
+Use a simple two-language application stack:
+
+```text
+AI Voice Agent + Backend  → Python
+Human Agent Dashboard     → TypeScript
+```
+
+### Python
+
+Use Python for:
+
+* Agora AI voice-agent runtime.
+* FastAPI backend.
+* STT/ASR orchestration.
+* LLM/conversation processing.
+* TTS orchestration.
+* Noise/audio-processing integration where applicable.
+* Agent state.
+* Confidence engine.
+* Confirmation logic.
+* Escalation logic.
+* Telephony integration.
+* PostgreSQL/SQLAlchemy.
+* Case management.
+
+### TypeScript
+
+Use TypeScript for:
+
+* Next.js human-agent dashboard.
+* React UI.
+* Agora Web SDK integration for human agents.
+* Live transcript and escalation interface.
+
+Go and Rust are **not required for the MVP**.
+
 ## 9.1 Real-Time Communication
 
 ### Agora
+
+Agora is the primary real-time communication platform for the voice-agent layer.
 
 Use Agora for:
 
@@ -384,9 +430,9 @@ Use Agora for:
 
 # 10. TELEPHONY
 
-A normal phone call cannot directly connect to an Agora web session.
+The caller reaches the system through a **normal phone call**, similar to a typical organization customer-care number.
 
-We therefore need a telephony/PSTN provider.
+A normal PSTN phone call needs a telephony/PSTN layer before it can participate in the Agora real-time environment. Therefore, the system uses a telephony provider to receive the inbound call and connect its media/SIP side to the real-time voice-agent infrastructure.
 
 Potential providers to investigate:
 
@@ -1006,12 +1052,16 @@ Preferred MVP architecture:
 ```text
 Caller
    │
+   │ Normal phone call
+   ▼
+Telephony / PSTN
+   │
    ▼
 Agora
    │
-   ├── AI Agent
+   ├── AI Voice Agent
    │
-   └── Human Agent
+   └── Human Agent (Web Dashboard)
 ```
 
 When escalation occurs:
@@ -1092,6 +1142,63 @@ Inbound calls
 SIP/media integration
 Programmatic call control
 ```
+
+## 10.1 END-TO-END PHONE CALL FLOW
+
+```text
+Caller
+  │
+  │ Normal phone call
+  ▼
+Telephony / PSTN Provider
+  │
+  │ SIP / Media
+  ▼
+Agora Real-Time Layer
+  │
+  ▼
+AI Voice Agent
+  │
+  ├── Speech-to-Text (STT / ASR)
+  │
+  ├── Conversation / LLM processing
+  │
+  ├── Intent + state + confidence
+  │
+  ├── Noise suppression / audio processing
+  │
+  └── Text-to-Speech (TTS)
+  │
+  ▼
+Agora
+  │
+  ▼
+Caller hears AI response
+```
+
+The caller experiences this as a single normal phone conversation. The STT, AI processing, noise suppression, TTS, confidence evaluation, and escalation logic operate behind the phone interface.
+
+If human escalation is required:
+
+```text
+AI Voice Agent
+      │
+      ▼
+Create Case + Handoff Summary
+      │
+      ▼
+Human Agent Dashboard
+      │
+      ▼
+Human Agent Joins Agora Session
+      │
+      ▼
+AI Stops / Mutes
+      │
+      ▼
+Human Continues With Caller
+```
+
 
 ---
 
