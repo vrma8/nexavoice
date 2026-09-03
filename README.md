@@ -1,188 +1,200 @@
-# NexaVoice: Multilingual Real-Time Assistance-Line Agent
+# Agora Conversational AI Next.js Quickstart
 
-<div align="center">
+[![Build](https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs/actions/workflows/build-check.yml/badge.svg)](https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs/actions/workflows/build-check.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org/)
 
-![NexaVoice Banner](https://img.shields.io/badge/NexaVoice-Real--Time%20Voice%20AI-06B6D4?style=for-the-badge)
-![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)
-![Next.js](https://img.shields.io/badge/Next.js-000000?style=for-the-badge&logo=next.js&logoColor=white)
-![Agora](https://img.shields.io/badge/Agora-RTC%20Voice-099DFD?style=for-the-badge)
-![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white)
+Build a production-style voice agent in minutes with Next.js and the Agora Conversational AI Engine, including voice agent visualizer ([Agent UIKit](https://agoraio-conversational-ai.github.io/agent-uikit/)), live transcript, and real-time pipeline latency via `AGENT_METRICS` ([Agent Toolkit](https://github.com/AgoraIO-Conversational-AI/agent-client-toolkit-ts)).
 
-**A real-time multilingual phone-based assistance agent that understands Hindi, English, and code-switched Hinglish conversations, collects essential information, confirms critical details, detects uncertainty with a 5-factor confidence engine, and transfers difficult cases to a human with full conversation context.**
+## Prerequisites
 
-</div>
+- [Node.js 22+](https://nodejs.org/en/download/)
+- [pnpm](https://pnpm.io/installation)
+- [Agora CLI](https://github.com/AgoraIO-Community/cli)
 
----
+## Run It
 
-## 🌟 Key Features
+Getting started is quick and easy: install the CLI _(skip if you already have it)_ , scaffold the Next.js quickstart using the Agora CLI, install dependencies, and run.
 
-1. **Natural Multilingual Speech & Code-Switching**:
-   - Seamlessly speaks and understands **Hindi**, **English**, and mixed **Hinglish** (e.g., *"Actually status update nahi hua and I submitted it last week"*).
-   - Adapts to mid-conversation language switching without asking the caller to pick a language menu.
+1. **Install the Agora CLI and sign in**
+   _(skip if `agora` is already on your PATH)_:
 
-2. **Mathematical 5-Factor Confidence Engine**:
-   $$\text{Confidence} = 0.30 \cdot I_{\text{conf}} + 0.25 \cdot A_{\text{conf}} + 0.20 \cdot E_{\text{conf}} + 0.15 \cdot C_{\text{score}} + 0.10 \cdot S_{\text{consistency}}$$
-   - Detects acoustic degradation, background noise, repeated corrections, and ambiguity.
-   - Automatically escalates when overall confidence drops below threshold ($< 55\%$).
+   macOS and Linux:
 
-3. **Critical Identifier Confirmation**:
-   - Numbers (such as Application Ref `5281`) are verified explicitly (*"Just to confirm, your reference number is 5281, correct?"*).
-   - Handles mid-sentence corrections (*"No wait, it's 5821"*) and adjusts dialogue state immediately.
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/AgoraIO/cli/main/install.sh | sh -s -- --add-to-path
+   ```
 
-4. **Safety & Policy Guardrails**:
-   - Medical symptoms / prescription queries $\to$ Immediate safe escalation.
-   - Authoritative legal advice $\to$ Immediate safe escalation.
-   - Financial investment queries $\to$ Immediate safe escalation.
-   - Strict Anti-Hallucination: never guesses unconfirmed IDs or statuses.
+   Windows PowerShell:
 
-5. **Lossless Human Takeover & Live Agora WebRTC Bridge**:
-   - Support agents see full transcript, verified fields checklist, missing fields, and AI handoff summary.
-   - Human clicks **"JOIN CALL"** $\to$ Connects via Agora RTC voice bridge while AI voice automatically mutes.
-   - Caller does **not** need to repeat their issue.
+   ```powershell
+   irm https://dl.agora.io/cli/install.ps1 | iex
+   ```
 
-6. **Interactive Caller Phone Simulator**:
-   - Built-in browser-based test suite with Web Speech recognition and audio playback.
-   - 7 preloaded one-click test scenarios for judging and validation.
+   If the Windows install command fails in PowerShell, try running the macOS/Linux command from [Git Bash](https://git-scm.com/downloads/win), then open a new terminal and run `agora --help` to confirm the CLI is on your PATH.
 
----
+   Then verify and sign in:
 
-## 🏗️ Architecture
+   ```bash
+   agora --help
+   agora login
+   ```
 
-```mermaid
-graph TD
-    Caller[Caller Phone / Simulator] -->|PSTN / WebRTC Audio| Telephony[Telephony & Agora RTC Service]
-    Telephony --> VoiceAgent[Voice Agent Runtime]
-    VoiceAgent --> ASR[Multilingual ASR Engine]
-    ASR --> Orchestrator[Agent Orchestrator & State Manager]
-    Orchestrator --> Confidence[5-Factor Confidence Engine]
-    Orchestrator --> Escalation[Safety & Escalation Evaluator]
-    Orchestrator --> Tools[Controlled Tool Layer]
-    Orchestrator --> TTS[Hindi / English TTS Engine]
-    TTS --> Telephony
-    Tools --> DB[(PostgreSQL / SQLite Database)]
-    Escalation --> CaseManager[Case & Ticket Management]
-    CaseManager --> WebSocket[Real-Time WebSocket Stream]
-    WebSocket --> Dashboard[Human Agent Next.js Dashboard]
-    Dashboard -->|Agora WebRTC Voice Bridge| Telephony
+   If `agora --help` is not found after install, close and reopen your terminal, then try again. If it still fails, check that the installer-added Agora CLI location is on your shell `PATH`.
+
+2. **Scaffold and run**
+   `agora init` clones the starter, binds an Agora project, and writes `.env.local`. (replace `my-nextjs-demo` with your own project name):
+
+   ```bash
+   agora init my-nextjs-demo --template nextjs
+   cd my-nextjs-demo
+   pnpm install
+   pnpm dev
+   ```
+
+3. Open [http://localhost:3000](http://localhost:3000) and click **Start conversation**.
+
+If the agent does not join or transcripts do not appear, run **`agora project doctor --deep`** to check credentials, feature enablement, network reachability, and local env binding.
+
+### Working from a clone of this repository
+
+Use this path if you already cloned **this** repo (for example to contribute or fork):
+
+```bash
+git clone https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs.git
+cd agent-quickstart-nextjs
+agora login
+agora project use <your-project>
+pnpm install
+agora project env write .env.local
+agora project doctor --deep
+pnpm dev
 ```
 
----
+### Deploy to Vercel
 
-## 📂 Repository Structure
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FAgoraIO-Conversational-AI%2Fagent-quickstart-nextjs&project-name=agent-quickstart-nextjs&repository-name=agent-quickstart-nextjs&env=NEXT_PUBLIC_AGORA_APP_ID,NEXT_AGORA_APP_CERTIFICATE&envDescription=Agora%20credentials%20needed%20to%20run%20the%20app&envLink=https%3A%2F%2Fgithub.com%2FAgoraIO-Conversational-AI%2Fagent-quickstart-nextjs%23run-it&demo-title=Agora%20Conversational%20AI%20Next.js%20Quickstart&demo-description=Official%20Next.js%20quickstart%20for%20building%20browser-based%20voice%20AI%20with%20Agora&demo-image=https%3A%2F%2Fraw.githubusercontent.com%2FAgoraIO-Conversational-AI%2Fagent-quickstart-nextjs%2Fmain%2F.github%2Fassets%2FConversation-Ai-Client.gif)
 
-```text
-NexaVoice/
-├── backend/
-│   ├── app/
-│   │   ├── main.py                  # FastAPI Entrypoint & Lifespan
-│   │   ├── config.py                # Environment configuration
-│   │   ├── agent/                   # Intelligence & Dialogue Engine
-│   │   │   ├── orchestrator.py      # Conversation turn orchestrator
-│   │   │   ├── confidence.py        # 5-factor confidence calculator
-│   │   │   ├── intent.py            # Multilingual intent classifier
-│   │   │   ├── confirmation.py      # Critical number verification
-│   │   │   ├── escalation.py        # Safety & handoff evaluator
-│   │   │   ├── state.py             # Turn-by-turn state tracker
-│   │   │   ├── summarizer.py        # Lossless handoff summarizer
-│   │   │   └── system_prompt.py     # Anti-hallucination prompt
-│   │   ├── agora/                   # Real-time Voice & Token Manager
-│   │   ├── telephony/               # PSTN Providers & Webhooks
-│   │   ├── tools/                   # Controlled Database Tools
-│   │   ├── models/                  # SQLAlchemy ORM Models
-│   │   ├── schemas/                 # Pydantic Schemas & Contracts
-│   │   ├── database/                # DB Connection & Seeds
-│   │   └── api/routes/              # REST & WebSocket Routes
-│   ├── tests/                       # Pytest Suite (20 Tests)
-│   └── requirements.txt
-│
-├── dashboard/                       # Modern Next.js Support Console
-│   ├── src/
-│   │   ├── app/                     # Next.js App Router & Styles
-│   │   ├── components/              # Live UI Components
-│   │   │   ├── Navbar.tsx           # Navigation & Live Status
-│   │   │   ├── LiveTranscript.tsx   # Real-time message stream
-│   │   │   ├── ConfidenceMeter.tsx  # 5-Factor confidence breakdown
-│   │   │   ├── HandoffSummaryCard.tsx # Lossless AI handoff context
-│   │   │   ├── AgoraAudioBridge.tsx # Human voice join console
-│   │   │   ├── CallerSimulator.tsx  # Interactive test simulator
-│   │   │   ├── CasesHub.tsx         # Ticket management
-│   │   │   └── AnalyticsView.tsx    # Metrics & distributions
-│   │   └── types/                   # TypeScript definitions
-│   └── package.json
-│
-├── scripts/
-│   ├── seed-db.py                   # Seed sample applications & tickets
-│   ├── test-call.py                 # Automated CLI test runner
-│   └── start-dev.ps1                # One-click dev launcher
-├── docker-compose.yml
-├── implementation.md                # System specification
-└── README.md
+To populate Vercel env vars from your bound Agora project:
+
+```bash
+agora project use <your-project>
+agora project env write .env.local
+rg "^(NEXT_PUBLIC_AGORA_APP_ID|NEXT_AGORA_APP_CERTIFICATE)=" .env.local
 ```
 
----
+Copy those two values into Vercel Project Settings -> Environment Variables.
 
-## ⚡ Quickstart Guide
+### Environment variables
 
-### 1. Backend Setup & Run
+Defined in [`env.local.example`](env.local.example).
 
-```powershell
-# Navigate to backend
-cd backend
+| Variable                     | Required | Notes                                                            |
+| ---------------------------- | :------: | ---------------------------------------------------------------- |
+| `NEXT_PUBLIC_AGORA_APP_ID`   |    ✅    | Agora Console → Project → App ID.                                |
+| `NEXT_AGORA_APP_CERTIFICATE` |    ✅    | Agora Console → Project → App Certificate. **Server-side only.** |
 
-# Install dependencies
-pip install -r requirements.txt
+The default agent configuration in [`app/api/invite-agent/route.ts`](app/api/invite-agent/route.ts) uses Agora-managed STT, LLM, and TTS, so no extra vendor API keys are required for the base quickstart.
 
-# Run Unit & Integration Tests
-pytest -v
+## Commands
 
-# Start FastAPI server
-python -m uvicorn app.main:app --port 8000 --reload
-```
-- API is live at `http://localhost:8000`
-- Interactive OpenAPI Docs at `http://localhost:8000/docs`
+```bash
+# Dev
+pnpm dev                # start the Next.js dev server
 
-### 2. Frontend Support Dashboard Setup & Run
+# Quality
+pnpm run lint           # eslint
+pnpm run typecheck      # tsc --noEmit
+pnpm run doctor         # local prereqs + env binding
 
-```powershell
-# Navigate to dashboard
-cd dashboard
-
-# Install npm dependencies
-npm install
-
-# Start Next.js dev server
-npm run dev
-```
-- Dashboard is live at `http://localhost:3000`
-
----
-
-## 🧪 Testing the 7 Hackathon Scenarios
-
-You can test all 7 scenarios through the **Caller Phone Simulator** in the web dashboard or via CLI:
-
-```powershell
-python scripts/test-call.py
+# CI / pre-ship
+pnpm run verify:api     # API contract checks
+pnpm run build          # production build
+pnpm run verify         # doctor + lint + typecheck + verify:api + build
 ```
 
-### Demonstration Scenarios:
-1. **Normal Flow**: Caller says *"Mujhe apne application ka status check karna tha"* $\to$ AI asks reference ID $\to$ Caller says *"5281"* $\to$ AI confirms $\to$ Caller confirms $\to$ AI looks up application status.
-2. **Code-Switching (Hinglish)**: Caller says *"Actually status update nahi hua and I submitted it last week"* $\to$ AI responds naturally in mixed Hinglish.
-3. **Number Confirmation**: Critical numeric IDs are never accepted without affirmative verification.
-4. **Interruption & Correction**: Caller interrupts with *"No wait, it's 5821"* $\to$ AI resets and verifies the new number.
-5. **Background Noise**: Audio noise drops ASR score $\to$ triggers polite clarification.
-6. **Low Confidence Escalation**: Persistent ambiguity drops confidence score below $55\%$ $\to$ AI escalates to human with full handoff card.
-7. **Safety Policies**: Queries regarding medical symptoms, legal lawsuits, or financial investing immediately escalate to human officers.
+Run `pnpm run verify` before shipping changes — it covers local prerequisites, lint, type safety, the core API route contracts, and the production build.
 
----
+## Architecture
 
-## 📊 Evaluation & Verification Checklist
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./system-architecture-dark.svg">
+  <img src="./system-architecture.svg" alt="System architecture">
+</picture>
 
-- [x] Full real-time phone / WebRTC voice architecture
-- [x] Hindi, English, and code-switched Hinglish support
-- [x] 5-Factor mathematical confidence engine with penalties
-- [x] Critical reference ID verification & anti-hallucination tools
-- [x] Automatic lossless handoff summary generation
-- [x] Agora RTC real-time voice bridge with AI mute takeover
-- [x] Interactive Caller Simulator with Web Speech API
-- [x] 20/20 Automated unit & integration tests passing
+The browser fetches a combined RTC + RTM token (`buildTokenWithRtm`) from this app, joins the channel using a single RTC client, and uses RTM as the data channel for transcript, agent state, metrics, and error events. The Conversational AI Engine joins the same channel as the shared agent UID in [`lib/agora.ts`](lib/agora.ts) and runs the STT → LLM → TTS pipeline in Agora Cloud.
+
+## What You Get
+
+- browser voice client built with Next.js App Router
+- RTC audio plus RTM transcript and state events
+- server routes for token generation, invite, and stop
+- [`AgentVisualizer`](https://agoraio-conversational-ai.github.io/agent-uikit/) for agent state and a built-in transcript panel for live turns
+- per-stage latency header driven by `AGENT_METRICS`
+- Agora-managed default STT, LLM, and TTS configuration
+
+## How It Works
+
+1. The browser requests an RTC + RTM token from `/api/generate-agora-token`.
+2. The backend invites an Agora cloud agent with `/api/invite-agent`.
+3. The browser joins the channel and publishes mic audio.
+4. The client receives transcript, agent state, and `AGENT_METRICS` (per-stage latency) events over RTM.
+5. On end, the client calls `/api/stop-conversation`, logs out RTM, and unmounts the call view so Agora React hooks clean up RTC publish/join and the local microphone track.
+
+## Optional BYOK
+
+The base `.env.local` contract contains only Agora credentials. If you are migrating from a supported provider, uncomment the matching snippet in [`app/api/invite-agent/route.ts`](app/api/invite-agent/route.ts) and add its variables to your local environment.
+
+```bash
+# Deepgram STT
+NEXT_DEEPGRAM_API_KEY=...
+
+# OpenAI-compatible LLM
+NEXT_LLM_URL=https://api.openai.com/v1/chat/completions
+NEXT_LLM_API_KEY=...
+
+# ElevenLabs TTS
+NEXT_ELEVENLABS_API_KEY=...
+NEXT_ELEVENLABS_VOICE_ID=...
+```
+
+## Repo Map
+
+- `app/api/generate-agora-token/route.ts` — issues RTC + RTM tokens
+- `app/api/invite-agent/route.ts` — starts the agent session and configures the pipeline
+- `app/api/stop-conversation/route.ts` — stops the agent session
+- `components/LandingPage.tsx` — entry point: token fetch, RTM login, conversation lifecycle
+- `components/ConversationComponent.tsx` — RTC client, transcript state, `AGENT_METRICS`, mic release
+- `components/QuickstartConversationLayout.tsx` — in-call header, transcript rail, controls dock
+- `components/QuickstartPipelineMetrics.tsx` — per-stage latency chips in the header
+- `components/QuickstartTranscriptPanel.tsx` — live transcript rail
+- `components/QuickstartPreCallCard.tsx` — pre-call hero card
+- `lib/conversation.ts` — transcript normalization and visualizer state mapping
+- `AGENTS.md` — primary agent-facing guide
+
+## Troubleshooting
+
+- **Agent does not join or transcripts are missing:** run `agora project doctor --deep`.
+- **`pnpm run doctor` fails:** run `agora project env write .env.local`, then retry.
+- **Manual clone / env values:** `agora project use <your-project>` then `agora project env write .env.local`.
+- **RTM login fails:** keep [`app/api/generate-agora-token/route.ts`](app/api/generate-agora-token/route.ts) on `RtcTokenBuilder.buildTokenWithRtm` — RTC-only tokens will not satisfy `rtm.login`.
+- **Transcript speakers inverted:** check the `uid === "0"` remap in [`components/ConversationComponent.tsx`](components/ConversationComponent.tsx).
+- **Agent never appears in channel:** ensure the shared agent UID in [`lib/agora.ts`](lib/agora.ts) is used by both the client and invite route.
+
+## More Docs
+
+- [docs/ai/L0_repo_card.md](./docs/ai/L0_repo_card.md)
+- [docs/ai/RECIPE.md](./docs/ai/RECIPE.md)
+- [AGENTS.md](./AGENTS.md)
+
+## Contributing
+
+Pull requests welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and conventions.
+
+## Security
+
+Please do **not** open public issues for security reports. Email security@agora.io with details and reproduction steps.
+
+## License
+
+Released under the [MIT License](./LICENSE).
