@@ -9,6 +9,9 @@ py -m venv PyEnv
 npm init
 npm install
 npm run dev
+
+npm run build
+npm start
 ```
 
 Public Landing Page: http://localhost:3000/
