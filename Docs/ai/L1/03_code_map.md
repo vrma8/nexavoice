@@ -35,6 +35,7 @@ types/               Shared TypeScript route/component contracts
 
 - `agora.ts`: default constants (`DEFAULT_AGENT_UID`).
 - `conversation.ts`: transcript normalization, spacing cleanup, timestamp normalization, visualizer state mapping.
+- `chat-completions.ts`: dependency-injected optional custom-LLM SSE handler; keeping it outside the route module preserves Next.js route-export constraints.
 
 ## Validation and Tooling
 
