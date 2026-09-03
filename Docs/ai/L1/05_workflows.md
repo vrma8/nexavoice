@@ -13,6 +13,13 @@
 
 If start fails, run `agora project doctor --deep`.
 
+## Run the NexaVoice voice experience
+
+Use `/client/voice` (or `/client`, which links there) for the customer-facing
+experience. This path starts an Agora-managed voice session. The legacy
+`/client/chat` route redirects to voice so local demo text replies cannot be
+mistaken for Agora agent output.
+
 ## Change Agent Behavior
 
 Target file: `app/api/invite-agent/route.ts`.

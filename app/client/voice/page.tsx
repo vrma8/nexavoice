@@ -13,7 +13,7 @@ export default function VoicePage() {
           <h2 className="text-lg font-semibold">NexaVoice</h2>
         </div>
         <div className="flex items-center gap-2 text-sm text-zinc-400">
-          <span>Language: Hindi-English</span>
+          <span>Language: English</span>
         </div>
       </div>
       

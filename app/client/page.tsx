@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { MessageSquare, Phone } from "lucide-react";
+import { Phone } from "lucide-react";
 
 export default function ClientLandingPage() {
   return (
@@ -15,18 +15,11 @@ export default function ClientLandingPage() {
           <h3 className="text-2xl font-medium">How can we help you today?</h3>
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
-          <Link href="/client/chat" className="w-full">
-            <Button className="w-full h-32 flex flex-col items-center justify-center gap-3 bg-zinc-800 hover:bg-zinc-700 text-white transition-all border border-zinc-700">
-              <MessageSquare className="w-8 h-8 text-blue-400" />
-              <span className="text-lg">Chat with AI</span>
-            </Button>
-          </Link>
-
+        <div>
           <Link href="/client/voice" className="w-full">
             <Button className="w-full h-32 flex flex-col items-center justify-center gap-3 bg-zinc-800 hover:bg-zinc-700 text-white transition-all border border-zinc-700">
               <Phone className="w-8 h-8 text-green-400" />
-              <span className="text-lg">Voice Call</span>
+              <span className="text-lg">Start AI Voice Call</span>
             </Button>
           </Link>
         </div>
