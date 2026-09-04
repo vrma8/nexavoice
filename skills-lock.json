@@ -6,6 +6,12 @@
       "sourceType": "github",
       "skillPath": "skills/agora/SKILL.md",
       "computedHash": "5674c6c0aeb310a8c9b5b8d73986a914130046a15675a2b3e1d2324459a66ac2"
+    },
+    "supabase": {
+      "source": "supabase/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/supabase/SKILL.md",
+      "computedHash": "a6260582f48df8ba53380bb9b9e870ed2ae5fe147799e90ed783b8aa25167d50"
     }
   }
 }

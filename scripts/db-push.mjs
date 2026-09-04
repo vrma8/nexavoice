@@ -68,7 +68,7 @@ async function databaseHasUserTables() {
     const res = await client.query(
       `SELECT COUNT(*)::int AS n
          FROM information_schema.tables
-        WHERE table_schema NOT IN ('pg_catalog', 'information_schema')`,
+        WHERE table_schema = 'public'`,
     );
     return res.rows[0].n > 0;
   } finally {
