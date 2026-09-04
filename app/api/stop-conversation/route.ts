@@ -1,72 +1,45 @@
 import { NextResponse } from 'next/server';
-import { AgoraClient, Area } from 'agora-agents';
-import { StopConversationRequest } from '@/types/conversation';
+import type { StopConversationRequest } from '@/types/conversation';
+import { stopAgent } from '@/lib/agora-server';
+import { closeConversation, getConversation, recordEvent } from '@/lib/support/store';
 
-function isAgentAlreadyStoppingOrStopped(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-
-  const maybeErr = error as {
-    statusCode?: number;
-    body?: { detail?: string; reason?: string };
-    message?: string;
-  };
-
-  const statusCode = maybeErr.statusCode;
-  const reason = maybeErr.body?.reason?.toLowerCase();
-  const detail = maybeErr.body?.detail?.toLowerCase() ?? maybeErr.message?.toLowerCase() ?? '';
-
-  if (statusCode === 404) return true;
-  if (reason === 'invalidrequest' && detail.includes('already in the process of shutting down')) {
-    return true;
-  }
-  return false;
-}
-
+/**
+ * POST /api/stop-conversation
+ * Stops the Conversational AI agent. Idempotent: an agent that already left is
+ * reported as `already-stopping`. Optionally closes the backend conversation.
+ */
 export async function POST(request: Request) {
   try {
     const body: StopConversationRequest = await request.json();
-    const { agent_id } = body;
+    const { agent_id, conversation_id } = body;
 
     if (!agent_id) {
-      return NextResponse.json(
-        { error: 'agent_id is required' },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: 'agent_id is required' }, { status: 400 });
     }
 
-    const appId = process.env.NEXT_PUBLIC_AGORA_APP_ID;
-    const appCertificate = process.env.NEXT_AGORA_APP_CERTIFICATE;
-    if (!appId || !appCertificate) {
-      throw new Error(
-        'Missing Agora configuration. Set NEXT_PUBLIC_AGORA_APP_ID and NEXT_AGORA_APP_CERTIFICATE.',
-      );
-    }
+    const outcome = await stopAgent(agent_id);
 
-    // area: change to Area.EU or Area.AP for European or Asia-Pacific deployments.
-    const client = new AgoraClient({
-      area: Area.US,
-      appId,
-      appCertificate,
-    });
-    try {
-      await client.stopAgent(agent_id);
-    } catch (error) {
-      if (isAgentAlreadyStoppingOrStopped(error)) {
-        // Treat stop as idempotent: agent is already exiting (or gone).
-        return NextResponse.json({ success: true, state: 'already-stopping' });
+    if (conversation_id) {
+      const conversation = getConversation(conversation_id);
+      if (conversation) {
+        recordEvent(conversation.id, 'agent.stopped', agent_id);
+        if (conversation.state !== 'RESOLVED' && conversation.state !== 'CLOSED') {
+          // Customer hung up. An open case stays visible on the dashboard and is
+          // flagged "customer left" so the human agent can call back.
+          closeConversation(conversation.id, 'customer ended call');
+        }
       }
-      throw error;
     }
 
+    if (outcome === 'already-stopping') {
+      return NextResponse.json({ success: true, state: 'already-stopping' });
+    }
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error('Error stopping conversation:', error);
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : 'Failed to stop conversation',
+        error: error instanceof Error ? error.message : 'Failed to stop conversation',
       },
       { status: 500 },
     );
