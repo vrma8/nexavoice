@@ -31,7 +31,16 @@ agora project doctor --deep
 - `NEXT_PUBLIC_AGORA_APP_ID`: Agora project App ID.
 - `NEXT_AGORA_APP_CERTIFICATE`: Agora App Certificate (server only).
 
-The base `.env.local` contract contains only these Agora credentials. Agent behavior defaults live in code, and optional BYOK examples are documented later in the root README.
+The base `.env.local` contract contains only these Agora credentials; chat, dashboard and the voice agent (without backend tools) work with them alone.
+
+## NexaVoice Optional Variables
+
+- `AGENT_TOOLS_BASE_URL` + `AGENT_TOOLS_SECRET` (≥ 8 chars): enable the voice agent's REST tools (order lookup/changes/escalation). The URL must be publicly reachable by Agora (Vercel URL, or a tunnel for local dev).
+- `AGORA_AREA`: `US` (default) | `EU` | `AP`.
+- `AGENT_LANGUAGE` (`en-IN` default), `AGENT_STT_LANGUAGE` (`multi`), `AGENT_TTS_VOICE_ID`.
+- `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` (+ `NEXT_LLM_MODEL`): BYOK LLM for the chat agent and the custom-LLM voice path. Without them chat falls back to the rule-based agent.
+
+See `env.local.example` for the annotated template.
 
 ## Primary Commands
 

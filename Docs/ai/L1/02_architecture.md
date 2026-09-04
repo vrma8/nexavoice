@@ -7,26 +7,45 @@
 - Next.js App Router frontend and API routes in one deployable app.
 - Browser joins Agora RTC channel and uses RTM for transcript/state/metrics/errors.
 - Server-side routes mint token and call Agora Agent Server SDK.
-- Agent executes STT -> LLM -> TTS pipeline in Agora cloud.
+- Agent executes STT -> LLM -> TTS pipeline in Agora cloud; the LLM calls back into this app's `/api/agent-tools/*` (inline REST tools) or the whole LLM step runs through `/api/chat/completions` (custom LLM).
+- A backend support store (`lib/support`) owns conversation/case state for both chat and voice; the human dashboard consumes it via `/api/dashboard` (+ SSE) and the case routes.
 
 ## Component Graph
 
 ```text
-Browser UI (LandingPage + ConversationComponent)
+Customer voice UI (VoiceAgentCall + ConversationComponent)
   -> GET /api/generate-agora-token
-  -> POST /api/invite-agent
+  -> POST /api/invite-agent            (creates VOICE conversation, starts agent)
   -> RTC join/publish mic
   -> RTM subscribe + AgoraVoiceAI events
+  -> PATCH /api/conversations/:id      (mirror transcript + agent state)
+  -> POST /api/escalation/request      ("Talk to a human")
   -> POST /api/stop-conversation
 
-Next.js API routes
-  -> agora-token (RtcTokenBuilder.buildTokenWithRtm)
-  -> agora-agents (start/stop managed agent)
+Customer chat UI (ClientChat)
+  -> POST /api/conversations, POST /api/conversations/:id/messages, GET …?since=
 
 Agora Cloud
-  -> Agent session (Deepgram STT + OpenAI LLM + MiniMax TTS by default)
+  -> Agent session (Deepgram STT multi + OpenAI LLM + MiniMax TTS)
+  -> tool calls: POST /api/agent-tools/<tool>?conversation_id=…  (x-nexavoice-tool-token)
+     or custom LLM: POST /api/chat/completions (tools run in-process)
   -> RTM payloads (transcript, state, metrics, error)
+
+Backend (lib/support + lib/shop)
+  -> executeTool guardrails -> shop service (business rules) -> audit + events
+  -> escalate_to_human -> SupportCase + handoff summary -> SSE to dashboard
+
+Human dashboard (SupportDashboard, CaseWorkspace, HumanVoiceBridge)
+  -> GET /api/dashboard, GET /api/dashboard/events
+  -> POST /api/cases/:id/accept      (token for the customer's channel, uid 654321)
+  -> RTC join same channel -> POST /api/cases/:id/takeover (AI speaks handover, leaves)
+  -> POST /api/conversations/:id/messages role=human_agent (chat)
+  -> POST /api/cases/:id/resolve
 ```
+
+## Conversation State Machine
+
+`AI_HANDLING -> WAITING_FOR_HUMAN -> HUMAN_HANDLING -> RESOLVED`, with `CLOSED` when the customer leaves before resolution. Transitions happen only in `lib/support/store.ts` (`createCase`, `acceptCase`, `resolveCase`, `closeConversation`); clients poll or subscribe.
 
 ## Start Sequence
 
@@ -45,7 +64,7 @@ Agora Cloud
 
 ## Core State Domains
 
-- Session bootstrap: `LandingPage` (`agoraData`, `rtmClient`, loading/error flags).
+- Session bootstrap: `VoiceAgentCall` (`agoraData`, `rtmClient`, loading/error flags).
 - RTC transport and mic: `ConversationComponent` + `agora-rtc-react` hooks.
 - Transcript + agent state: `AgoraVoiceAI` events mapped through `lib/conversation.ts`.
 - Metrics and connection issues: `AGENT_METRICS`, `MESSAGE_ERROR`, `SAL_STATUS`, RTM fallback parsing.
@@ -67,11 +86,11 @@ Agora Cloud
 - Browser never sees the app certificate; only receives signed short-lived tokens.
 - Agent lifecycle control (`start`, `stop`) is server-routed.
 - Transcript/state/metrics are data-plane RTM events from agent to browser.
-- UI control-plane actions (start/end, renew) originate in `LandingPage`.
+- UI control-plane actions (start/end, renew) originate in `VoiceAgentCall`.
 
 ## Internal Interfaces Between Components
 
-`LandingPage` -> `ConversationComponent` props:
+`VoiceAgentCall` -> `ConversationComponent` props:
 
 - `agoraData` (`token`, `uid`, `channel`, optional `agentId`)
 - `rtmClient` (already logged-in and subscribed)
@@ -95,7 +114,7 @@ Agora Cloud
 
 - Changes to token or invite routes affect both startup and renewal paths.
 - Changes to transcript mapping can break both transcript panel and visualizer semantics.
-- Changes to RTM setup in `LandingPage` affect toolkit subscription readiness.
+- Changes to RTM setup in `VoiceAgentCall` affect toolkit subscription readiness.
 
 ## Related Deep Dives
 

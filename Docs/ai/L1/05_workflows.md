@@ -13,24 +13,27 @@
 
 If start fails, run `agora project doctor --deep`.
 
-## Run the NexaVoice voice experience
+## Run the NexaVoice demo end to end
 
-Use `/client/voice` (or `/client`, which links there) for the customer-facing
-experience. This path starts an Agora-managed voice session. The legacy
-`/client/chat` route redirects to voice so local demo text replies cannot be
-mistaken for Agora agent output.
+1. Customer: open `/client/chat` (works fully offline from Agora) or `/client/voice` (needs Agora credentials; voice tools need `AGENT_TOOLS_BASE_URL` + `AGENT_TOOLS_SECRET`).
+2. Verify with a demo mobile number (`9876543210`, `9123456780`, `9988776655`), ask for an order status, cancel/return with confirmation, or say "talk to a human".
+3. Human: open `/support-agent` in another tab — the case appears instantly with the handoff summary and customer details; accept it.
+4. Chat: reply from `/support-agent/cases/<id>`; the customer sees `human_agent` messages in the same chat. Voice: click **Join the customer's call** — the AI says the handover line and leaves; talk directly.
+5. Mark resolved. The customer UI shows the resolved banner.
+
+For local voice tool calls expose the dev server publicly (e.g. `ngrok http 3000`) and set `AGENT_TOOLS_BASE_URL` to that https URL before starting a call.
 
 ## Change Agent Behavior
 
-Target file: `app/api/invite-agent/route.ts`.
+Target files: `lib/agent-prompt.ts` (prompt), `lib/agent-config.ts` (pipeline), `lib/agent-tools.ts` (tools).
 
 Typical edits:
 
-- System prompt (`ADA_PROMPT`).
-- Greeting default (`GREETING`).
-- Shared agent UID (`DEFAULT_AGENT_UID` in `lib/agora.ts`).
-- VAD (`turnDetection.config.*`).
-- STT/LLM/TTS model/provider blocks.
+- System prompt / greeting / failure message (`lib/agent-prompt.ts`).
+- Shared agent UID (`DEFAULT_AGENT_UID` in `lib/agora.ts`) and human UID (`DEFAULT_HUMAN_UID`).
+- VAD (`turnDetection.config.*`), interaction language (`AGENT_LANGUAGE`), STT/TTS vendors and voice (`lib/agent-config.ts`).
+- Tools: schema in `lib/agent-tools.ts`, execution + guardrails in `lib/support/tools.ts`, rule-based chat path in `lib/chat-agent.ts`, contract test in `scripts/verify-api-contracts.ts`.
+- Demo data and business rules: `lib/shop/data.ts`, `lib/shop/service.ts`.
 
 Validation path:
 
@@ -48,7 +51,7 @@ Token behavior:
 
 Bootstrap behavior:
 
-- Edit `components/LandingPage.tsx`.
+- Edit `components/VoiceAgentCall.tsx`.
 - Keep invite + RTM setup parallelized before conversation mount.
 
 ## Change Transcript Rendering
