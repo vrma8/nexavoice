@@ -16,6 +16,12 @@
 - **No hydration TTL.** Consecutive requests from one browser land on different
   instances; skipping a read because "we just synced" answers the next turn from stale
   state (the customer is asked for their phone number again).
+- **The demo shop is state too.** `lib/shop/data.ts` seeds a process-local copy of the
+  catalog, so a tool's cancellation only survives on Vercel because `toSnapshot()` carries
+  `shop` and `applySnapshot()` merges it back through `mergeShopSnapshot`. Two consequences:
+  a route that reads the shop must be bracketed (the contract checks enforce this, GET-only
+  routes included), and an order this instance did **not** write always takes the remote
+  version — otherwise a freshly seeded copy silently reverts another instance's write.
 - **Demo records need fixed ids.** `NEXAVOICE_SEED=demo` data is written by whichever
   instance cold-starts first, and two at once is normal on Vercel. The seeded
   conversations, messages and events in `lib/support/seed.ts` therefore use deterministic

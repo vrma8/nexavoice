@@ -92,8 +92,9 @@ Human dashboard (SupportDashboard, CaseWorkspace, HumanVoiceBridge)
 - Browser never sees the app certificate; only receives signed short-lived tokens.
 - The App ID the browser joins with is served by the server (same response as the
   token), so a `NEXT_PUBLIC_AGORA_APP_ID` that the build never saw cannot strand the client.
-- Conversation/case state crosses function instances through the durable mirror; a
-  write is flushed inside the request that made it (never from a timer).
+- Conversation/case state **and the demo shop's mutated orders/tickets** cross function
+  instances through the durable mirror; a write is flushed inside the request that made it
+  (never from a timer).
 - Agent lifecycle control (`start`, `stop`) is server-routed.
 - Transcript/state/metrics are data-plane RTM events from agent to browser.
 - UI control-plane actions (start/end, renew) originate in `VoiceAgentCall`.

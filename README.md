@@ -117,11 +117,13 @@ variable anyway so both sources agree.
 
 ### Two things a Vercel deployment needs that local dev does not
 
-1. **Shared conversation state.** `lib/support/store.ts` is a per-process memory
+1. **Shared state — conversations and the demo shop.** `lib/support/store.ts` is a per-process memory
    cache. Vercel runs every route as an independent function instance, so a
    conversation created by `POST /api/conversations` is invisible to the next
    request — the chat answers "Conversation not found", forgets the verified
-   customer, and the dashboard stays empty. Create a store so state is mirrored:
+   customer, and the dashboard stays empty. Cancelled orders and agent-created tickets
+   are part of the same snapshot, so a cancellation survives into the next turn instead
+   of the order quietly reverting to "placed". Create a store so state is mirrored:
    **Project → Storage → Create Database → Blob**. `BLOB_READ_WRITE_TOKEN` is
    injected automatically and the app detects it; no other setting is needed.
    (`NEXAVOICE_STORE=file` covers a single Docker container instead.)
@@ -197,6 +199,7 @@ Remove the flag afterwards if you don't want a store reset to repopulate the dem
 | Agent never speaks but an `agent_id` came back | Conversational AI not enabled for the App ID | Agora Console → project → All features → **Conversational AI** |
 | Call never connects, no error at all | App ID missing from the client bundle (var added or changed after the last build, or targeted only at Development) | Redeploy with `NEXT_PUBLIC_AGORA_APP_ID` targeted at Production/Preview — or rely on the `appId` the token route now serves |
 | Chat says "Conversation not found" / forgets the phone number between turns | No shared state backend | Create a Vercel Blob store |
+| Agent cancels an order, then says it is still placed (or the dashboard disagrees) | The shop copy on the other instance was never updated | Blob store present — `shop` is part of the mirrored snapshot |
 | Agent talks but never looks up orders | Engine cannot reach `/api/agent-tools/*` | Check `agent.tools` in `/api/health`; needs a public https URL (Vercel URL, ngrok, cloudflared) |
 | Chat answers look canned | `NEXT_LLM_*` not set → rule-based agent | Set `NEXT_LLM_URL` / `NEXT_LLM_API_KEY` |
 | Dashboard shows nothing while a call is live | State not shared (see above) | Blob store; SSE is best-effort — the 3s poll reads the mirror |

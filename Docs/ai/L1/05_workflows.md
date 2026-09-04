@@ -94,6 +94,13 @@ Bootstrap behavior:
 4. Preserve the recipe invariants in `docs/ai/RECIPE.md`.
 5. Run the verification commands before publishing a derivative.
 
+## Workflow: Change a Shop Business Rule
+
+1. Rules live in `lib/shop/service.ts` (windows, allowed transitions); fixtures in `lib/shop/data.ts`.
+2. A mutation must call `markShopTouched(<record id>)`, or the durable merge treats this instance's write as pristine seed data and another instance overwrites it.
+3. Any route that reads the shop needs `withStore()` — GET-only demo routes included — otherwise it answers from a stale copy on a warm instance. `scripts/verify-api-contracts.ts` fails on an unbracketed state-reading route.
+4. Cancel/return/address changes surface in three places: the tool response (`lib/support/tools.ts`), the chat agent's reply copy (`lib/chat-agent.ts`) and the case view (`components/CaseWorkspace.tsx`).
+
 ## Workflow: Add a Route That Touches Support State
 
 1. Write the handler, then wrap it: `export const GET = withStore(async (request, context) => { … })` (`lib/support/route-store.ts`). It hydrates the durable mirror before the handler and flushes it after; a route that skips the bracket works in `pnpm run dev` and loses state on Vercel.

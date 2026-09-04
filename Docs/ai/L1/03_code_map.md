@@ -52,7 +52,7 @@ types/               Shared TypeScript route/component contracts
 - `support/seed.ts`: opt-in demo fixture (`NEXAVOICE_SEED=demo`) — fixed record ids so a simultaneous seed from two instances merges instead of doubling, applied only to an empty store, never replacing an existing record.
 - `support/persist.ts`, `support/snapshot.ts`, `support/route-store.ts`: durable mirror — Blob/file/memory backends, the versioned snapshot + merge rules, and the `withStore()` hydrate/flush bracket every support route uses.
 - `agora.ts`: browser-safe Agora constants (`AGENT_UID`, `HUMAN_UID`, fallback App ID) and `resolveAppId()`.
-- `shop/data.ts`, `shop/service.ts`: NexaMart demo customers/orders/tickets and business rules (cancel/address/return windows).
+- `shop/data.ts`, `shop/service.ts`: NexaMart demo customers/orders/tickets and business rules (cancel/address/return windows). `data.ts` also owns the shop's slice of the durable mirror (`snapshotShopDb`/`mergeShopSnapshot`) plus the set of records this process wrote, which decides merge ties.
 - `api.ts`: browser API client for chat, conversations, escalation, dashboard, cases.
 
 ## Validation and Tooling
