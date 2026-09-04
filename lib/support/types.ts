@@ -122,6 +122,8 @@ export interface SupportCase {
   acceptedAt?: number;
   resolvedAt?: number;
   assignedTo?: string;
+  /** Email of the signed-in agent who accepted the case (from /login). */
+  assignedAgentEmail?: string;
   /** Set when the customer ended the chat/call while the case was still open. */
   customerLeftAt?: number;
   handoff: HandoffSummary;

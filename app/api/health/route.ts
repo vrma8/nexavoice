@@ -69,7 +69,7 @@ export async function GET() {
         conversations: listConversations().length,
         note:
           sync.backend === 'none'
-            ? 'In-memory only: conversation state lives per instance and is lost on cold start. On Vercel, create a Blob store (Storage → Blob) so BLOB_READ_WRITE_TOKEN is injected — state is then shared by every instance.'
+            ? 'In-memory only: conversation state lives per instance and is lost on cold start. Set DATABASE_URL (PostgreSQL) and run pnpm db:push so state is shared by every instance through Prisma.'
             : `Shared via ${sync.backend}.`,
       },
       checkedAt: new Date().toISOString(),

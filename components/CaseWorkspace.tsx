@@ -26,6 +26,7 @@ import {
   type CaseDetail,
 } from '@/lib/api';
 import type { ConversationMessage } from '@/lib/support/types';
+import { getAgentSession } from '@/lib/session';
 
 const AGENT_NAME_KEY = 'nexavoice.agentName';
 const POLL_MS = 2500;
@@ -66,8 +67,10 @@ export default function CaseWorkspace({ caseId }: { caseId: string }) {
   const lastSync = useRef(0);
 
   useEffect(() => {
+    const session = getAgentSession();
     const saved = window.localStorage.getItem(AGENT_NAME_KEY);
-    if (saved) setAgentName(saved);
+    if (session?.name) setAgentName(session.name);
+    else if (saved) setAgentName(saved);
   }, []);
 
   const load = useCallback(async () => {
@@ -124,7 +127,7 @@ export default function CaseWorkspace({ caseId }: { caseId: string }) {
   const handleAccept = async () => {
     window.localStorage.setItem(AGENT_NAME_KEY, agentName);
     try {
-      const result = await acceptCase(caseId, agentName);
+      const result = await acceptCase(caseId, agentName, getAgentSession()?.email);
       setDetail((prev) => (prev ? { ...prev, case: result.case, conversation: result.conversation } : prev));
       if (result.voice) setVoice(result.voice);
     } catch (err) {
@@ -222,7 +225,9 @@ export default function CaseWorkspace({ caseId }: { caseId: string }) {
           </div>
           <p className="mt-1 text-xs text-zinc-500">
             {supportCase.id} · {supportCase.priority} priority · {supportCase.handoff.language}
-            {supportCase.assignedTo ? ` · ${supportCase.assignedTo}` : ''}
+            {supportCase.assignedTo
+              ? ` · ${supportCase.assignedTo}${supportCase.assignedAgentEmail ? ` (${supportCase.assignedAgentEmail})` : ''}`
+              : ''}
           </p>
 
           {supportCase.status === 'WAITING_FOR_HUMAN' && (

@@ -1,0 +1,58 @@
+// NexaVoice — PostgreSQL data layer (Prisma ORM 7).
+//
+// This schema replaces the old "blob database file" durability layer:
+//   • `Client` / `Agent` hold the people who sign in on the /login page
+//     (customer and support agent details are maintained here).
+//   • `StoreState` is the durable mirror for the support store (conversations,
+//     messages, cases, events and the demo shop). It is a single JSONB document
+//     so the store's snapshot merge/prune rules in lib/support/snapshot.ts keep
+//     working unchanged; PostgreSQL is now the shared backend instead of
+//     Vercel Blob or a .data/ JSON file.
+//
+// Push the schema into a running Postgres with `pnpm db:push`, or use a proper
+// migration workflow with `pnpm db:migrate`. The connection string lives in
+// prisma.config.ts (Prisma 7), fed by DATABASE_URL — see env.local.example.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// A customer ("client") who signs in on the /login page.
+model Client {
+  id                String   @id @default(cuid())
+  name              String
+  email             String
+  phone             String   @unique
+  tier              String   @default("standard") // standard | prime
+  city              String   @default("")
+  preferredLanguage String   @default("english") // hindi | english | hinglish
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([phone])
+}
+
+/// A human support agent who signs in on the /login page.
+model Agent {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  title     String   @default("Support Agent")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([email])
+}
+
+/// Durable support-store document (one row). Replaces Vercel Blob / .data file.
+model StoreState {
+  id        String   @id
+  rev       Int      @default(0)
+  snapshot  Json
+  updatedAt DateTime @updatedAt
+}
