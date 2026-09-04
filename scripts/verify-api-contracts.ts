@@ -442,6 +442,285 @@ async function verifyStopConversationSuccess() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// NexaVoice support backend: tool guardrails, REST tool endpoint, escalation
+// ---------------------------------------------------------------------------
+
+async function verifyToolLayerGuardrails() {
+  const { resetSupportDb, createConversation, getConversation, getCase } =
+    await import('../lib/support/store');
+  const { resetShopDb } = await import('../lib/shop/data');
+  const { executeTool } = await import('../lib/support/tools');
+  resetSupportDb();
+  resetShopDb();
+
+  const conversation = createConversation({ mode: 'CHAT' });
+
+  // 1. Order tools are blocked until the customer is verified.
+  const blocked = await executeTool(conversation.id, 'get_order_status', { order_id: 'NM-10023' });
+  assert(
+    !blocked.ok && blocked.result.error === 'CUSTOMER_NOT_VERIFIED',
+    'get_order_status must be blocked before verify_customer',
+  );
+
+  // 2. Verification by phone (accepts +91 / spaces).
+  const verified = await executeTool(conversation.id, 'verify_customer', { phone: '+91 98765 43210' });
+  assert(verified.ok, 'verify_customer should find the seeded customer');
+  assert(
+    (verified.result.customer as { name: string }).name === 'Rahul Sharma',
+    'verify_customer should return the customer name',
+  );
+  assert(
+    getConversation(conversation.id)?.context.customer?.id === 'cust_rahul',
+    'verify_customer should attach the customer to the conversation',
+  );
+
+  // 3. Cross-customer access is denied.
+  const foreign = await executeTool(conversation.id, 'get_order_status', { order_id: '10030' });
+  assert(!foreign.ok && foreign.result.code === 'ORDER_NOT_FOUND', 'orders of other customers must not be visible');
+
+  // 4. Writes require explicit confirmation.
+  const unconfirmed = await executeTool(conversation.id, 'cancel_order', {
+    order_id: '10023',
+    reason: 'changed mind',
+    confirmed: false,
+  });
+  assert(
+    !unconfirmed.ok && unconfirmed.result.error === 'CONFIRMATION_REQUIRED',
+    'cancel_order without confirmed=true must not mutate',
+  );
+  const status = await executeTool(conversation.id, 'get_order_status', { order_id: 'NM-10023' });
+  assert(
+    status.ok && (status.result.order as { status: string }).status === 'PLACED',
+    'unconfirmed cancel must leave the order untouched',
+  );
+
+  const confirmed = await executeTool(conversation.id, 'cancel_order', {
+    order_id: 'NM-10023',
+    reason: 'changed mind',
+    confirmed: 'true',
+  });
+  assert(
+    confirmed.ok && (confirmed.result.order as { status: string }).status === 'CANCELLED',
+    'confirmed cancel should cancel the order',
+  );
+
+  // 5. Business rules: shipped orders cannot be cancelled.
+  const shipped = await executeTool(conversation.id, 'cancel_order', {
+    order_id: 'NM-10021',
+    reason: 'x',
+    confirmed: true,
+  });
+  assert(!shipped.ok && shipped.result.code === 'NOT_CANCELLABLE', 'shipped orders must not be cancellable');
+
+  // 6. Escalation creates a case with a §24 handoff summary and blocks further actions.
+  const escalated = await executeTool(conversation.id, 'escalate_to_human', {
+    reason: 'Customer asked for a human',
+    intent: 'cancellation',
+    summary: 'Customer cancelled NM-10023 and wants to talk about a refund.',
+    language: 'hinglish',
+    confidence: 0.7,
+  });
+  assert(escalated.ok && typeof escalated.result.case_id === 'string', 'escalate_to_human should create a case');
+  const supportCase = getCase(String(escalated.result.case_id));
+  assert(supportCase?.status === 'WAITING_FOR_HUMAN', 'new case should be WAITING_FOR_HUMAN');
+  assert(
+    supportCase?.handoff.conversation_id === conversation.id &&
+      supportCase.handoff.client_name === 'Rahul Sharma' &&
+      supportCase.handoff.actions_taken.some((a) => a.includes('Cancelled NM-10023')),
+    'handoff summary should include client name and actions taken',
+  );
+  assert(
+    getConversation(conversation.id)?.state === 'WAITING_FOR_HUMAN',
+    'conversation should move to WAITING_FOR_HUMAN',
+  );
+  const afterHandoff = await executeTool(conversation.id, 'list_recent_orders', {});
+  assert(
+    !afterHandoff.ok && afterHandoff.result.error === 'HANDED_OFF',
+    'tools must be blocked once the conversation is handed off',
+  );
+  assert(
+    (getConversation(conversation.id)?.toolAudit.length ?? 0) >= 7,
+    'every tool call should be recorded in the audit trail',
+  );
+}
+
+async function verifyAgentToolsEndpoint() {
+  const { resetSupportDb, createConversation } = await import('../lib/support/store');
+  const { resetShopDb } = await import('../lib/shop/data');
+  const { POST: agentTool } = await import('../app/api/agent-tools/[tool]/route');
+  resetSupportDb();
+  resetShopDb();
+  const originalSecret = process.env.AGENT_TOOLS_SECRET;
+  process.env.AGENT_TOOLS_SECRET = 'test-secret-123';
+  try {
+    const conversation = createConversation({ mode: 'VOICE', channel: 'ch-1', customerUid: '42' });
+    const url = `http://localhost:3000/api/agent-tools/verify_customer?conversation_id=${conversation.id}`;
+    const params = Promise.resolve({ tool: 'verify_customer' });
+
+    const unauthorized = await agentTool(
+      new NextRequest(url, { method: 'POST', body: JSON.stringify({ phone: '9876543210' }) }),
+      { params },
+    );
+    assert(unauthorized.status === 401, 'agent tool endpoint must reject calls without the tool token');
+
+    const ok = await agentTool(
+      new NextRequest(url, {
+        method: 'POST',
+        headers: { 'x-nexavoice-tool-token': 'test-secret-123', 'content-type': 'application/json' },
+        body: JSON.stringify({ tool_call_id: 'call_1', phone: '9876543210' }),
+      }),
+      { params },
+    );
+    const body = await getJson(ok);
+    assert(ok.status === 200 && body.ok === true, 'agent tool endpoint should execute the tool');
+    assert(body.tool_call_id === 'call_1', 'agent tool endpoint should echo tool_call_id');
+
+    const unknown = await agentTool(
+      new NextRequest(`http://localhost:3000/api/agent-tools/drop_db?conversation_id=${conversation.id}`, {
+        method: 'POST',
+        headers: { 'x-nexavoice-tool-token': 'test-secret-123' },
+        body: '{}',
+      }),
+      { params: Promise.resolve({ tool: 'drop_db' }) },
+    );
+    assert(unknown.status === 404, 'unknown tools must be rejected');
+  } finally {
+    if (originalSecret === undefined) delete process.env.AGENT_TOOLS_SECRET;
+    else process.env.AGENT_TOOLS_SECRET = originalSecret;
+  }
+}
+
+async function verifyAgentConfigDeclaresRestTools() {
+  const { buildNexaVoiceAgent } = await import('../lib/agent-config');
+  const originalBase = process.env.AGENT_TOOLS_BASE_URL;
+  const originalLlmUrl = process.env.NEXT_LLM_URL;
+  const originalLlmKey = process.env.NEXT_LLM_API_KEY;
+  process.env.AGENT_TOOLS_BASE_URL = 'https://nexavoice.example.com/';
+  delete process.env.NEXT_LLM_URL;
+  delete process.env.NEXT_LLM_API_KEY;
+  try {
+    const client = new AgoraClient({
+      area: 1,
+      appId: process.env.NEXT_PUBLIC_AGORA_APP_ID!,
+      appCertificate: process.env.NEXT_AGORA_APP_CERTIFICATE!,
+    });
+    const { agent, toolsEnabled, llmMode } = buildNexaVoiceAgent({
+      client,
+      conversationId: 'conv_test',
+      toolToken: 'secret-token',
+    });
+    assert(toolsEnabled && llmMode === 'agora-managed', 'agent should use managed LLM with REST tools');
+    const properties = agent.toProperties({
+      channel: 'ch',
+      agentUid: '123456',
+      remoteUids: ['1'],
+      appId: process.env.NEXT_PUBLIC_AGORA_APP_ID!,
+      appCertificate: process.env.NEXT_AGORA_APP_CERTIFICATE!,
+    });
+    const llm = properties.llm as {
+      tools?: Array<{ function: { name: string }; server: { url: string; headers: Record<string, string>; body: Record<string, unknown> } }>;
+      template_variables?: Record<string, string>;
+      system_messages?: Array<{ content: string }>;
+    };
+    assert(Array.isArray(llm.tools) && llm.tools.length >= 8, 'llm.tools should list the support tools');
+    const escalate = llm.tools!.find((t) => t.function.name === 'escalate_to_human');
+    assert(
+      escalate?.server.url === 'https://nexavoice.example.com/api/agent-tools/escalate_to_human?conversation_id={{template_variables.nv_conversation_id}}',
+      'REST tool url should target this backend with the conversation template variable',
+    );
+    assert(
+      escalate?.server.headers['x-nexavoice-tool-token'] === '{{template_variables.nv_tool_token}}',
+      'REST tool should authenticate with the tool token template variable',
+    );
+    assert(escalate?.server.body.reason === '{{args.reason}}', 'REST tool body should map LLM args');
+    assert(
+      llm.template_variables?.nv_conversation_id === 'conv_test' && llm.template_variables?.nv_tool_token === 'secret-token',
+      'template variables should carry conversation id and tool token',
+    );
+    assert(
+      llm.system_messages?.[0]?.content.includes('NexaMart'),
+      'system prompt should be the shopping-support prompt',
+    );
+    assert(
+      (properties.asr as { params?: { language?: string } }).params?.language === 'multi',
+      'Deepgram should run in multilingual (Hindi/English) mode',
+    );
+    assert(
+      properties.advanced_features?.enable_tools === true && properties.advanced_features?.enable_rtm === true,
+      'enable_tools and enable_rtm must be on',
+    );
+  } finally {
+    if (originalBase === undefined) delete process.env.AGENT_TOOLS_BASE_URL;
+    else process.env.AGENT_TOOLS_BASE_URL = originalBase;
+    if (originalLlmUrl !== undefined) process.env.NEXT_LLM_URL = originalLlmUrl;
+    if (originalLlmKey !== undefined) process.env.NEXT_LLM_API_KEY = originalLlmKey;
+  }
+}
+
+async function verifyChatEscalationFlow() {
+  const { resetSupportDb } = await import('../lib/support/store');
+  const { resetShopDb } = await import('../lib/shop/data');
+  const { POST: createConversationRoute } = await import('../app/api/conversations/route');
+  const { POST: postMessage } = await import('../app/api/conversations/[id]/messages/route');
+  const { POST: acceptCase } = await import('../app/api/cases/[id]/accept/route');
+  const { GET: dashboard } = await import('../app/api/dashboard/route');
+  resetSupportDb();
+  resetShopDb();
+  delete process.env.NEXT_LLM_URL;
+  delete process.env.NEXT_LLM_API_KEY;
+
+  const created = await createConversationRoute(
+    new NextRequest('http://localhost:3000/api/conversations', { method: 'POST', body: JSON.stringify({ mode: 'CHAT' }) }),
+  );
+  const conversationId = ((await getJson(created)).conversation as { id: string }).id;
+  const send = async (content: string) => {
+    const res = await postMessage(
+      new NextRequest(`http://localhost:3000/api/conversations/${conversationId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({ content }),
+      }),
+      { params: Promise.resolve({ id: conversationId }) },
+    );
+    return getJson(res);
+  };
+
+  const r1 = await send('mera order kahan hai');
+  assert(
+    typeof (r1.reply as { content: string }).content === 'string' && /mobile/i.test((r1.reply as { content: string }).content),
+    'chat agent should ask for the mobile number first',
+  );
+  const r2 = await send('9876543210');
+  assert(/Rahul/.test((r2.reply as { content: string }).content), 'chat agent should verify the customer');
+  const r3 = await send('NM-10021');
+  assert(/BlueDart|Shipped/i.test((r3.reply as { content: string }).content), 'chat agent should report the order status');
+  const r4 = await send('cancel kar do 10021');
+  assert(/can't be cancelled|cancel nahi ho sakta|नहीं/i.test((r4.reply as { content: string }).content), 'shipped order must not be offered for cancellation');
+  const r5 = await send('kisi insaan se baat karao');
+  assert((r5.case as { status: string } | null)?.status === 'WAITING_FOR_HUMAN', 'human request should create a waiting case');
+  const caseId = (r5.case as { id: string }).id;
+
+  const snapshot = await getJson(await dashboard());
+  assert(
+    (snapshot.waitingCases as Array<{ id: string }>).some((c) => c.id === caseId),
+    'dashboard snapshot should list the waiting case',
+  );
+
+  const accepted = await getJson(
+    await acceptCase(
+      new NextRequest(`http://localhost:3000/api/cases/${caseId}/accept`, { method: 'POST', body: JSON.stringify({ agentName: 'Asha' }) }),
+      { params: Promise.resolve({ id: caseId }) },
+    ),
+  );
+  assert(
+    (accepted.case as { status: string; assignedTo: string }).status === 'HUMAN_HANDLING' &&
+      (accepted.case as { assignedTo: string }).assignedTo === 'Asha',
+    'accepting a case should move it to HUMAN_HANDLING',
+  );
+  const r6 = await send('hello?');
+  assert(r6.reply === null, 'AI must stay silent once a human handles the chat');
+}
+
 async function main() {
   await verifyGenerateAgoraTokenRoute();
   await verifyGenerateAgoraTokenReplacesZeroUid();
@@ -452,6 +731,10 @@ async function main() {
   await verifyInviteAgentSuccess();
   await verifyStopConversationValidation();
   await verifyStopConversationSuccess();
+  await verifyToolLayerGuardrails();
+  await verifyAgentToolsEndpoint();
+  await verifyAgentConfigDeclaresRestTools();
+  await verifyChatEscalationFlow();
 
   console.log('API contract checks passed');
 }

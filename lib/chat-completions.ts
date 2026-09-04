@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { streamText } from 'ai';
+import { jsonSchema, stepCountIs, streamText, tool, type ModelMessage, type ToolSet } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { randomUUID } from 'crypto';
+import { executeTool, TOOL_DEFINITIONS } from '@/lib/support/tools';
+import { getConversation } from '@/lib/support/store';
 
 type ChatBody = {
   messages?: Array<{ role: string; content: unknown }>;
   model?: string;
+  /** NexaVoice extension: scopes tool calls to a backend conversation. */
+  conversation_id?: string;
   [key: string]: unknown;
 };
 
@@ -14,7 +18,41 @@ type ChatCompletionsDeps = {
   streamTextImpl: typeof streamText;
 };
 
-/** Dependency-injected implementation for the optional custom-LLM route. */
+export const CONVERSATION_HEADER = 'x-nexavoice-conversation-id';
+
+/**
+ * Builds Vercel AI SDK tools bound to one conversation. The same shared tool
+ * layer (`lib/support/tools.ts`) backs the Agora voice agent, so chat and voice
+ * share identical capabilities and guardrails.
+ */
+export function buildConversationTools(conversationId: string): ToolSet {
+  const tools: ToolSet = {};
+  for (const definition of TOOL_DEFINITIONS) {
+    tools[definition.name] = tool({
+      description: definition.description,
+      inputSchema: jsonSchema<Record<string, unknown>>(definition.parameters as never),
+      execute: async (input: Record<string, unknown>) => {
+        const outcome = await executeTool(conversationId, definition.name, input ?? {});
+        return { ok: outcome.ok, ...outcome.result };
+      },
+    });
+  }
+  return tools;
+}
+
+/**
+ * OpenAI-compatible `/chat/completions` handler (SSE).
+ *
+ * Two callers:
+ *  1. Agora Conversational AI, when `NEXT_LLM_URL` points here ("custom LLM").
+ *     The engine sends the conversation id in `x-nexavoice-conversation-id`
+ *     (set via `llm.headers` in lib/agent-config.ts).
+ *  2. The web chat UI (`/client/chat`) via lib/api.ts, sending `conversation_id`
+ *     in the body.
+ *
+ * Tool calls are executed server-side in a bounded loop; only the final text
+ * is streamed back, so the engine can speak it directly.
+ */
 export function createChatCompletionsHandler({
   createOpenAIClient,
   streamTextImpl,
@@ -22,7 +60,7 @@ export function createChatCompletionsHandler({
   return async function POST(request: NextRequest) {
     const apiKey = process.env.NEXT_LLM_API_KEY;
     const llmUrl = process.env.NEXT_LLM_URL;
-    const modelId = 'gpt-4o';
+    const modelId = process.env.NEXT_LLM_MODEL?.trim() || 'gpt-4o';
 
     if (!apiKey || !llmUrl) {
       return NextResponse.json(
@@ -40,12 +78,22 @@ export function createChatCompletionsHandler({
       return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
     }
 
+    const conversationId =
+      (typeof body.conversation_id === 'string' && body.conversation_id) ||
+      request.headers.get(CONVERSATION_HEADER) ||
+      undefined;
+    const conversation = conversationId ? getConversation(conversationId) : null;
+
     const openai = createOpenAIClient({ apiKey, baseURL });
     const result = streamTextImpl({
       model: openai(modelId),
-      messages: (body.messages ?? []) as NonNullable<
-        Parameters<typeof streamText>[0]['messages']
-      >,
+      messages: (body.messages ?? []) as ModelMessage[],
+      ...(conversation
+        ? {
+            tools: buildConversationTools(conversation.id),
+            stopWhen: stepCountIs(5),
+          }
+        : {}),
     });
 
     const encoder = new TextEncoder();

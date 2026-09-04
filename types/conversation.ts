@@ -5,6 +5,8 @@ export interface AgoraTokenData {
   uid: string;
   channel: string;
   agentId?: string;
+  /** Backend conversation id registered by /api/invite-agent. */
+  conversationId?: string;
 }
 
 export interface ClientStartRequest {
@@ -14,12 +16,16 @@ export interface ClientStartRequest {
 
 export interface StopConversationRequest {
   agent_id: string;
+  /** Optional: closes the backend conversation as well. */
+  conversation_id?: string;
 }
 
 export interface AgentResponse {
   agent_id: string;
   create_ts: number;
   state: string;
+  conversation_id?: string;
+  tools_enabled?: boolean;
 }
 
 export interface AgoraRenewalTokens {

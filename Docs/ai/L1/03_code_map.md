@@ -18,14 +18,23 @@ types/               Shared TypeScript route/component contracts
 ## API Route Ownership (`app/api`)
 
 - `generate-agora-token/route.ts`: builds RTC+RTM token via `buildTokenWithRtm`.
-- `invite-agent/route.ts`: validates input/env, configures and starts agent session.
-- `stop-conversation/route.ts`: stops agent and handles idempotent already-stopping cases.
-- `chat/completions/route.ts`: optional OpenAI-compatible SSE proxy for custom LLM path.
+- `invite-agent/route.ts`: validates input/env, registers the VOICE conversation, builds the agent via `lib/agent-config.ts` and starts the session.
+- `stop-conversation/route.ts`: stops agent (idempotent) and closes the conversation.
+- `chat/completions/route.ts`: OpenAI-compatible SSE proxy with server-side tools (custom-LLM path).
+- `agent-tools/[tool]/route.ts`: secret-protected REST tool endpoint called by the Agora engine.
+- `conversations/`, `conversations/[id]/`, `conversations/[id]/messages/`: conversation CRUD, voice transcript mirror, chat turns.
+- `escalation/request/route.ts`: manual escalation.
+- `cases/`, `cases/[id]/`, `cases/[id]/{accept,takeover,resolve}/`: human agent case lifecycle (accept issues the human's channel token; takeover makes the AI speak + leave).
+- `dashboard/route.ts`, `dashboard/events/route.ts`: dashboard snapshot + SSE feed.
+- `shop/{customers,orders/[id],tickets}/route.ts`: read-only demo shop.
 
 ## Client Ownership (`components`)
 
-- `LandingPage.tsx`: pre-call shell, token/invite/RTM bootstrap, conversation mount/unmount.
-- `ConversationComponent.tsx`: RTC join, mic publish, toolkit init, transcript/metrics/issues state.
+- `VoiceAgentCall.tsx`: pre-call shell, token/invite/RTM bootstrap, conversation mount/unmount, `conversationId` plumbing.
+- `ConversationComponent.tsx`: RTC join, mic publish, toolkit init, transcript/metrics/issues state, backend sync (`useConversationSync.ts`), human-join detection, "Talk to a human"; `HandoffBanner.tsx` shows escalation/takeover status.
+- `ClientChat.tsx`: customer chat (create conversation, send, poll for human replies, escalate).
+- `SupportDashboard.tsx`: human dashboard (SSE + poll, live calls/chats, queue, handoff summary, customer details, accept).
+- `CaseWorkspace.tsx` + `HumanVoiceBridge.tsx`: case page (transcript, join call as uid `654321` → takeover, chat reply, resolve).
 - `QuickstartConversationLayout.tsx`: in-call framing and slots.
 - `QuickstartTranscriptPanel.tsx`: live transcript panel.
 - `QuickstartPipelineMetrics.tsx`: latency chips from metrics stream.
@@ -33,9 +42,15 @@ types/               Shared TypeScript route/component contracts
 
 ## Shared Logic (`lib`)
 
-- `agora.ts`: default constants (`DEFAULT_AGENT_UID`).
+- `agora.ts`: default constants (`DEFAULT_AGENT_UID` = 123456, `DEFAULT_HUMAN_UID` = 654321).
+- `agora-server.ts`: server-side `AgoraClient` factory (`AGORA_AREA`), `stopAgent`, `speakAsAgent`, ConvoAI auth headers.
+- `agent-config.ts` / `agent-prompt.ts` / `agent-tools.ts`: agent pipeline, NexaMart system prompt, tool schemas + Agora inline REST tool wiring.
 - `conversation.ts`: transcript normalization, spacing cleanup, timestamp normalization, visualizer state mapping.
-- `chat-completions.ts`: dependency-injected optional custom-LLM SSE handler; keeping it outside the route module preserves Next.js route-export constraints.
+- `chat-completions.ts`: dependency-injected custom-LLM SSE handler with tool loop; keeping it outside the route module preserves Next.js route-export constraints.
+- `chat-agent.ts`: chat turn — LLM (`ai` SDK) when configured, else rule-based EN/HI/Hinglish agent over `executeTool`.
+- `support/types.ts`, `support/store.ts`, `support/tools.ts`: conversation/case model, in-memory store + event bus + dashboard snapshot, guarded tool execution + handoff summary.
+- `shop/data.ts`, `shop/service.ts`: NexaMart demo customers/orders/tickets and business rules (cancel/address/return windows).
+- `api.ts`: browser API client for chat, conversations, escalation, dashboard, cases.
 
 ## Validation and Tooling
 
@@ -45,10 +60,14 @@ types/               Shared TypeScript route/component contracts
 
 ## Fast File Lookup
 
-- Change agent prompt/model/VAD -> `app/api/invite-agent/route.ts`.
+- Change agent prompt -> `lib/agent-prompt.ts`; model/VAD/voice/language -> `lib/agent-config.ts`.
+- Add or change a tool -> `lib/agent-tools.ts` (schema) + `lib/support/tools.ts` (execution/guardrails) + `lib/chat-agent.ts` (rule-based path) + `scripts/verify-api-contracts.ts`.
+- Change demo data / business rules -> `lib/shop/data.ts`, `lib/shop/service.ts`.
+- Change escalation / handoff summary -> `lib/support/tools.ts` (`buildHandoffSummary`), `lib/support/store.ts` (`createCase`).
 - Change token policy/channel naming -> `app/api/generate-agora-token/route.ts`.
 - Change transcript mapping behavior -> `lib/conversation.ts` + `components/ConversationComponent.tsx`.
-- Change session bootstrap UX -> `components/LandingPage.tsx`.
+- Change session bootstrap UX -> `components/VoiceAgentCall.tsx`.
+- Change dashboard -> `components/SupportDashboard.tsx`, `components/CaseWorkspace.tsx`.
 
 ## Additional Component Roles
 

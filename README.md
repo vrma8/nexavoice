@@ -1,10 +1,24 @@
-# Agora Conversational AI Next.js Quickstart
+# NexaVoice — Multilingual AI Support for NexaMart (Agora Conversational AI)
 
-[![Build](https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs/actions/workflows/build-check.yml/badge.svg)](https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs/actions/workflows/build-check.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org/)
 
-Build a production-style voice agent in minutes with Next.js and the Agora Conversational AI Engine, including voice agent visualizer ([Agent UIKit](https://agoraio-conversational-ai.github.io/agent-uikit/)), live transcript, and real-time pipeline latency via `AGENT_METRICS` ([Agent Toolkit](https://github.com/AgoraIO-Conversational-AI/agent-client-toolkit-ts)).
+NexaVoice is a web-first customer-support system for **NexaMart**, a demo Indian online shopping service. Customers talk to an AI agent by **voice** (Agora Conversational AI Engine: STT → LLM → TTS in Agora Cloud) or by **chat**, in **Hindi, English or Hinglish**. The agent looks up and — only with explicit confirmation — changes orders in a demo backend, and escalates to a **human agent dashboard** that shows live calls/chats and receives a handoff summary with customer details. For voice, the human joins the *same* Agora channel and the AI hands over and leaves.
+
+Built on the Agora Next.js quickstart (voice visualizer via [Agent UIKit](https://agoraio-conversational-ai.github.io/agent-uikit/), transcripts + `AGENT_METRICS` via [Agent Toolkit](https://github.com/AgoraIO-Conversational-AI/agent-client-toolkit-ts)). Product spec: [`Nexavoice Docs/v1.md`](./Nexavoice%20Docs/v1.md).
+
+## Routes
+
+| Route                        | Who      | What                                                                                     |
+| ---------------------------- | -------- | ---------------------------------------------------------------------------------------- |
+| `/`                          | —        | Landing: customer vs. support agent                                                      |
+| `/client`                    | Customer | Choose chat or voice                                                                     |
+| `/client/chat`               | Customer | Text chat with the AI; "Talk to a human" button; human agent replies land in the same chat |
+| `/client/voice`              | Customer | Voice call with the Agora agent; live transcript; "Talk to a human"; human takeover banner |
+| `/support-agent`             | Human    | Live dashboard: ongoing calls/chats, escalation queue, handoff summary + customer details  |
+| `/support-agent/cases/[id]`  | Human    | Case workspace: transcript, join the customer's call (AI leaves), chat reply, resolve      |
+
+Demo customers (verify by mobile number): **9876543210** Rahul Sharma (Delhi), **9123456780** Priya Nair (Bengaluru), **9988776655** Amit Verma (Lucknow). Data lives in memory ([`lib/shop/data.ts`](lib/shop/data.ts)) and resets on server restart.
 
 ## Prerequisites
 
@@ -89,12 +103,20 @@ Copy those two values into Vercel Project Settings -> Environment Variables.
 
 Defined in [`env.local.example`](env.local.example).
 
-| Variable                     | Required | Notes                                                            |
-| ---------------------------- | :------: | ---------------------------------------------------------------- |
-| `NEXT_PUBLIC_AGORA_APP_ID`   |    ✅    | Agora Console → Project → App ID.                                |
-| `NEXT_AGORA_APP_CERTIFICATE` |    ✅    | Agora Console → Project → App Certificate. **Server-side only.** |
+| Variable                     | Required | Notes                                                                                                                                                                   |
+| ---------------------------- | :------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NEXT_PUBLIC_AGORA_APP_ID`   |    ✅    | Agora Console → Project → App ID.                                                                                                                                       |
+| `NEXT_AGORA_APP_CERTIFICATE` |    ✅    | Agora Console → Project → App Certificate. **Server-side only.**                                                                                                        |
+| `AGENT_TOOLS_BASE_URL`       | voice tools | Public **https** URL of this deployment (e.g. `https://nexavoice.vercel.app` or an ngrok tunnel). The Agora engine calls `${AGENT_TOOLS_BASE_URL}/api/agent-tools/*`. Falls back to `VERCEL_URL`. |
+| `AGENT_TOOLS_SECRET`         | voice tools | Shared secret (≥ 8 chars) the engine sends as `x-nexavoice-tool-token`. Tools are disabled (agent answers without backend access) when either var is missing.        |
+| `AGORA_AREA`                 |    –     | `US` (default), `EU` or `AP` — Agora REST region.                                                                                                                       |
+| `AGENT_LANGUAGE`             |    –     | Turn-detection / interaction locale: `en-IN` (default), `hi-IN`, `bn-IN`, `ta-IN`, `te-IN`, `gu-IN`, `kn-IN`, `en-US`.                                                   |
+| `AGENT_STT_LANGUAGE`         |    –     | Deepgram language, default `multi` (Hindi/English code-switching).                                                                                                      |
+| `AGENT_TTS_VOICE_ID`         |    –     | MiniMax voice id, default `English_captivating_female1`.                                                                                                                |
+| `NEXT_LLM_URL` / `NEXT_LLM_API_KEY` | – | OpenAI-compatible LLM. Enables the LLM chat agent and routes the voice agent through `/api/chat/completions` (custom LLM with server-side tools). Without them the chat uses a built-in rule-based agent and the voice agent uses Agora-managed OpenAI. |
+| `NEXT_LLM_MODEL`             |    –     | Model for the BYOK LLM (default `gpt-4o-mini`).                                                                                                                         |
 
-The default agent configuration in [`app/api/invite-agent/route.ts`](app/api/invite-agent/route.ts) uses Agora-managed STT, LLM, and TTS, so no extra vendor API keys are required for the base quickstart.
+The agent pipeline in [`lib/agent-config.ts`](lib/agent-config.ts) uses Agora-managed Deepgram STT, OpenAI LLM and MiniMax TTS, so no vendor keys are required. The Conversational AI feature and Agora-managed vendors must be enabled on the Agora project (`agora project doctor --deep`).
 
 ## Commands
 
@@ -126,50 +148,71 @@ The browser fetches a combined RTC + RTM token (`buildTokenWithRtm`) from this a
 
 ## What You Get
 
-- browser voice client built with Next.js App Router
-- RTC audio plus RTM transcript and state events
-- server routes for token generation, invite, and stop
-- [`AgentVisualizer`](https://agoraio-conversational-ai.github.io/agent-uikit/) for agent state and a built-in transcript panel for live turns
-- per-stage latency header driven by `AGENT_METRICS`
-- Agora-managed default STT, LLM, and TTS configuration
+- browser voice client (Next.js App Router) with RTC audio plus RTM transcript/state events
+- Agora Conversational AI agent tuned as **Nexa**, a NexaMart shopping-support assistant (Hindi/English/Hinglish)
+- **controlled backend actions**: verify customer → read orders → cancel / return / change address only after the customer confirms, all business rules enforced server-side and audited
+- text chat sharing the same tools, conversation state and escalation path
+- **human agent dashboard** (SSE + polling) with live calls/chats, escalation queue, §24 handoff summary and customer details
+- voice takeover: the human joins the same channel as uid `654321`; the AI announces the handover and leaves
+- [`AgentVisualizer`](https://agoraio-conversational-ai.github.io/agent-uikit/), per-stage latency via `AGENT_METRICS`
 
 ## How It Works
 
-1. The browser requests an RTC + RTM token from `/api/generate-agora-token`.
-2. The backend invites an Agora cloud agent with `/api/invite-agent`.
-3. The browser joins the channel and publishes mic audio.
-4. The client receives transcript, agent state, and `AGENT_METRICS` (per-stage latency) events over RTM.
-5. On end, the client calls `/api/stop-conversation`, logs out RTM, and unmounts the call view so Agora React hooks clean up RTC publish/join and the local microphone track.
+### Voice (Agora Conversational AI Engine)
+
+1. `/client/voice` requests an RTC + RTM token from `/api/generate-agora-token`.
+2. `/api/invite-agent` registers a `VOICE` conversation and starts the agent (`agora-agents` SDK → `POST /v2/projects/{appid}/join`): Deepgram `nova-3` (`multi`), OpenAI `gpt-4o-mini` with the NexaMart system prompt, MiniMax TTS, `turn_detection.language` from `AGENT_LANGUAGE`, `enable_rtm` + `enable_tools`, and **inline REST tools** pointing at `/api/agent-tools/<tool>?conversation_id=…` (authenticated with `AGENT_TOOLS_SECRET` via template variables).
+3. The browser joins the channel, publishes mic audio and receives transcript / state / metrics over RTM. It mirrors completed turns and agent state to `PATCH /api/conversations/:id` so the dashboard sees the call live.
+4. When the LLM calls a tool, the engine POSTs to this backend; [`lib/support/tools.ts`](lib/support/tools.ts) enforces the guardrails (verification first, `confirmed: true` for every write, no actions after handoff) and [`lib/shop/service.ts`](lib/shop/service.ts) enforces business rules (no cancel after shipping, address locked once packed, 10-day return window…).
+5. `escalate_to_human` (AI tool or the caller's **Talk to a human** button) creates a case with the handoff summary; the dashboard is notified over SSE.
+6. A human accepts the case, gets a token for the **same channel** (`/api/cases/:id/accept`) and joins; `/api/cases/:id/takeover` makes the AI say a handover line (`/agents/:id/speak`) and then stops it (`/agents/:id/leave`). Only customer and human remain.
+7. On hang-up the client calls `/api/stop-conversation` and the conversation is closed.
+
+If `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` are set, the engine is pointed at this app's `/api/chat/completions` (OpenAI-compatible SSE proxy) which runs the same tools server-side — use this if inline REST tools are not available on your Agora project.
+
+### Chat
+
+`POST /api/conversations` → `POST /api/conversations/:id/messages`. With an LLM configured, [`lib/chat-agent.ts`](lib/chat-agent.ts) runs `generateText` with the same tool set; otherwise a deterministic EN/HI/Hinglish rule-based agent drives the same `executeTool` layer (verification, status, two-step confirmation for writes, complaints → ticket, human request → escalation). After escalation the AI stays silent and the human replies from the case page.
+
+### State machine
+
+`AI_HANDLING → WAITING_FOR_HUMAN → HUMAN_HANDLING → RESOLVED` (or `CLOSED` when the customer leaves). State is owned by the backend store ([`lib/support/store.ts`](lib/support/store.ts), in-memory for the demo); the browser never decides it.
 
 ## Optional BYOK
 
-The base `.env.local` contract contains only Agora credentials. If you are migrating from a supported provider, uncomment the matching snippet in [`app/api/invite-agent/route.ts`](app/api/invite-agent/route.ts) and add its variables to your local environment.
+The base `.env.local` contract contains only Agora credentials. To bring your own LLM (also used by the chat agent):
 
 ```bash
-# Deepgram STT
-NEXT_DEEPGRAM_API_KEY=...
-
-# OpenAI-compatible LLM
+# OpenAI-compatible LLM (enables LLM chat + custom-LLM voice path with server-side tools)
 NEXT_LLM_URL=https://api.openai.com/v1/chat/completions
 NEXT_LLM_API_KEY=...
-
-# ElevenLabs TTS
-NEXT_ELEVENLABS_API_KEY=...
-NEXT_ELEVENLABS_VOICE_ID=...
+NEXT_LLM_MODEL=gpt-4o-mini
 ```
+
+Other vendors (STT/TTS) can be swapped in [`lib/agent-config.ts`](lib/agent-config.ts) using the `agora-agents` vendor classes.
 
 ## Repo Map
 
 - `app/api/generate-agora-token/route.ts` — issues RTC + RTM tokens
-- `app/api/invite-agent/route.ts` — starts the agent session and configures the pipeline
-- `app/api/stop-conversation/route.ts` — stops the agent session
-- `components/LandingPage.tsx` — entry point: token fetch, RTM login, conversation lifecycle
-- `components/ConversationComponent.tsx` — RTC client, transcript state, `AGENT_METRICS`, mic release
-- `components/QuickstartConversationLayout.tsx` — in-call header, transcript rail, controls dock
-- `components/QuickstartPipelineMetrics.tsx` — per-stage latency chips in the header
-- `components/QuickstartTranscriptPanel.tsx` — live transcript rail
-- `components/QuickstartPreCallCard.tsx` — pre-call hero card
-- `lib/conversation.ts` — transcript normalization and visualizer state mapping
+- `app/api/invite-agent/route.ts` — registers the VOICE conversation and starts the NexaVoice agent
+- `app/api/stop-conversation/route.ts` — stops the agent and closes the conversation
+- `app/api/agent-tools/[tool]/route.ts` — REST tool endpoint called by the Agora engine (secret-protected)
+- `app/api/chat/completions/route.ts` + `lib/chat-completions.ts` — OpenAI-compatible custom-LLM proxy with server-side tools
+- `app/api/conversations/**` — create / read / patch conversations, chat messages (AI turn)
+- `app/api/escalation/request/route.ts` — manual "Talk to a human"
+- `app/api/cases/**` — list / detail / accept (voice token) / takeover (AI speak + leave) / resolve
+- `app/api/dashboard/route.ts`, `app/api/dashboard/events/route.ts` — dashboard snapshot + SSE
+- `app/api/shop/**` — read-only demo shop endpoints
+- `lib/agent-config.ts`, `lib/agent-prompt.ts`, `lib/agent-tools.ts` — agent pipeline, system prompt, tool schemas / REST tool wiring
+- `lib/agora-server.ts` — server-side Agora client (`stopAgent`, `speakAsAgent`, auth headers)
+- `lib/support/{types,store,tools}.ts` — conversation/case model, in-memory store + events, guarded `executeTool` + handoff summary
+- `lib/shop/{data,service}.ts` — NexaMart demo data and business rules
+- `lib/chat-agent.ts` — chat turn (LLM or rule-based)
+- `lib/api.ts` — browser API client
+- `components/VoiceAgentCall.tsx`, `components/ConversationComponent.tsx` — customer voice call (token, RTM, RTC, transcript sync, escalation)
+- `components/ClientChat.tsx` — customer chat
+- `components/SupportDashboard.tsx`, `components/CaseWorkspace.tsx`, `components/HumanVoiceBridge.tsx` — human dashboard, case page, voice takeover
+- `scripts/verify-api-contracts.ts` — API + tool-guardrail contract checks (`npm run verify:api`)
 - `AGENTS.md` — primary agent-facing guide
 
 ## Troubleshooting
@@ -180,6 +223,9 @@ NEXT_ELEVENLABS_VOICE_ID=...
 - **RTM login fails:** keep [`app/api/generate-agora-token/route.ts`](app/api/generate-agora-token/route.ts) on `RtcTokenBuilder.buildTokenWithRtm` — RTC-only tokens will not satisfy `rtm.login`.
 - **Transcript speakers inverted:** check the `uid === "0"` remap in [`components/ConversationComponent.tsx`](components/ConversationComponent.tsx).
 - **Agent never appears in channel:** ensure the shared agent UID in [`lib/agora.ts`](lib/agora.ts) is used by both the client and invite route.
+- **Agent talks but never looks up orders:** set `AGENT_TOOLS_BASE_URL` (public https) and `AGENT_TOOLS_SECRET`; check the server log line `[invite-agent] Backend tools disabled`. On localhost use a tunnel (ngrok/cloudflared) for `AGENT_TOOLS_BASE_URL`.
+- **`/join` rejects `llm.tools`:** your project may not have inline REST tools enabled — set `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` so the engine uses `/api/chat/completions`, which runs the tools server-side.
+- **Human joins but the AI keeps talking:** `/api/cases/:id/takeover` needs the conversation's `agentId`; check the server log for `[takeover]` errors and that the Agora REST region (`AGORA_AREA`) matches your project.
 
 ## More Docs
 

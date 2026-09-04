@@ -52,10 +52,16 @@
 
 | Symptom | First Files to Inspect |
 | --- | --- |
-| RTM login fails | `app/api/generate-agora-token/route.ts`, `components/LandingPage.tsx` |
+| RTM login fails | `app/api/generate-agora-token/route.ts`, `components/VoiceAgentCall.tsx` |
 | Agent starts but no transcript | `components/ConversationComponent.tsx`, `lib/conversation.ts` |
-| Conversation hangs on end | `components/LandingPage.tsx`, `app/api/stop-conversation/route.ts` |
+| Conversation hangs on end | `components/VoiceAgentCall.tsx`, `app/api/stop-conversation/route.ts` |
 | Metrics panel empty | `components/ConversationComponent.tsx`, `components/QuickstartPipelineMetrics.tsx` |
+| Agent talks but never looks up orders | server log `[invite-agent] Backend tools disabled` → `AGENT_TOOLS_BASE_URL`/`AGENT_TOOLS_SECRET`; `lib/agent-tools.ts` |
+| `/join` rejected (`InvalidRequestBody` on `llm.tools`) | project lacks inline REST tools → set `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` (custom-LLM path); `lib/agent-config.ts` |
+| Agent ignores Hindi / transcribes as English | `AGENT_LANGUAGE` (turn detection) and `AGENT_STT_LANGUAGE` (`multi`) in `lib/agent-config.ts`; SDK forces `asr.language = turnDetection.language` |
+| Human joins but AI keeps talking | `app/api/cases/[id]/takeover/route.ts` needs `conversation.agentId`; check `[takeover]` logs, `AGORA_AREA` |
+| Dashboard empty after redeploy | store is in-memory (`globalThis`); restarts drop conversations/cases |
+| Chat case opened for wrong customer | rule-based agent extracts 10-digit phones from free text; see `extractPhone` in `lib/chat-agent.ts` |
 
 ## Sandbox and Local Dev Caveats
 
@@ -68,6 +74,8 @@
 - Confirm no manual `leave()` or `close()` lifecycle calls were introduced.
 - Confirm transcript mapping still remaps sentinel local UID.
 - Confirm token renewal still returns both RTC and RTM tokens.
+- Confirm every write tool still requires `confirmed: true` and verification (`npm run verify:api` covers it).
+- Confirm the human agent uid stays `654321` on both `accept` route and `ConversationComponent`.
 - Confirm docs were updated when workflow/interface behavior changed.
 
 ## Incident Learning Notes

@@ -5,6 +5,8 @@ import Image from 'next/image';
 import { Button } from '@/components/ui/button';
 
 type QuickstartConversationLayoutProps = {
+  title?: string;
+  banner?: ReactNode;
   statusPanel: ReactNode;
   pipelineMetrics: ReactNode;
   transcriptPanel: ReactNode;
@@ -14,6 +16,8 @@ type QuickstartConversationLayoutProps = {
 };
 
 export function QuickstartConversationLayout({
+  title = 'Agora Conversational AI',
+  banner,
   statusPanel,
   pipelineMetrics,
   transcriptPanel,
@@ -34,7 +38,7 @@ export function QuickstartConversationLayout({
           />
           <div className="flex min-w-0 flex-col justify-center gap-1">
             <span className="truncate text-lg font-semibold leading-none tracking-[-0.025em] text-foreground">
-              Agora Conversational AI
+              {title}
             </span>
             {pipelineMetrics}
           </div>
@@ -54,6 +58,8 @@ export function QuickstartConversationLayout({
           </Button>
         </div>
       </header>
+
+      {banner}
 
       <div className="flex min-h-0 w-full flex-1 flex-col gap-4 px-4 pb-4 pt-4 md:px-6 lg:flex-row lg:gap-0">
         <aside className="order-2 h-64 min-h-0 w-full shrink-0 lg:order-1 lg:h-full lg:w-[26rem]">

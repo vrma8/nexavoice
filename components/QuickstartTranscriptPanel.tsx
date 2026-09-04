@@ -66,7 +66,7 @@ export function QuickstartTranscriptPanel({
         ) : (
           messages.map((message, index) => {
             const isAgent = String(message.uid) === agentUID;
-            const label = isAgent ? 'Agent' : 'You';
+            const label = isAgent ? 'Nexa (AI)' : 'You';
             const text = message.text?.trim();
             const time = formatMessageTime(message.createdAt);
 

@@ -8,7 +8,9 @@ import type {
   ClientStartRequest,
   AgentResponse,
   AgoraRenewalTokens,
+  StopConversationRequest,
 } from "@/types/conversation";
+import { mirrorVoiceState } from "@/lib/api";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { LoadingSkeleton } from "./LoadingSkeleton";
 import { Button } from "@/components/ui/button";
@@ -116,7 +118,11 @@ export default function VoiceAgentCall() {
       ]);
 
       setRtmClient(rtm);
-      setAgoraData({ ...responseData, agentId: agentData?.agent_id });
+      setAgoraData({
+        ...responseData,
+        agentId: agentData?.agent_id,
+        conversationId: agentData?.conversation_id,
+      });
       setShowConversation(true);
     } catch (err) {
       setError("Failed to start call. Please check your microphone and try again.");
@@ -155,11 +161,16 @@ export default function VoiceAgentCall() {
         await fetch("/api/stop-conversation", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ agent_id: agoraData.agentId }),
+          body: JSON.stringify({
+            agent_id: agoraData.agentId,
+            conversation_id: agoraData.conversationId,
+          } as StopConversationRequest),
         });
       } catch (error) {
         console.error("Error stopping agent:", error);
       }
+    } else if (agoraData?.conversationId) {
+      await mirrorVoiceState(agoraData.conversationId, { close: true });
     }
 
     rtmClient?.logout().catch((err) => console.error("RTM logout error:", err));
@@ -173,7 +184,7 @@ export default function VoiceAgentCall() {
       <div className="flex flex-col h-full absolute inset-0">
         {agentJoinError && (
           <div className="p-3 bg-red-900/30 text-red-400 text-sm text-center">
-            Failed to connect AI agent. The call may not work as expected.
+            Failed to connect the AI agent. Check the server logs (Agora credentials / Conversational AI enablement).
           </div>
         )}
         <Suspense fallback={<LoadingSkeleton />}>
@@ -199,9 +210,10 @@ export default function VoiceAgentCall() {
           <div className="absolute inset-0 bg-blue-500/10 rounded-full"></div>
           <Phone className="w-12 h-12 text-blue-400 z-10" />
         </div>
-        <h2 className="text-2xl font-semibold text-white">AI Voice Assistant</h2>
+        <h2 className="text-2xl font-semibold text-white">Talk to Nexa</h2>
         <p className="text-zinc-400 max-w-xs mx-auto text-sm">
-          Tap the button to start your multilingual call. Speak in Hindi, English, or Hinglish.
+          Tap to call NexaMart support. Speak in Hindi, English, or Hinglish — check an order, cancel,
+          return, change an address, or ask for a human agent.
         </p>
       </div>
 

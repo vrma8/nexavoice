@@ -43,6 +43,11 @@ import {
   type QuickstartAgentMetric,
 } from './QuickstartPipelineMetrics';
 import { QuickstartTranscriptPanel } from './QuickstartTranscriptPanel';
+import { HandoffBanner } from './HandoffBanner';
+import { useConversationSync } from './useConversationSync';
+import { DEFAULT_HUMAN_UID } from '@/lib/agora';
+import { requestEscalation } from '@/lib/api';
+import { Headset } from 'lucide-react';
 import type { ConversationComponentProps } from '@/types/conversation';
 
 // Cap the displayed issues list to avoid overwhelming the UI during a cascade of errors.
@@ -375,6 +380,42 @@ export default function ConversationComponent({
     return getCurrentInProgressMessage(transcript);
   }, [transcript]);
 
+  // Backend sync: mirrors transcript/state for the human dashboard and polls
+  // for escalation / human takeover (state is owned by the backend).
+  const { conversation: backendConversation, supportCase } = useConversationSync({
+    conversationId: agoraData.conversationId,
+    agentUID,
+    localUID: String(client.uid),
+    messageList,
+    agentState,
+  });
+
+  // A human support agent joins the same channel with a well-known uid.
+  const humanUID = String(DEFAULT_HUMAN_UID);
+  const isHumanConnected = useMemo(
+    () => remoteUsers.some((user) => user.uid.toString() === humanUID),
+    [remoteUsers, humanUID],
+  );
+
+  // Manual escalation ("Talk to a human"): same backend path as the AI tool, so
+  // the dashboard receives an identical handoff summary.
+  const [isEscalating, setIsEscalating] = useState(false);
+  const canEscalate =
+    Boolean(agoraData.conversationId) &&
+    !isEscalating &&
+    (backendConversation?.state ?? 'AI_HANDLING') === 'AI_HANDLING';
+  const handleRequestHuman = useCallback(async () => {
+    if (!agoraData.conversationId) return;
+    setIsEscalating(true);
+    try {
+      await requestEscalation(agoraData.conversationId, "Customer pressed 'Talk to a human' during the call");
+    } catch (error) {
+      console.error('Escalation request failed:', error);
+    } finally {
+      setIsEscalating(false);
+    }
+  }, [agoraData.conversationId]);
+
   // Publish local mic once the track exists; usePublish waits for RTC connection.
   usePublish([localMicrophoneTrack]);
 
@@ -470,6 +511,16 @@ export default function ConversationComponent({
 
   return (
     <QuickstartConversationLayout
+      title="NexaVoice · NexaMart support"
+      banner={
+        <HandoffBanner
+          state={backendConversation?.state}
+          caseId={supportCase?.id}
+          humanName={backendConversation?.humanAgentName}
+          isHumanConnected={isHumanConnected}
+          isAgentConnected={isAgentConnected}
+        />
+      }
       statusPanel={
         <ConnectionStatusPanel
           connectionState={connectionState}
@@ -520,6 +571,18 @@ export default function ConversationComponent({
             />
           </div>
           <MicrophoneSelector localMicrophoneTrack={localMicrophoneTrack} />
+          {agoraData.conversationId && (
+            <button
+              type="button"
+              onClick={() => void handleRequestHuman()}
+              disabled={!canEscalate}
+              className="flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              aria-label="Talk to a human agent"
+            >
+              <Headset className="h-3.5 w-3.5" />
+              {(backendConversation?.state ?? 'AI_HANDLING') === 'AI_HANDLING' ? 'Talk to a human' : 'Human requested'}
+            </button>
+          )}
         </div>
       }
       onEndConversation={handleEndConversation}
