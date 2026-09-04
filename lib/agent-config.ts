@@ -27,6 +27,8 @@ export interface BuildAgentOptions {
   conversationId: string;
   /** Shared secret the tool endpoints expect; omitted → tools disabled. */
   toolToken: string | null;
+  /** Public origin the engine calls back into; omitted → tools disabled. */
+  toolsBaseUrl?: string | null;
 }
 
 /** Deepgram nova-3 `multi` transcribes Hindi/English code-switching in one stream. */
@@ -66,7 +68,12 @@ export interface BuiltAgent {
   llmMode: 'agora-managed' | 'custom';
 }
 
-export function buildNexaVoiceAgent({ client, conversationId, toolToken }: BuildAgentOptions): BuiltAgent {
+export function buildNexaVoiceAgent({
+  client,
+  conversationId,
+  toolToken,
+  toolsBaseUrl,
+}: BuildAgentOptions): BuiltAgent {
   const customLlmUrl = process.env.NEXT_LLM_URL?.trim();
   const customLlmKey = process.env.NEXT_LLM_API_KEY?.trim();
   const useCustomLlm = Boolean(customLlmUrl && customLlmKey);
@@ -101,7 +108,10 @@ export function buildNexaVoiceAgent({ client, conversationId, toolToken }: Build
   // Inline REST tools (engine → our /api/agent-tools/* endpoints). Only when the
   // Agora-managed LLM is used AND the deployment is publicly reachable; the
   // custom LLM path executes tools itself.
-  const restTools = !useCustomLlm && toolToken ? buildAgoraRestTools() : null;
+  const restTools =
+    !useCustomLlm && toolToken
+      ? buildAgoraRestTools(toolsBaseUrl ?? undefined)
+      : null;
 
   const agent = new Agent({
     client,
@@ -119,9 +129,14 @@ export function buildNexaVoiceAgent({ client, conversationId, toolToken }: Build
         },
       },
     },
-    // RTM is required for transcript/state events in the browser; enable_tools
-    // is required for the engine to invoke tools.
-    advancedFeatures: { enable_rtm: true, enable_tools: true },
+    // RTM is required for transcript/state events in the browser. enable_tools is
+    // only sent when the session actually has tools: a project without tool
+    // calling enabled rejects (or ignores) the flag, and a session that advertises
+    // tools it never receives leaves the agent silent for a whole turn.
+    advancedFeatures: {
+      enable_rtm: true,
+      ...(restTools && restTools.length > 0 ? { enable_tools: true } : {}),
+    },
     parameters: {
       audio_scenario: 'chorus',
       data_channel: 'rtm',

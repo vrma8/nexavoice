@@ -1,4 +1,4 @@
-> **When to Read This:** Load this when changing how a conversation session starts, renews, or stops, especially across `LandingPage`, `ConversationComponent`, and `app/api/*` routes.
+> **When to Read This:** Load this when changing how a conversation session starts, renews, or stops, especially across `VoiceAgentCall`, `ConversationComponent`, and `app/api/*` routes.
 
 # Conversation Lifecycle
 
@@ -15,8 +15,8 @@ The correctness target is single-init, predictable teardown, and no leaked RTM/R
 
 ## Detailed Start Sequence
 
-1. User clicks start in `QuickstartPreCallCard`.
-2. `LandingPage.handleStartConversation` calls `GET /api/generate-agora-token`.
+1. User clicks start in `VoiceAgentCall`.
+2. `VoiceAgentCall.handleStartCall` calls `GET /api/generate-agora-token` (the response also carries the App ID the browser must join with).
 3. In parallel:
 - `POST /api/invite-agent` starts managed agent session.
 - RTM client is created, logs in with token, subscribes to channel.
@@ -59,7 +59,7 @@ Breaking this guard causes duplicate client/track/toolkit initialization pattern
 
 ## Cross-File Dependencies
 
-- `components/LandingPage.tsx`: bootstrap orchestration and renewal callback.
+- `components/VoiceAgentCall.tsx`: bootstrap orchestration, RTM setup and renewal callback.
 - `components/ConversationComponent.tsx`: join/toolkit/mic runtime behavior.
 - `app/api/generate-agora-token/route.ts`: RTM-capable token minting.
 - `app/api/invite-agent/route.ts`: agent pipeline config.

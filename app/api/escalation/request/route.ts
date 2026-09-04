@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { appendMessage, getCase, getConversation } from '@/lib/support/store';
 import { executeTool } from '@/lib/support/tools';
+import { withStore } from '@/lib/support/route-store';
+
+/** Builds the handoff summary and writes the durable store. */
+export const maxDuration = 30;
 
 /**
  * POST /api/escalation/request { conversation_id, reason? }
@@ -9,7 +13,7 @@ import { executeTool } from '@/lib/support/tools';
  * same `escalate_to_human` tool the AI uses, so the case + handoff summary are
  * built identically.
  */
-export async function POST(request: NextRequest) {
+async function handlePost(request: NextRequest) {
   let body: { conversation_id?: string; reason?: string };
   try {
     body = await request.json();
@@ -52,3 +56,7 @@ export async function POST(request: NextRequest) {
     conversation: getConversation(conversation.id),
   });
 }
+
+// Bracketed by withStore so the durable store mirror is read before the
+// handler runs and written back before the response is flushed (serverless).
+export const POST = withStore(handlePost);

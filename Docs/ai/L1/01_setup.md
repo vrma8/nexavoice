@@ -70,7 +70,7 @@ Requires env/project binding:
 ## Local Run Notes
 
 - App + API routes run at `http://localhost:3000`.
-- Session starts from `QuickstartPreCallCard` (`Try it now`) and bootstraps token + RTM + invite flow.
+- Session starts from `VoiceAgentCall` (`Start Call` on `/client/voice`) and bootstraps token + RTM + invite flow. The `components/LandingPage.tsx` / `QuickstartPreCallCard.tsx` pair from the upstream quickstart was removed: it was an unused second bootstrap path that never registered a conversation, so escalation and transcript mirroring could not work through it.
 - If transcript or agent join fails, first run `agora project doctor --deep`.
 
 ## CI Expectations
@@ -87,6 +87,11 @@ Requires env/project binding:
 | Transcript missing | RTM token capability missing | Token route implementation | Ensure `buildTokenWithRtm` remains unchanged |
 | `verify` fails at doctor | Project not bound | `agora project use` output | Re-bind project and rewrite `.env.local` |
 | Mic publishes but no agent response | Agent start failed | UI warning (`agentJoinError`) | Inspect `/api/invite-agent` response |
+| Chat "Conversation not found", or the agent re-asks for the phone number every turn | Each Vercel function got its own in-memory store | `GET /api/health` → `store.backend` is `memory` | Create a Vercel Blob store (sets `BLOB_READ_WRITE_TOKEN`), or `NEXAVOICE_STORE=file` for one container |
+| Voice banner stays on "Connecting…" / call never joins with no error | App ID absent from the client bundle (`NEXT_PUBLIC_*` inlined at build time) or the join error was swallowed | `GET /api/health` → `agora.appId`; the banner now renders the `useJoin` error | Tick **Build** for `NEXT_PUBLIC_AGORA_APP_ID`, or rely on the `appId` served by `/api/generate-agora-token` |
+| Agent answers without looking up orders | Engine could not reach the tool URL | `GET /api/health` → `agent.tools` (`enabled`, `baseUrl`, `secretSource`) | Expose the app over https (Vercel URL / ngrok) and set `AGENT_TOOLS_BASE_URL` |
+| Chat answers look canned, no free discussion | No LLM configured — the rule-based agent is active | `GET /api/health` → `agent.llm` is `agora-managed` | Set `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` (and `NEXT_LLM_MODEL`) |
+| `Agent invite failed: fetch failed` | Region mismatch with the Agora project | `AGORA_AREA`, `agora project doctor --deep` | Set `AGORA_AREA` to the project region (`US`/`EU`/`AP`) |
 
 ## Local-Only vs Deploy-Specific
 
@@ -100,6 +105,17 @@ Vercel:
 
 - Requires environment vars configured per environment scope.
 - Keep `NEXT_AGORA_APP_CERTIFICATE` private server variable.
+- Tick **Build** for `NEXT_PUBLIC_AGORA_APP_ID` as well as Development/Preview/Production:
+  it is inlined into the client bundle, and a Runtime-only value leaves the browser with
+  `undefined` (the app then relies on the `appId` returned by `/api/generate-agora-token`).
+- Create a Blob store (Project → Storage → Create Database → Blob) so conversation and
+  case state are shared between function instances; `BLOB_READ_WRITE_TOKEN` is injected
+  and `lib/support/persist.ts` picks it up automatically. Without it the chat cannot
+  complete a second turn.
+- Set `AGORA_AREA` when the project is not in the `US` area, and `NEXT_LLM_URL` +
+  `NEXT_LLM_API_KEY` to replace the rule-based chat agent with the LLM one.
+- Check the deployment with `curl https://<deployment>/api/health` — it reports
+  credential presence, tool wiring, LLM provider and the store backend, never a secret.
 - Use `pnpm run build` locally before pushing deployment changes.
 
 ## Setup Change Checklist

@@ -15,13 +15,15 @@ If start fails, run `agora project doctor --deep`.
 
 ## Run the NexaVoice demo end to end
 
-1. Customer: open `/client/chat` (works fully offline from Agora) or `/client/voice` (needs Agora credentials; voice tools need `AGENT_TOOLS_BASE_URL` + `AGENT_TOOLS_SECRET`).
+1. Customer: open `/client/chat` (works fully offline from Agora — LLM-driven when `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` are set, rule-based otherwise) or `/client/voice` (needs Agora credentials; voice tools need no extra config on an https origin).
 2. Verify with a demo mobile number (`9876543210`, `9123456780`, `9988776655`), ask for an order status, cancel/return with confirmation, or say "talk to a human".
 3. Human: open `/support-agent` in another tab — the case appears instantly with the handoff summary and customer details; accept it.
 4. Chat: reply from `/support-agent/cases/<id>`; the customer sees `human_agent` messages in the same chat. Voice: click **Join the customer's call** — the AI says the handover line and leaves; talk directly.
 5. Mark resolved. The customer UI shows the resolved banner.
 
-For local voice tool calls expose the dev server publicly (e.g. `ngrok http 3000`) and set `AGENT_TOOLS_BASE_URL` to that https URL before starting a call.
+For local voice tool calls expose the dev server publicly (e.g. `ngrok http 3000`) and set `AGENT_TOOLS_BASE_URL` to that https URL before starting a call — tools are skipped when the engine would have to reach `localhost`.
+
+To exercise the serverless state path locally, run `NEXAVOICE_STORE=file pnpm build && pnpm start`: separate processes then share `.data/nexavoice-store.json`, the way Vercel instances share the Blob store. `pnpm run dev` keeps one in-process store, which is why state bugs do not reproduce there.
 
 ## Change Agent Behavior
 
@@ -81,6 +83,13 @@ Bootstrap behavior:
 3. Follow [from_scratch_bootstrap.md](L2/from_scratch_bootstrap.md) for the implementation map and checklist.
 4. Preserve the recipe invariants in `docs/ai/RECIPE.md`.
 5. Run the verification commands before publishing a derivative.
+
+## Workflow: Add a Route That Touches Support State
+
+1. Write the handler, then wrap it: `export const GET = withStore(async (request, context) => { … })` (`lib/support/route-store.ts`). It hydrates the durable mirror before the handler and flushes it after; a route that skips the bracket works in `pnpm run dev` and loses state on Vercel.
+2. Do not call `flushStore()` yourself, and never from a `setTimeout`/`after()` — a frozen instance drops scheduled writes. Only a best-effort read (dashboard SSE) may call `hydrateStore()` directly.
+3. New store fields must be added to `toSnapshot()`/`applySnapshot()` in `lib/support/snapshot.ts`, or they never cross instances.
+4. Give the route `export const maxDuration` within the plan's limit, and add a contract test in `scripts/verify-api-contracts.ts` (it asserts the bracket exists and that no handler flushes by hand).
 
 ## Workflow: Add a New API Route
 

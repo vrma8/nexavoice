@@ -38,7 +38,7 @@ Notes:
 ## Initial Distribution
 
 ```
-Browser (LandingPage)
+Browser (VoiceAgentCall)
   └─▶ GET /api/generate-agora-token
         └─▶ { token, uid, channel }
               ├─▶ useJoin(uid, token, channel)   ← RTC

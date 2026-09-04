@@ -8,6 +8,25 @@
 - Removing `isReady` guard can trigger StrictMode double-initialization and duplicate/missing tracks.
 - Manual `client.leave()` conflicts with `useJoin` cleanup contract.
 - Manual `localMicrophoneTrack.close()` conflicts with hook-owned lifecycle.
+- **The store is per process.** `globalThis.supportDb` is shared by every route under
+  `pnpm dev`, so cross-instance state bugs never reproduce locally. Wrap every support
+  handler in `withStore()` (`lib/support/route-store.ts`); never write state from a
+  `setTimeout` or `after()` — Vercel freezes a function between requests, so the write
+  is lost.
+- **No hydration TTL.** Consecutive requests from one browser land on different
+  instances; skipping a read because "we just synced" answers the next turn from stale
+  state (the customer is asked for their phone number again).
+- **Anything added to `lib/support/types.ts` must be mirrored** in
+  `lib/support/snapshot.ts`'s `toSnapshot()`/`applySnapshot()`, or it works locally and
+  vanishes on a serverless deployment.
+- **`NEXT_PUBLIC_*` is a build-time value.** On a Runtime-only Vercel deployment the
+  client bundle receives `undefined`, and a join with an empty App ID fails without a
+  message. Serve the App ID from `/api/generate-agora-token` (`resolveAppId`) instead.
+- **`maxDuration` is per route** and must fit the plan (non-Fluid default 10 s, Hobby
+  cap 300 s). A value above the plan cap builds fine and fails at runtime, which is why
+  `chat/completions` is 60 s, not 300 s.
+- **SSE needs `dynamic = 'force-dynamic'`** and a finite lifetime, or the prerenderer
+  tries to run the never-ending stream at build time.
 
 ## Transcript Pitfalls
 

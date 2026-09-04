@@ -102,8 +102,15 @@ function pick(lang: Lang, copy: Copy): string {
 }
 
 const RE = {
+  /**
+   * An explicit request to reach a person. Deliberately narrow: the previous
+   * version matched bare nouns ("agent", "person", "manager", "call me"), so a
+   * customer writing "the delivery agent did not come" was escalated on their
+   * first message instead of being helped. Escalation now needs a request verb
+   * next to a person-noun.
+   */
   human:
-    /\b(human|agent|person|representative|executive|manager|someone|insaan|aadmi|kisi se|baat karao|baat karwao|baat karna hai|call me|talk to (a|an|someone))\b|इंसान|एजेंट|किसी से बात/i,
+    /\b(talk|speak|connect|transfer|put|need|want|give)\s+(me\s+)?(to|with)?\s*(a|an|some|this)?\s*(human|real|live|support|customer[- ]care|executive|representative|agent|manager|person)\b|\b(human|live)\s+(agent|support|executive|representative)\b|\bescalate(\s+(to|me))?\b|\bagent\s+na\s+(milegi|nahi\s+mili)\b|\b(insaan|insan|aadmi|human|agent|manager|executive|support|customer[- ]care|representative)\s+(se|sa|ki)\s+baat\b|\bbaat\s+(karao|karwao)\b|इंसान\s+से\s+बात|एजेंट\s+से\s+बात|किसी\s+से\s+बात|बड़ा\s+अफसर|शिकायत\s+अधिकारी/i,
   cancel: /\b(cancel|cancle|radd|rad kar|band karo|nahi chahiye)\b|रद्द|कैंसिल/i,
   ret: /\b(return|wapas|wapis|refund|exchange|lautana|lauta)\b|वापस|रिटर्न|रिफंड/i,
   address: /\b(address|pata|location|deliver(y)? (to|at|par)|ghar badal|badalna|change)\b|पता|एड्रेस/i,
@@ -297,7 +304,7 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
       if (!outcome.ok) {
         const misses = (ctx().misunderstandings ?? 0) + 1;
         setCtx({ misunderstandings: misses });
-        if (misses >= 2) return escalate('Could not verify the customer by phone number after two attempts', ctx().intent ?? 'verification', ['verified phone number']);
+        if (misses >= 3) return escalate('Could not verify the customer by phone number after three attempts', ctx().intent ?? 'verification', ['verified phone number']);
         return pick(lang, {
           en: `I couldn't find an account for ${phone}. Could you re-check the registered mobile number?`,
           hi: `${phone} के लिए कोई खाता नहीं मिला। कृपया पंजीकृत मोबाइल नंबर दोबारा जाँचें।`,
@@ -451,7 +458,18 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
       }
       const misses = (ctx().misunderstandings ?? 0) + 1;
       setCtx({ misunderstandings: misses });
-      if (misses >= 2) return escalate('Could not understand the customer request after two attempts', ctx().intent ?? 'other');
+      // Escalate only after a real dead end, and offer it before taking it:
+      // silently opening a case reads to the customer as the bot giving up.
+      if (misses >= 3) {
+        return escalate('Could not understand the customer request after three attempts', ctx().intent ?? 'other');
+      }
+      if (misses === 2) {
+        return pick(lang, {
+          en: 'I\'m not sure I followed that. I can check an order, cancel or return one, change the delivery address, or raise a ticket — and if you\'d rather talk to a person, just say "talk to a human".',
+          hi: 'मैं ठीक से समझ नहीं पाई। मैं ऑर्डर देख सकती हूँ, रद्द या रिटर्न कर सकती हूँ, पता बदल सकती हूँ, या टिकट बना सकती हूँ — और अगर आप किसी इंसान से बात करना चाहती हैं तो बस "इंसान से बात" लिख दें।',
+          hinglish: "Main theek se samajh nahi payi. Main order check, cancel ya return kar sakti hoon, address change kar sakti hoon, ya ticket bana sakti hoon — aur agar aap kisi insaan se baat karna chahte hain to bas 'talk to a human' boliye.",
+        });
+      }
       return pick(lang, {
         en: 'I can check order status, cancel or return an order, change a delivery address, or raise a ticket. What would you like to do?',
         hi: 'मैं ऑर्डर स्थिति देख सकती हूँ, ऑर्डर रद्द या वापस कर सकती हूँ, पता बदल सकती हूँ, या टिकट बना सकती हूँ। आप क्या करना चाहेंगे?',

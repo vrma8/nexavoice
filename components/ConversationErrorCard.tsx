@@ -2,7 +2,9 @@ import React from 'react';
 
 export type ConnectionIssue = {
   id: string;
-  source: 'rtm' | 'agent' | 'rtm-signaling';
+  /** 'rtc' = the browser's own join/publish path, 'rtm' = transcript channel,
+   *  'agent' = engine-reported error, 'session' = agent never arrived / config. */
+  source: 'rtc' | 'rtm' | 'agent' | 'rtm-signaling' | 'session';
   agentUserId: string;
   code: string | number;
   message: string;

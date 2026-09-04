@@ -8,9 +8,9 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: 'Talk to your voice agent | Agora',
+  title: 'NexaVoice — AI support that hands off to a human',
   description:
-    "Next.js quickstart: real-time voice agent with live transcript, streaming audio, and low latency from Agora's Conversational AI Engine—API routes in one repo.",
+    'NexaMart support agent: voice and chat with backend tool access, an escalation queue, and live human takeover — built on Agora Conversational AI.',
   icons: {
     icon: [
       { url: '/favicon.ico' },

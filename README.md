@@ -97,7 +97,36 @@ agora project env write .env.local
 rg "^(NEXT_PUBLIC_AGORA_APP_ID|NEXT_AGORA_APP_CERTIFICATE)=" .env.local
 ```
 
-Copy those two values into Vercel Project Settings -> Environment Variables.
+Copy those two values into Vercel Project Settings → Environment Variables. Mark
+`NEXT_PUBLIC_AGORA_APP_ID` for **both** Build and Runtime environments — the browser
+bundle reads it at build time, while the API routes read it at runtime. (The app now
+also serves the App ID from `GET /api/generate-agora-token`, so a Runtime-only value
+still lets voice calls connect.)
+
+### Two things a Vercel deployment needs that local dev does not
+
+1. **Shared conversation state.** `lib/support/store.ts` is a per-process memory
+   cache. Vercel runs every route as an independent function instance, so a
+   conversation created by `POST /api/conversations` is invisible to the next
+   request — the chat answers "Conversation not found", forgets the verified
+   customer, and the dashboard stays empty. Create a store so state is mirrored:
+   **Project → Storage → Create Database → Blob**. `BLOB_READ_WRITE_TOKEN` is
+   injected automatically and the app detects it; no other setting is needed.
+   (`NEXAVOICE_STORE=file` covers a single Docker container instead.)
+2. **An outbound URL the Agora engine can call back into** for voice tools. This
+   is taken from the origin the invite request arrived on, so a Vercel URL or a
+   tunnel needs no configuration, and the shared secret is derived from the App
+   Certificate when `AGENT_TOOLS_SECRET` is unset.
+
+Then check `https://<your-deployment>/api/health` (safe to open in a browser — it
+reports booleans and a masked App ID, never a secret). It says whether the Agora
+credentials loaded, whether the client bundle was built with the App ID
+(`agora.publicAppIdInlined`), whether voice tools are wired up, which LLM the agent is
+using, and whether state is shared across instances (`store.backend`):
+
+```bash
+curl -s https://<your-deployment>/api/health | jq '{status, agora, tools: .agent.tools, store}'
+```
 
 ### Environment variables
 
@@ -105,18 +134,33 @@ Defined in [`env.local.example`](env.local.example).
 
 | Variable                     | Required | Notes                                                                                                                                                                   |
 | ---------------------------- | :------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXT_PUBLIC_AGORA_APP_ID`   |    ✅    | Agora Console → Project → App ID.                                                                                                                                       |
+| `NEXT_PUBLIC_AGORA_APP_ID`   |    ✅    | Agora Console → Project → App ID. Needs the **Build** environment enabled, not just Runtime.                                                                           |
 | `NEXT_AGORA_APP_CERTIFICATE` |    ✅    | Agora Console → Project → App Certificate. **Server-side only.**                                                                                                        |
-| `AGENT_TOOLS_BASE_URL`       | voice tools | Public **https** URL of this deployment (e.g. `https://nexavoice.vercel.app` or an ngrok tunnel). The Agora engine calls `${AGENT_TOOLS_BASE_URL}/api/agent-tools/*`. Falls back to `VERCEL_URL`. |
-| `AGENT_TOOLS_SECRET`         | voice tools | Shared secret (≥ 8 chars) the engine sends as `x-nexavoice-tool-token`. Tools are disabled (agent answers without backend access) when either var is missing.        |
-| `AGORA_AREA`                 |    –     | `US` (default), `EU` or `AP` — Agora REST region.                                                                                                                       |
+| `BLOB_READ_WRITE_TOKEN`      | serverless state | Set automatically by a Vercel Blob store. Without it conversation state lives per instance (fine for `pnpm dev`, broken on Vercel). |
+| `NEXAVOICE_STORE`            |    –     | `memory` \| `file` \| `blob`. Auto-detected: `blob` when `BLOB_READ_WRITE_TOKEN` exists, otherwise `memory`. |
+| `NEXAVOICE_BLOB_ACCESS`      |    –     | `public` (default) or `private`, matching how the Blob store was created. |
+| `AGENT_TOOLS_BASE_URL`       |    –     | Override the public **https** URL the Agora engine calls back into (`${URL}/api/agent-tools/*`). Defaults to the request origin, then `VERCEL_URL`. |
+| `AGENT_TOOLS_SECRET`         |    –     | Shared secret (≥ 8 chars) the engine sends as `x-nexavoice-tool-token`. Unset → derived from the App Certificate, so tools still work on a fresh deployment. |
+| `AGORA_AREA`                 |    –     | `US` (default), `EU` or `AP` — Agora REST region. Must match the project's region or the agent never starts.                                                           |
 | `AGENT_LANGUAGE`             |    –     | Turn-detection / interaction locale: `en-IN` (default), `hi-IN`, `bn-IN`, `ta-IN`, `te-IN`, `gu-IN`, `kn-IN`, `en-US`.                                                   |
 | `AGENT_STT_LANGUAGE`         |    –     | Deepgram language, default `multi` (Hindi/English code-switching).                                                                                                      |
 | `AGENT_TTS_VOICE_ID`         |    –     | MiniMax voice id, default `English_captivating_female1`.                                                                                                                |
 | `NEXT_LLM_URL` / `NEXT_LLM_API_KEY` | – | OpenAI-compatible LLM. Enables the LLM chat agent and routes the voice agent through `/api/chat/completions` (custom LLM with server-side tools). Without them the chat uses a built-in rule-based agent and the voice agent uses Agora-managed OpenAI. |
 | `NEXT_LLM_MODEL`             |    –     | Model for the BYOK LLM (default `gpt-4o-mini`).                                                                                                                         |
 
-The agent pipeline in [`lib/agent-config.ts`](lib/agent-config.ts) uses Agora-managed Deepgram STT, OpenAI LLM and MiniMax TTS, so no vendor keys are required. The Conversational AI feature and Agora-managed vendors must be enabled on the Agora project (`agora project doctor --deep`).
+The agent pipeline in [`lib/agent-config.ts`](lib/agent-config.ts) uses Agora-managed Deepgram STT, OpenAI LLM and MiniMax TTS, so no vendor keys are required. The Conversational AI feature and Agora-managed vendors must be enabled on the Agora project (`agora project doctor --deep`). Without `NEXT_LLM_*`, chat is answered by the deterministic rule-based agent in [`lib/chat-agent.ts`](lib/chat-agent.ts) — it covers the demo flows (verify → orders → cancel/return/address → ticket → escalation) with fixed copy, so free-form questions get a "what can I do" reply rather than an LLM answer.
+
+### Troubleshooting a deployment
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| Voice call starts, then nothing; "The AI agent could not join this call" | `invite-agent` error, now surfaced in the banner | Read the message + `/api/health`; run `agora project doctor --deep` |
+| Agent never speaks but an `agent_id` came back | Conversational AI not enabled for the App ID | Agora Console → project → All features → **Conversational AI** |
+| Call never connects, no error at all | App ID missing from the client bundle | Enable `NEXT_PUBLIC_AGORA_APP_ID` for **Build** and redeploy (the token route now also serves it) |
+| Chat says "Conversation not found" / forgets the phone number between turns | No shared state backend | Create a Vercel Blob store |
+| Agent talks but never looks up orders | Engine cannot reach `/api/agent-tools/*` | Check `agent.tools` in `/api/health`; needs a public https URL (Vercel URL, ngrok, cloudflared) |
+| Chat answers look canned | `NEXT_LLM_*` not set → rule-based agent | Set `NEXT_LLM_URL` / `NEXT_LLM_API_KEY` |
+| Dashboard shows nothing while a call is live | State not shared (see above) | Blob store; SSE is best-effort — the 3s poll reads the mirror |
 
 ## Commands
 

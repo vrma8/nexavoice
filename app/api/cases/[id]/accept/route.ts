@@ -3,6 +3,10 @@ import { RtcTokenBuilder, RtcRole } from 'agora-token';
 import { getAgoraCredentials } from '@/lib/agora-server';
 import { acceptCase, getCase, getConversation } from '@/lib/support/store';
 import { DEFAULT_AGENT_UID, DEFAULT_HUMAN_UID } from '@/lib/agora';
+import { withStore } from '@/lib/support/route-store';
+
+/** Token minting plus a durable store read/write. */
+export const maxDuration = 30;
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -14,7 +18,7 @@ type Params = { params: Promise<{ id: string }> };
  * dashboard can join the call (v1.md §19). The AI agent is stopped separately
  * by /api/cases/:id/takeover once the human has actually joined.
  */
-export async function POST(request: NextRequest, { params }: Params) {
+async function handlePost(request: NextRequest, { params }: Params) {
   const { id } = await params;
   let body: { agentName?: string } = {};
   try {
@@ -31,7 +35,7 @@ export async function POST(request: NextRequest, { params }: Params) {
   const supportCase = acceptCase(id, agentName)!;
   const conversation = getConversation(supportCase.conversationId);
 
-  let voice: { token: string; uid: string; channel: string; agentUid: string } | null = null;
+  let voice: { token: string; uid: string; channel: string; agentUid: string; appId: string } | null = null;
   if (conversation?.mode === 'VOICE' && conversation.channel) {
     const { appId, appCertificate } = getAgoraCredentials();
     const expiresAt = Math.floor(Date.now() / 1000) + 3600;
@@ -49,8 +53,15 @@ export async function POST(request: NextRequest, { params }: Params) {
       uid: String(DEFAULT_HUMAN_UID),
       channel: conversation.channel,
       agentUid: String(DEFAULT_AGENT_UID),
+      // Same reason as /api/generate-agora-token: the human agent's browser must not
+      // depend on a build-time-inlined App ID to be able to join the call.
+      appId,
     };
   }
 
   return NextResponse.json({ case: supportCase, conversation, voice });
 }
+
+// Bracketed by withStore so the durable store mirror is read before the
+// handler runs and written back before the response is flushed (serverless).
+export const POST = withStore(handlePost);

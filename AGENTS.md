@@ -30,9 +30,9 @@ The sections below (Start Here, Patterns, Anti-Patterns, etc.) remain the canoni
 - Toolkit core: `agora-agent-client-toolkit` for `AgoraVoiceAI`, transcript helpers, and turn status
 - UI components: `agora-agent-uikit` for visualizer, transcript, and mic controls
 - Server SDK: `agora-agents` for managed agent session startup, `stopAgent`, and `agents.speak` (handover line)
-- API routes in `app/api`: token, invite/stop agent, REST tool endpoint for the engine, custom-LLM proxy, conversations/messages (chat), escalation, cases (accept/takeover/resolve), dashboard (+SSE), demo shop
-- Support domain in `lib/support` (conversation/case store, guarded `executeTool`, handoff summary) and demo shop in `lib/shop` (data + business rules). In-memory, `globalThis`-scoped; resets on restart.
-- Default agent config (`lib/agent-config.ts`): Agora-managed Deepgram STT (`multi`), OpenAI `gpt-4o-mini`, MiniMax TTS; NexaMart system prompt in `lib/agent-prompt.ts`; inline REST tools from `lib/agent-tools.ts`. `.env.local` needs only Agora credentials; tools additionally need `AGENT_TOOLS_BASE_URL` + `AGENT_TOOLS_SECRET`.
+- API routes in `app/api`: token, invite/stop agent, REST tool endpoint for the engine, custom-LLM proxy, conversations/messages (chat), escalation, cases (accept/takeover/resolve), dashboard (+SSE), demo shop, health (deployment self-check)
+- Support domain in `lib/support` (conversation/case store, guarded `executeTool`, handoff summary) and demo shop in `lib/shop` (data + business rules). The store is an in-memory cache on `globalThis`, mirrored to a durable backend (Vercel Blob, or a file for a single container) so state survives across serverless instances — `lib/support/persist.ts` + `snapshot.ts` own that layer.
+- Default agent config (`lib/agent-config.ts`): Agora-managed Deepgram STT (`multi`), OpenAI `gpt-4o-mini`, MiniMax TTS; NexaMart system prompt in `lib/agent-prompt.ts`; inline REST tools from `lib/agent-tools.ts`. `/api/health` reports the deployment self-check. `.env.local` needs only Agora credentials — `AGENT_TOOLS_BASE_URL`/`AGENT_TOOLS_SECRET` are optional now (tool origin comes from the request URL, the secret is derived from the App Certificate).
 - Chat: `lib/chat-agent.ts` — LLM (`ai` + `@ai-sdk/openai`) when `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` are set, otherwise a rule-based EN/HI/Hinglish agent over the same tools.
 - Human dashboard: `components/SupportDashboard.tsx` (SSE + 3s poll of `/api/dashboard`), `components/CaseWorkspace.tsx` (+ `HumanVoiceBridge.tsx` joins the customer's RTC channel as uid `654321`, then `POST /api/cases/:id/takeover` makes the AI hand over and leave).
 
@@ -47,9 +47,12 @@ The sections below (Start Here, Patterns, Anti-Patterns, etc.) remain the canoni
 ### Vercel Deployment
 
 - Deploy the repository as a single Next.js app.
-- Set `NEXT_PUBLIC_AGORA_APP_ID` and `NEXT_AGORA_APP_CERTIFICATE` in the deployment target.
-- Keep `NEXT_AGORA_APP_CERTIFICATE` server-side only.
-- For voice tools set `AGENT_TOOLS_SECRET` and (unless `VERCEL_URL` is enough) `AGENT_TOOLS_BASE_URL` to the public https origin; the Agora engine must be able to reach `/api/agent-tools/*`.
+- Set `NEXT_PUBLIC_AGORA_APP_ID` and `NEXT_AGORA_APP_CERTIFICATE` in the deployment target; keep `NEXT_AGORA_APP_CERTIFICATE` server-side only.
+- Give `NEXT_PUBLIC_AGORA_APP_ID` the **Build** environment too: a Runtime-only value is inlined as `undefined` into the client bundle. The client falls back to the `appId` returned by `/api/generate-agora-token`, but `/client` (toolkit path) reads the build-time var.
+- Create a **Vercel Blob store** (Project → Storage → Create Database → Blob) so `BLOB_READ_WRITE_TOKEN` exists and conversation/case state is shared between function instances. Without it, the second chat request lands on an instance that never saw the conversation and answers "Conversation not found".
+- Voice tools need the Agora engine to reach `/api/agent-tools/*`; the deployment origin is used automatically and `AGENT_TOOLS_BASE_URL` / `AGENT_TOOLS_SECRET` only override it. A custom `asr.llmTools` object in the `POST /api/invite-agent` body must carry the same `toolsUrl`/`toolsSecret`, because those values are generated server-side.
+- Each Vercel function needs a `maxDuration` (exported per route) that fits the plan: without Fluid compute the default is 10s, which cuts `invite-agent` and a streamed LLM turn off mid-flight.
+- Check a deployment with `curl https://<deployment>/api/health` — credential state, tool wiring, LLM provider and store backend, without leaking secrets.
 
 ## Routing / Ownership
 
@@ -126,6 +129,35 @@ useEffect(() => {
 
 `isReady` becomes true only after the StrictMode fake-unmount cycle completes. Once `isReady` is true, React does not double invoke the effect for later dependency changes such as `joinSuccess` becoming true.
 
+### Durable Store Bracket (`withStore`)
+
+Any handler that reads or writes `supportDb()` is wrapped in `withStore()`
+(`lib/support/route-store.ts`): it hydrates the shared snapshot before the handler
+runs and flushes it afterwards. Both halves matter — without the hydration a warm
+instance answers from a stale copy, and without the flush the write never leaves the
+instance. `flushStore()` must never be called from a handler, a `setTimeout`, or
+`after()`: Vercel freezes a function between requests, so scheduled writes are lost;
+`scripts/verify-api-contracts.ts` enforces this.
+
+There is deliberately no "hydrated recently, skip the read" cache. Consecutive
+requests from one browser land on different instances, so any TTL makes the next turn
+see stale state (the customer is asked for their phone number again). `hydrateStore()`
+reads on every request and coalesces concurrent reads on one instance instead.
+Anything new in the store must round-trip through `toSnapshot()`/`applySnapshot()` in
+`lib/support/snapshot.ts` — that list is the contract; unlisted fields work locally
+and vanish on Vercel.
+
+### Client App ID (`resolveAppId`)
+
+`/api/generate-agora-token` and `/api/cases/[id]/accept` return `appId` next to the
+token — the single source of truth for what the browser joins with — resolved by
+`resolveAppId()` in `lib/agora.ts`. Client components use that value and only fall
+back to `process.env.NEXT_PUBLIC_AGORA_APP_ID`, which is a build-time inlining and
+empty on a Runtime-only Vercel deployment. `useJoin`'s `error`, the toolkit's
+`joinFromToken` message, and an `invite-agent` non-2xx body are all surfaced in the
+UI (`useAgoraError`, `joinFailure`, `lastError`); keep them wired so a failed call
+says what failed instead of hanging on "Connecting…".
+
 ### Transcript and UI Mapping
 
 - Manage `transcript` and `agentState` through `useState` plus `ai.on(TRANSCRIPT_UPDATED, ...)` and `ai.on(AGENT_STATE_CHANGED, ...)`.
@@ -192,6 +224,14 @@ pnpm run build
 - Do not use the deprecated `turnDetection.type: 'agora_vad'` flat API; use `turnDetection.config.start_of_speech` and `turnDetection.config.end_of_speech`.
 - Do not replace `RtcTokenBuilder.buildTokenWithRtm` with an RTC-only token builder.
 - Do not hide SDK requirements only in `CLAUDE.md`; all agent-facing guidance belongs in `AGENTS.md`.
+- Do not read `supportDb()` in a route handler outside `withStore()`, and do not call
+  `flushStore()` from a timer, `after()`, or a handler — the write only survives on a
+  serverless platform when it is awaited inside the request.
+- Do not add a store field to `lib/support/` without mirroring it in
+  `toSnapshot()`/`applySnapshot()`.
+- Do not decide the browser's App ID from `process.env.NEXT_PUBLIC_AGORA_APP_ID` in a
+  client component; take `appId` from the token/accept response via `resolveAppId()`.
+- Do not swallow `useJoin`/`joinFromToken`/`invite-agent` errors into a console warning.
 
 ## Done Criteria
 
