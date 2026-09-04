@@ -1066,6 +1066,137 @@ async function verifyDemoSeedFixture() {
   }
 }
 
+/**
+ * The demo shop is process-local global state, so a cancellation made on one serverless
+ * instance used to be invisible to the next — the customer was told "cancelled" and the
+ * following turn (or the human dashboard) still read the order as PLACED. It now rides in
+ * the same mirror as conversations, with one rule that needs pinning: a record this
+ * instance actually wrote wins a tie, so a freshly seeded copy cannot clobber a real
+ * cancellation back to pristine fixture data.
+ */
+async function verifyShopWritesAreMirrored() {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const { resetSupportDb, resetPersistenceClient, hydrateStore, flushStore, appendMessage, createConversation } =
+    await import('../lib/support/store');
+  const { cancelOrder, getOrder } = await import('../lib/shop/service');
+  const { getShopDb, resetShopDb } = await import('../lib/shop/data');
+
+  const name = `shop-check-${process.pid}.json`;
+  const file = path.join(process.cwd(), '.data', name);
+  const previousStore = process.env.NEXAVOICE_STORE;
+  const previousFile = process.env.NEXAVOICE_STORE_FILE;
+  process.env.NEXAVOICE_STORE = 'file';
+  process.env.NEXAVOICE_STORE_FILE = name;
+  resetPersistenceClient();
+  resetSupportDb();
+  resetShopDb();
+  await fs.rm(file, { force: true });
+
+  const doc = async () =>
+    JSON.parse(await fs.readFile(file, 'utf8')) as {
+      shop: { orders: { id: string; status: string; cancellationReason?: string }[] };
+    };
+  const statusOf = async (id: string) =>
+    (await doc()).shop.orders.find((order) => order.id === id)?.status;
+
+  try {
+    // Instance A cancels and flushes.
+    createConversation({ id: 'conv_shop_check', mode: 'CHAT' });
+    assert(cancelOrder('cust_rahul', 'NM-10023', 'faulty item').ok, 'NM-10023 should be cancellable');
+    await flushStore();
+    assert((await statusOf('NM-10023')) === 'CANCELLED', 'a cancellation must reach the shared document');
+
+    // Instance B is cold: freshly seeded, no memory of A.
+    resetSupportDb();
+    resetShopDb();
+    assert(getOrder('NM-10023')?.status === 'PLACED', 'a fresh seed starts un-cancelled');
+    await hydrateStore();
+    assert(getOrder('NM-10023')?.status === 'CANCELLED', 'a cold instance must see the other instance\'s cancellation');
+    assert(getOrder('NM-10021')?.status === 'SHIPPED', 'unrelated orders survive the merge');
+    assert(getShopDb().customers.size >= 3, 'customers should still be present after a merge');
+
+    // B writes its own change: both cancellations must end up in the document, and a
+    // record B merely read must not be reverted to B's pristine seed.
+    assert(cancelOrder('cust_amit', 'NM-10035', 'ordered the wrong size').ok, 'NM-10035 should be cancellable');
+    appendMessage('conv_shop_check', 'ai', 'Noted — that order is cancelled too.');
+    await flushStore();
+    assert((await statusOf('NM-10023')) === 'CANCELLED', 'A\'s write must not be clobbered by B');
+    assert((await statusOf('NM-10035')) === 'CANCELLED', 'B\'s own write must be published');
+
+    // A third cold instance sees both.
+    resetSupportDb();
+    resetShopDb();
+    await hydrateStore();
+    assert(
+      getOrder('NM-10023')?.status === 'CANCELLED' && getOrder('NM-10035')?.status === 'CANCELLED',
+      'every instance should converge on the same shop state',
+    );
+    console.log('shop state: mirrored across instances, local writes win ties');
+  } finally {
+    await fs.rm(file, { force: true });
+    resetShopDb();
+    if (previousStore === undefined) delete process.env.NEXAVOICE_STORE;
+    else process.env.NEXAVOICE_STORE = previousStore;
+    if (previousFile === undefined) delete process.env.NEXAVOICE_STORE_FILE;
+    else process.env.NEXAVOICE_STORE_FILE = previousFile;
+    resetSupportDb();
+    resetPersistenceClient();
+  }
+}
+
+
+/**
+ * Route-bracketing invariant. The durable mirror only works if a handler reads the shared
+ * document before touching state and writes it back before responding, and that is exactly
+ * the kind of requirement a new route quietly forgets (the demo shop read routes did —
+ * they answered from a stale copy on a warm instance and it looked fine locally).
+ *
+ * So: any `app/api` route that imports support or shop state must either go through
+ * `withStore()` or hydrate explicitly, and no route may flush by hand — a hand-written
+ * flush skips the read-merge that keeps other instances' writes alive.
+ */
+async function verifyStatefulRoutesAreBracketed() {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const root = 'app/api';
+
+  const routes: string[] = [];
+  const walk = async (dir: string) => {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.name === 'route.ts') routes.push(full);
+    }
+  };
+  await walk(root);
+  assert(routes.length >= 15, `expected the whole api surface, found ${routes.length} routes`);
+
+  const stateful = /from '[^']*(lib\/shop|lib\/support)[^']*'/;
+  let checked = 0;
+  for (const file of routes) {
+    const source = await fs.readFile(file, 'utf8');
+    if (!stateful.test(source)) continue;
+    checked += 1;
+    const bracketed = source.includes('withStore(');
+    const hydrates = source.includes('hydrateStore(');
+    assert(
+      bracketed || hydrates,
+      `${file} reads support/shop state but neither uses withStore() nor hydrateStore() — it would serve stale data on another instance`,
+    );
+    assert(
+      !bracketed || !source.includes('flushStore('),
+      `${file} uses withStore() and calls flushStore() directly — the wrapper already flushes, and a manual flush can publish an unmerged document`,
+    );
+  }
+  assert(checked >= 15, `expected at least 15 stateful routes to be checked, got ${checked}`);
+
+  // And a handler must not be able to skip the bracket by exporting the raw function.
+  const conversationRoute = await fs.readFile('app/api/conversations/[id]/messages/route.ts', 'utf8');
+  assert(/export const POST = withStore\(/.test(conversationRoute), 'the chat turn route must be bracketed');
+  console.log(`route bracketing: ${checked} stateful routes checked`);
+}
+
 async function verifyHealthRoute() {
   const { GET: health } = await import('../app/api/health/route');
   const response = await health();
@@ -1121,7 +1252,9 @@ async function main() {
   await verifyToolsUrlAndSecret();
   await verifyEnableToolsFollowsTools();
   await verifyDurableStoreMirror();
+  await verifyStatefulRoutesAreBracketed();
   await verifyDemoSeedFixture();
+  await verifyShopWritesAreMirrored();
   await verifyHealthRoute();
 
   console.log('API contract checks passed');

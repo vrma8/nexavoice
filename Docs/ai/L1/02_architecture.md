@@ -91,7 +91,7 @@ Human dashboard (SupportDashboard, CaseWorkspace, HumanVoiceBridge)
 
 - Browser never sees the app certificate; only receives signed short-lived tokens.
 - The App ID the browser joins with is served by the server (same response as the
-  token), so a Runtime-only `NEXT_PUBLIC_AGORA_APP_ID` cannot strand the client.
+  token), so a `NEXT_PUBLIC_AGORA_APP_ID` that the build never saw cannot strand the client.
 - Conversation/case state crosses function instances through the durable mirror; a
   write is flushed inside the request that made it (never from a timer).
 - Agent lifecycle control (`start`, `stop`) is server-routed.

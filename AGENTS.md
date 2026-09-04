@@ -49,7 +49,8 @@ The sections below (Start Here, Patterns, Anti-Patterns, etc.) remain the canoni
 
 - Deploy the repository as a single Next.js app.
 - Set `NEXT_PUBLIC_AGORA_APP_ID` and `NEXT_AGORA_APP_CERTIFICATE` in the deployment target; keep `NEXT_AGORA_APP_CERTIFICATE` server-side only.
-- Tick **Build** for `NEXT_PUBLIC_AGORA_APP_ID` as well as Runtime: it is inlined into the client bundle at build time, so a Build-less value arrives as `undefined` in the browser. The app no longer depends on that — `resolveAppId()` prefers the `appId` served by `/api/generate-agora-token`, which the server reads at runtime — but the fallback still needs it, and an App ID that differs between the two is rejected by the token check.
+- `NEXT_PUBLIC_AGORA_APP_ID` must be type **Config** and targeted at **Production + Preview**, and the project must be **redeployed** after adding it: a `NEXT_PUBLIC_*` value is inlined at build time, so a variable created afterwards (or targeted only at Development, which is local `vercel env pull`) never reaches the existing bundle. Vercel documents this directly — env changes do not apply to previous deployments.
+- The app no longer *fails* on that: `resolveAppId()` prefers the `appId` served by `/api/generate-agora-token`, which the server reads at runtime. Keep both so the fallback and the signed token can never disagree.
 - Create a **Vercel Blob store** (Project → Storage → Create Database → Blob) so `BLOB_READ_WRITE_TOKEN` exists and conversation/case state is shared between function instances. Without it, the second chat request lands on an instance that never saw the conversation and answers "Conversation not found".
 - Voice tools need the Agora engine to reach `/api/agent-tools/*`; the deployment origin is used automatically and `AGENT_TOOLS_BASE_URL` / `AGENT_TOOLS_SECRET` only override it. A custom `asr.llmTools` object in the `POST /api/invite-agent` body must carry the same `toolsUrl`/`toolsSecret`, because those values are generated server-side.
 - Each Vercel function needs a `maxDuration` (exported per route) that fits the plan: without Fluid compute the default is 10s, which cuts `invite-agent` and a streamed LLM turn off mid-flight.
@@ -85,7 +86,7 @@ The sections below (Start Here, Patterns, Anti-Patterns, etc.) remain the canoni
 - `components/QuickstartConversationLayout.tsx`: in-call header, transcript rail, and controls dock.
 - `components/QuickstartPipelineMetrics.tsx`: per-stage latency chips from `AGENT_METRICS`.
 - `components/QuickstartTranscriptPanel.tsx`: live transcript rail.
-- `lib/agora.ts`: shared agent UID (`123456`) and human agent UID (`654321`).
+- `lib/agora.ts`: browser-safe Agora constants — agent UID (`123456`), human agent UID (`654321`), `resolveAppId()`, `MISSING_APP_ID_MESSAGE`.
 - `lib/conversation.ts`: transcript normalization and visualizer state mapping.
 - `env.local.example`: local environment template.
 - `scripts/verify-api-contracts.ts`: route contract verification.
@@ -150,6 +151,18 @@ Anything new in the store must round-trip through `toSnapshot()`/`applySnapshot(
 `lib/support/snapshot.ts` — that list is the contract; unlisted fields work locally
 and vanish on Vercel.
 
+**Read-only routes count too.** `/api/shop/*` only reads, but it reads process-local
+globals, so an unbracketed GET answers from a stale copy on a warm instance (this was a
+real bug: a cancellation made on one instance did not show on another). The bracketing
+check in `scripts/verify-api-contracts.ts` walks `app/api/**/route.ts` and fails any
+route that imports `lib/shop` or `lib/support` without `withStore()` or an explicit
+`hydrateStore()`; keep that list honest when adding routes.
+
+The demo shop is part of the mirror (`snapshot.shop`), with one rule that is easy to get
+wrong: `lib/shop/data.ts` tracks the records this process mutated (`markShopTouched`),
+and only those win a merge tie — a freshly seeded copy must never overwrite another
+instance's cancellation. Any new shop mutation has to call `markShopTouched`.
+
 ### Demo Data (`NEXAVOICE_SEED=demo`)
 
 `lib/support/seed.ts` writes a three-record fixture (active chat, escalated HIGH case,
@@ -169,7 +182,7 @@ data must not be able to break a real conversation.
 token — the single source of truth for what the browser joins with — resolved by
 `resolveAppId()` in `lib/agora.ts`. Client components use that value and only fall
 back to `process.env.NEXT_PUBLIC_AGORA_APP_ID`, which is a build-time inlining and
-empty on a Runtime-only Vercel deployment. `useJoin`'s `error`, the toolkit's
+empty on a deployment whose build did not see it. `useJoin`'s `error`, the toolkit's
 `joinFromToken` message, and an `invite-agent` non-2xx body are all surfaced in the
 UI (`useAgoraError`, `joinFailure`, `lastError`); keep them wired so a failed call
 says what failed instead of hanging on "Connecting…".

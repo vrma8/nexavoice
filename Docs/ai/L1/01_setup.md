@@ -91,7 +91,7 @@ Requires env/project binding:
 | `verify` fails at doctor | Project not bound | `agora project use` output | Re-bind project and rewrite `.env.local` |
 | Mic publishes but no agent response | Agent start failed | UI warning (`agentJoinError`) | Inspect `/api/invite-agent` response |
 | Chat "Conversation not found", or the agent re-asks for the phone number every turn | Each Vercel function got its own in-memory store | `GET /api/health` → `store.backend` is `memory` | Create a Vercel Blob store (sets `BLOB_READ_WRITE_TOKEN`), or `NEXAVOICE_STORE=file` for one container |
-| Voice banner stays on "Connecting…" / call never joins with no error | App ID absent from the client bundle (`NEXT_PUBLIC_*` inlined at build time) or the join error was swallowed | `GET /api/health` → `agora.appId`; the banner now renders the `useJoin` error | Tick **Build** for `NEXT_PUBLIC_AGORA_APP_ID`, or rely on the `appId` served by `/api/generate-agora-token` |
+| Voice banner stays on "Connecting…" / call never joins with no error | App ID absent from the client bundle (`NEXT_PUBLIC_*` is inlined at build time, so a variable added after the last deploy never reaches it) or the join error was swallowed | `GET /api/health` → `agora.publicAppIdInlined`; the banner now renders the `useJoin` error | Target `NEXT_PUBLIC_AGORA_APP_ID` at Production/Preview and **redeploy**; the `appId` served by `/api/generate-agora-token` also carries it |
 | Agent answers without looking up orders | Engine could not reach the tool URL | `GET /api/health` → `agent.tools` (`enabled`, `baseUrl`, `secretSource`) | Expose the app over https (Vercel URL / ngrok) and set `AGENT_TOOLS_BASE_URL` |
 | Dashboard is empty on a fresh deployment | Nothing has chatted yet | `/api/health` → `seed.requested` is `false` | Set `NEXAVOICE_SEED=demo` (or `pnpm run seed` with the store token in `.env.local`) |
 | Chat answers look canned, no free discussion | No LLM configured — the rule-based agent is active | `GET /api/health` → `agent.llm` is `agora-managed` | Set `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` (and `NEXT_LLM_MODEL`) |
@@ -107,23 +107,31 @@ Local:
 
 Vercel:
 
-- Requires environment vars configured per environment scope.
-- Keep `NEXT_AGORA_APP_CERTIFICATE` private server variable.
-- Tick **Build** for `NEXT_PUBLIC_AGORA_APP_ID` as well as Development/Preview/Production:
-  it is inlined into the client bundle, and a Runtime-only value leaves the browser with
-  `undefined`. The client then joins with the `appId` returned by
-  `/api/generate-agora-token` (which the server reads at runtime), so calls still connect —
-  keep both environments set so the fallback and the signed token agree.
+- Target every variable at **Production** and **Preview**, then **redeploy**. Vercel applies
+  environment-variable changes to new deployments only, and a `NEXT_PUBLIC_*` value is
+  frozen into the client bundle at build time — so a variable added after the last build
+  is present at runtime but `undefined` in the browser, which is the classic "the call
+  never connects, with no error" case here.
+- Use type **Config** for `NEXT_PUBLIC_AGORA_APP_ID` (Vercel's guidance for public framework
+  prefixes; the value is readable in the dashboard and never grants anything by itself) and
+  **Secret** for `NEXT_AGORA_APP_CERTIFICATE`. A Secret is still available to the build —
+  Vercel only redacts its value from build logs — and this app never sends the certificate
+  to the browser.
+- Do not rely on a **Development** target for a deployed app: that one feeds a local
+  `vercel env pull` / `vercel dev`, not a Production deployment.
 - Create a Blob store (Project → Storage → Create Database → Blob) so conversation and
   case state are shared between function instances; `BLOB_READ_WRITE_TOKEN` is injected
-  and `lib/support/persist.ts` picks it up automatically. Without it the chat cannot
+  and `lib/support/persist.ts` picks it up automatically. Check that the injected variable
+  covers Production — a store created before that environment existed can end up
+  Preview-only, and state then silently stops being shared. Without a store the chat cannot
   complete a second turn.
-- Set `AGORA_AREA` when the project is not in the `US` area (`AP` for India), and
-  `NEXT_LLM_URL` +
-  `NEXT_LLM_API_KEY` to replace the rule-based chat agent with the LLM one.
-- Check the deployment with `curl https://<deployment>/api/health` — it reports
-  credential presence, tool wiring, LLM provider and the store backend, never a secret.
-- Use `pnpm run build` locally before pushing deployment changes.
+- Set `NEXAVOICE_SEED=demo` if the deployment should come up with a populated dashboard
+  (see `05_workflows.md` → "Populate the Dashboard with Demo Data").
+- Set `AGORA_AREA` when the project is not in the `US` area (`AP` covers India), and
+  `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` to replace the rule-based chat agent with the LLM one.
+- Check the deployment with `curl https://<deployment>/api/health` — it reports credential
+  presence, whether the bundle was built with the App ID, tool wiring, the LLM provider and
+  the store backend, and never a secret value.
 
 ## Setup Change Checklist
 

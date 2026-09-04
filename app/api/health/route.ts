@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { getAgoraCredentials } from '@/lib/agora-server';
 import { getToolSecret, resolveToolsBaseUrl } from '@/lib/agent-tools';
 import { INTERACTION_LANGUAGE, STT_LANGUAGE, TTS_VOICE_ID } from '@/lib/agent-config';
-import { getStoreSyncStatus } from '@/lib/support/store';
+import { getStoreSyncStatus, hydrateStore } from '@/lib/support/store';
 import { getSeedStatus } from '@/lib/support/seed';
 import { listConversations } from '@/lib/support/store';
 
@@ -20,6 +20,10 @@ export const dynamic = 'force-dynamic';
  *   https://<your-deployment>/api/health
  */
 export async function GET() {
+  // Read the shared document first: without this the conversation count below is this
+  // instance's memory, which on Vercel says "0" next to a store that is working fine.
+  await hydrateStore().catch(() => {});
+
   let credentials: { appId: string } | null = null;
   let credentialError: string | null = null;
   try {

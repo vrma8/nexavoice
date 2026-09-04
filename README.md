@@ -97,12 +97,23 @@ agora project env write .env.local
 rg "^(NEXT_PUBLIC_AGORA_APP_ID|NEXT_AGORA_APP_CERTIFICATE)=" .env.local
 ```
 
-Copy those two values into Vercel Project Settings → Environment Variables. Mark
-`NEXT_PUBLIC_AGORA_APP_ID` for **Build** as well as Runtime: a `NEXT_PUBLIC_*` value is
-inlined into the browser bundle at build time, so ticking Runtime alone leaves the
-client with `undefined`. The app no longer breaks on that — the client joins with the
-App ID returned by `GET /api/generate-agora-token`, which the server reads at runtime —
-but keep both set so the fallback and the signed token always agree.
+Copy those two values into Vercel Project Settings → Environment Variables:
+
+| Variable | Type | Environments |
+| --- | --- | --- |
+| `NEXT_PUBLIC_AGORA_APP_ID` | **Config** | Production + Preview |
+| `NEXT_AGORA_APP_CERTIFICATE` | **Secret** | Production + Preview |
+
+Then **redeploy** — Vercel applies environment-variable changes to new deployments only,
+and a `NEXT_PUBLIC_*` value is frozen into the browser bundle during the build. A variable
+added after the last deploy is therefore readable by the API routes and `undefined` in the
+browser, which is exactly the "call never connects, with no error" case. (Type matters too:
+`NEXT_PUBLIC_*` values ship to the client regardless of their type, so never put a secret
+behind that prefix — the certificate is read server-side only.)
+
+The app no longer hard-depends on the inlined value: the client also accepts the App ID
+returned by `GET /api/generate-agora-token`, which the server reads at runtime. Keep the
+variable anyway so both sources agree.
 
 ### Two things a Vercel deployment needs that local dev does not
 
@@ -135,7 +146,7 @@ Defined in [`env.local.example`](env.local.example).
 
 | Variable                     | Required | Notes                                                                                                                                                                   |
 | ---------------------------- | :------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXT_PUBLIC_AGORA_APP_ID`   |    ✅    | Agora Console → Project → App ID. Needs the **Build** environment enabled, not just Runtime.                                                                           |
+| `NEXT_PUBLIC_AGORA_APP_ID`   |    ✅    | Agora Console → Project → App ID. Type **Config**, targeted at **Production + Preview**, then **redeploy** — a `NEXT_PUBLIC_*` value is inlined at build time, so an existing deployment keeps the old one. |
 | `NEXT_AGORA_APP_CERTIFICATE` |    ✅    | Agora Console → Project → App Certificate. **Server-side only.**                                                                                                        |
 | `BLOB_READ_WRITE_TOKEN`      | serverless state | Set automatically by a Vercel Blob store. Without it conversation state lives per instance (fine for `pnpm dev`, broken on Vercel). |
 | `NEXAVOICE_STORE`            |    –     | `memory` \| `file` \| `blob`. Auto-detected: `blob` when `BLOB_READ_WRITE_TOKEN` exists, otherwise `memory`. |
@@ -184,7 +195,7 @@ Remove the flag afterwards if you don't want a store reset to repopulate the dem
 | --- | --- | --- |
 | Voice call starts, then nothing; "The AI agent could not join this call" | `invite-agent` error, now surfaced in the banner | Read the message + `/api/health`; run `agora project doctor --deep` |
 | Agent never speaks but an `agent_id` came back | Conversational AI not enabled for the App ID | Agora Console → project → All features → **Conversational AI** |
-| Call never connects, no error at all | App ID missing from the client bundle | Enable `NEXT_PUBLIC_AGORA_APP_ID` for **Build** and redeploy (the token route now also serves it) |
+| Call never connects, no error at all | App ID missing from the client bundle (var added or changed after the last build, or targeted only at Development) | Redeploy with `NEXT_PUBLIC_AGORA_APP_ID` targeted at Production/Preview — or rely on the `appId` the token route now serves |
 | Chat says "Conversation not found" / forgets the phone number between turns | No shared state backend | Create a Vercel Blob store |
 | Agent talks but never looks up orders | Engine cannot reach `/api/agent-tools/*` | Check `agent.tools` in `/api/health`; needs a public https URL (Vercel URL, ngrok, cloudflared) |
 | Chat answers look canned | `NEXT_LLM_*` not set → rule-based agent | Set `NEXT_LLM_URL` / `NEXT_LLM_API_KEY` |

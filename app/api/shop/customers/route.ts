@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { withStore } from '@/lib/support/route-store';
 import * as shop from '@/lib/shop/service';
 
 /**
  * GET /api/shop/customers            — demo customer directory (for the dashboard / demo page)
+ *
+ * Hydrated like every other state-reading route: a cancellation applied on another
+ * instance has to show here, not this process's stale copy of the shop.
  * GET /api/shop/customers?phone=...  — lookup one customer with their orders
  */
-export async function GET(request: NextRequest) {
+export const GET = withStore(async (request: NextRequest) => {
   const phone = request.nextUrl.searchParams.get('phone');
   if (phone) {
     const customer = shop.findCustomerByPhone(phone);
@@ -29,4 +33,4 @@ export async function GET(request: NextRequest) {
       })),
     })),
   });
-}
+});

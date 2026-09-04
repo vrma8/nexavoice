@@ -23,9 +23,11 @@
 - **Anything added to `lib/support/types.ts` must be mirrored** in
   `lib/support/snapshot.ts`'s `toSnapshot()`/`applySnapshot()`, or it works locally and
   vanishes on a serverless deployment.
-- **`NEXT_PUBLIC_*` is a build-time value.** On a Runtime-only Vercel deployment the
-  client bundle receives `undefined`, and a join with an empty App ID fails without a
-  message. Serve the App ID from `/api/generate-agora-token` (`resolveAppId`) instead.
+- **`NEXT_PUBLIC_*` is a build-time value.** If `NEXT_PUBLIC_AGORA_APP_ID` was added after
+  the last build — or targets only Development — the client bundle holds `undefined` and a
+  join with an empty App ID fails without a message. Vercel never retro-applies env changes
+  to an existing deployment, so redeploy; `resolveAppId()` also takes the `appId` served by
+  `/api/generate-agora-token`, which the server reads at runtime.
 - **`maxDuration` is per route** and must fit the plan (non-Fluid default 10 s, Hobby
   cap 300 s). A value above the plan cap builds fine and fails at runtime, which is why
   `chat/completions` is 60 s, not 300 s.
