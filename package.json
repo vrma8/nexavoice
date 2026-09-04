@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Next.js quickstart for building conversational AI applications with Agora's Conversational AI Engine",
   "private": true,
+  "packageManager": "pnpm@10.34.5",
   "engines": {
     "node": ">=22"
   },
