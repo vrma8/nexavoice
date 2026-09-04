@@ -9,7 +9,14 @@
  *  - only specific state transitions are allowed (e.g. cancel before shipping)
  *  - results are plain data, never raw storage handles
  */
-import { getShopDb, type Customer, type Order, type OrderStatus, type Ticket } from './data';
+import {
+  getShopDb,
+  markShopTouched,
+  type Customer,
+  type Order,
+  type OrderStatus,
+  type Ticket
+} from './data';
 
 export type ServiceResult<T> =
   | { ok: true; data: T }
@@ -154,6 +161,7 @@ export function cancelOrder(
   const now = Date.now();
   order.status = 'CANCELLED';
   order.cancellationReason = reason;
+  markShopTouched(order.id);
   order.refundStatus = order.paymentMethod === 'COD' ? undefined : 'INITIATED';
   order.history.push({ at: now, event: `Cancelled by customer via support (${reason})` });
   if (order.refundStatus) {
@@ -181,6 +189,7 @@ export function updateShippingAddress(
     return fail('INVALID_ADDRESS', 'The new address is too short. Collect house/flat, street, city and PIN code.');
   }
   order.shippingAddress = address;
+  markShopTouched(order.id);
   order.history.push({ at: Date.now(), event: `Shipping address updated via support` });
   return { ok: true, data: summarizeOrder(order) };
 }
@@ -206,6 +215,7 @@ export function requestReturn(
   }
   order.status = 'RETURN_REQUESTED';
   order.returnReason = reason;
+  markShopTouched(order.id);
   order.refundStatus = 'PENDING';
   order.history.push({ at: Date.now(), event: `Return requested (${reason}); pickup scheduled within 2 days` });
   return { ok: true, data: summarizeOrder(order) };
@@ -235,6 +245,7 @@ export function createTicket(input: CreateTicketInput): Ticket {
     updatedAt: now,
   };
   db.tickets.set(ticket.id, ticket);
+  markShopTouched(ticket.id);
   return ticket;
 }
 

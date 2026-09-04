@@ -21,15 +21,36 @@ export function getAgoraCredentials(): { appId: string; appCertificate: string }
   return { appId, appCertificate };
 }
 
-type GlobalArea = Area.US | Area.EU | Area.AP;
+/** `Area` also has `Unknown`/`CN`; the four routable public areas are what `AGORA_AREA` takes. */
+type GlobalArea = Area.US | Area.EU | Area.AP | Area.CN;
 
+let warnedAboutArea = false;
+
+/**
+ * `AGORA_AREA` must match the region the Agora project was created in. An unrecognised
+ * value used to fall through to US silently, which on a project in another region shows
+ * up as an agent that starts slowly or not at all — so say it out loud once.
+ */
 function resolveArea(): GlobalArea {
-  switch ((process.env.AGORA_AREA ?? 'US').toUpperCase()) {
+  const raw = process.env.AGORA_AREA?.trim();
+  switch ((raw ?? 'US').toUpperCase()) {
     case 'EU':
       return Area.EU;
     case 'AP':
       return Area.AP;
+    case 'CN':
+      return Area.CN;
+    case 'US':
+    case '':
+      return Area.US;
     default:
+      if (!warnedAboutArea) {
+        warnedAboutArea = true;
+        console.warn(
+          `[agora] AGORA_AREA="${raw}" is not one of US | EU | AP | CN — falling back to US. ` +
+            'Set it to the region of your Agora project (Agora Console → Project → Configuration).',
+        );
+      }
       return Area.US;
   }
 }

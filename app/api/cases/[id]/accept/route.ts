@@ -38,15 +38,17 @@ async function handlePost(request: NextRequest, { params }: Params) {
   let voice: { token: string; uid: string; channel: string; agentUid: string; appId: string } | null = null;
   if (conversation?.mode === 'VOICE' && conversation.channel) {
     const { appId, appCertificate } = getAgoraCredentials();
-    const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+    // RtcTokenBuilder takes a Unix *seconds* expiry; naming it `expiresAt` here once
+    // made a milliseconds field out of it and clients compared it to Date.now().
+    const expirationTs = Math.floor(Date.now() / 1000) + 3600;
     const token = RtcTokenBuilder.buildTokenWithRtm(
       appId,
       appCertificate,
       conversation.channel,
       String(DEFAULT_HUMAN_UID),
       RtcRole.PUBLISHER,
-      expiresAt,
-      expiresAt,
+      expirationTs,
+      expirationTs,
     );
     voice = {
       token,

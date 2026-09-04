@@ -16,12 +16,24 @@
 - **No hydration TTL.** Consecutive requests from one browser land on different
   instances; skipping a read because "we just synced" answers the next turn from stale
   state (the customer is asked for their phone number again).
+- **The demo shop is state too.** `lib/shop/data.ts` seeds a process-local copy of the
+  catalog, so a tool's cancellation only survives on Vercel because `toSnapshot()` carries
+  `shop` and `applySnapshot()` merges it back through `mergeShopSnapshot`. Two consequences:
+  a route that reads the shop must be bracketed (the contract checks enforce this, GET-only
+  routes included), and an order this instance did **not** write always takes the remote
+  version — otherwise a freshly seeded copy silently reverts another instance's write.
+- **Demo records need fixed ids.** `NEXAVOICE_SEED=demo` data is written by whichever
+  instance cold-starts first, and two at once is normal on Vercel. The seeded
+  conversations, messages and events in `lib/support/seed.ts` therefore use deterministic
+  ids so `mergeSnapshots` dedupes them — random ids double the seeded transcript.
 - **Anything added to `lib/support/types.ts` must be mirrored** in
   `lib/support/snapshot.ts`'s `toSnapshot()`/`applySnapshot()`, or it works locally and
   vanishes on a serverless deployment.
-- **`NEXT_PUBLIC_*` is a build-time value.** On a Runtime-only Vercel deployment the
-  client bundle receives `undefined`, and a join with an empty App ID fails without a
-  message. Serve the App ID from `/api/generate-agora-token` (`resolveAppId`) instead.
+- **`NEXT_PUBLIC_*` is a build-time value.** If `NEXT_PUBLIC_AGORA_APP_ID` was added after
+  the last build — or targets only Development — the client bundle holds `undefined` and a
+  join with an empty App ID fails without a message. Vercel never retro-applies env changes
+  to an existing deployment, so redeploy; `resolveAppId()` also takes the `appId` served by
+  `/api/generate-agora-token`, which the server reads at runtime.
 - **`maxDuration` is per route** and must fit the plan (non-Fluid default 10 s, Hobby
   cap 300 s). A value above the plan cap builds fine and fails at runtime, which is why
   `chat/completions` is 60 s, not 300 s.

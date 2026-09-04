@@ -25,6 +25,16 @@ For local voice tool calls expose the dev server publicly (e.g. `ngrok http 3000
 
 To exercise the serverless state path locally, run `NEXAVOICE_STORE=file pnpm build && pnpm start`: separate processes then share `.data/nexavoice-store.json`, the way Vercel instances share the Blob store. `pnpm run dev` keeps one in-process store, which is why state bugs do not reproduce there.
 
+## Populate the Dashboard with Demo Data
+
+1. Set `NEXAVOICE_SEED=demo` where you want it (on Vercel: Development, Preview **and** Production). The next request to any support route fills an empty store with one live chat, one HIGH waiting case and one resolved voice call.
+2. Or from a terminal against the same store: copy `BLOB_READ_WRITE_TOKEN` from Vercel → Storage → Blob store into `.env.local`, then `pnpm run seed`.
+3. Local file store instead: `NEXAVOICE_STORE=file pnpm run seed`, then the same two variables when you `pnpm run dev`.
+
+Seeding is a no-op once the store holds any conversation and it never replaces an
+existing record: leave the flag set in a demo project, unset it in a real one, and remove
+it if a store reset should not repopulate the demo set.
+
 ## Change Agent Behavior
 
 Target files: `lib/agent-prompt.ts` (prompt), `lib/agent-config.ts` (pipeline), `lib/agent-tools.ts` (tools).
@@ -83,6 +93,13 @@ Bootstrap behavior:
 3. Follow [from_scratch_bootstrap.md](L2/from_scratch_bootstrap.md) for the implementation map and checklist.
 4. Preserve the recipe invariants in `docs/ai/RECIPE.md`.
 5. Run the verification commands before publishing a derivative.
+
+## Workflow: Change a Shop Business Rule
+
+1. Rules live in `lib/shop/service.ts` (windows, allowed transitions); fixtures in `lib/shop/data.ts`.
+2. A mutation must call `markShopTouched(<record id>)`, or the durable merge treats this instance's write as pristine seed data and another instance overwrites it.
+3. Any route that reads the shop needs `withStore()` — GET-only demo routes included — otherwise it answers from a stale copy on a warm instance. `scripts/verify-api-contracts.ts` fails on an unbracketed state-reading route.
+4. Cancel/return/address changes surface in three places: the tool response (`lib/support/tools.ts`), the chat agent's reply copy (`lib/chat-agent.ts`) and the case view (`components/CaseWorkspace.tsx`).
 
 ## Workflow: Add a Route That Touches Support State
 

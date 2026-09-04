@@ -97,20 +97,33 @@ agora project env write .env.local
 rg "^(NEXT_PUBLIC_AGORA_APP_ID|NEXT_AGORA_APP_CERTIFICATE)=" .env.local
 ```
 
-Copy those two values into Vercel Project Settings → Environment Variables. Mark
-`NEXT_PUBLIC_AGORA_APP_ID` for **Build** as well as Runtime: a `NEXT_PUBLIC_*` value is
-inlined into the browser bundle at build time, so ticking Runtime alone leaves the
-client with `undefined`. The app no longer breaks on that — the client joins with the
-App ID returned by `GET /api/generate-agora-token`, which the server reads at runtime —
-but keep both set so the fallback and the signed token always agree.
+Copy those two values into Vercel Project Settings → Environment Variables:
+
+| Variable | Type | Environments |
+| --- | --- | --- |
+| `NEXT_PUBLIC_AGORA_APP_ID` | **Config** | Production + Preview |
+| `NEXT_AGORA_APP_CERTIFICATE` | **Secret** | Production + Preview |
+
+Then **redeploy** — Vercel applies environment-variable changes to new deployments only,
+and a `NEXT_PUBLIC_*` value is frozen into the browser bundle during the build. A variable
+added after the last deploy is therefore readable by the API routes and `undefined` in the
+browser, which is exactly the "call never connects, with no error" case. (Type matters too:
+`NEXT_PUBLIC_*` values ship to the client regardless of their type, so never put a secret
+behind that prefix — the certificate is read server-side only.)
+
+The app no longer hard-depends on the inlined value: the client also accepts the App ID
+returned by `GET /api/generate-agora-token`, which the server reads at runtime. Keep the
+variable anyway so both sources agree.
 
 ### Two things a Vercel deployment needs that local dev does not
 
-1. **Shared conversation state.** `lib/support/store.ts` is a per-process memory
+1. **Shared state — conversations and the demo shop.** `lib/support/store.ts` is a per-process memory
    cache. Vercel runs every route as an independent function instance, so a
    conversation created by `POST /api/conversations` is invisible to the next
    request — the chat answers "Conversation not found", forgets the verified
-   customer, and the dashboard stays empty. Create a store so state is mirrored:
+   customer, and the dashboard stays empty. Cancelled orders and agent-created tickets
+   are part of the same snapshot, so a cancellation survives into the next turn instead
+   of the order quietly reverting to "placed". Create a store so state is mirrored:
    **Project → Storage → Create Database → Blob**. `BLOB_READ_WRITE_TOKEN` is
    injected automatically and the app detects it; no other setting is needed.
    (`NEXAVOICE_STORE=file` covers a single Docker container instead.)
@@ -135,14 +148,15 @@ Defined in [`env.local.example`](env.local.example).
 
 | Variable                     | Required | Notes                                                                                                                                                                   |
 | ---------------------------- | :------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXT_PUBLIC_AGORA_APP_ID`   |    ✅    | Agora Console → Project → App ID. Needs the **Build** environment enabled, not just Runtime.                                                                           |
+| `NEXT_PUBLIC_AGORA_APP_ID`   |    ✅    | Agora Console → Project → App ID. Type **Config**, targeted at **Production + Preview**, then **redeploy** — a `NEXT_PUBLIC_*` value is inlined at build time, so an existing deployment keeps the old one. |
 | `NEXT_AGORA_APP_CERTIFICATE` |    ✅    | Agora Console → Project → App Certificate. **Server-side only.**                                                                                                        |
 | `BLOB_READ_WRITE_TOKEN`      | serverless state | Set automatically by a Vercel Blob store. Without it conversation state lives per instance (fine for `pnpm dev`, broken on Vercel). |
 | `NEXAVOICE_STORE`            |    –     | `memory` \| `file` \| `blob`. Auto-detected: `blob` when `BLOB_READ_WRITE_TOKEN` exists, otherwise `memory`. |
 | `NEXAVOICE_BLOB_ACCESS`      |    –     | `public` (default) or `private`, matching how the Blob store was created. |
+| `NEXAVOICE_SEED`             |    –     | `demo` fills an *empty* store with a demo queue (active chat, escalated case, resolved voice call) so the dashboard isn't blank on a fresh deployment. Never overwrites existing data. |
 | `AGENT_TOOLS_BASE_URL`       |    –     | Override the public **https** URL the Agora engine calls back into (`${URL}/api/agent-tools/*`). Defaults to the request origin, then `VERCEL_URL`. |
 | `AGENT_TOOLS_SECRET`         |    –     | Shared secret (≥ 8 chars) the engine sends as `x-nexavoice-tool-token`. Unset → derived from the App Certificate, so tools still work on a fresh deployment. |
-| `AGORA_AREA`                 |    –     | `US` (default), `EU` or `AP` — Agora REST region. Must match the project's region or the agent never starts.                                                           |
+| `AGORA_AREA`                 |    –     | Agora REST gateway region: `US` (default), `EU`, `AP` or `CN`. Must match the project's service area (India and other Asia-Pacific projects use `AP`) or the agent starts slowly or not at all. An unrecognised value logs a warning and falls back to `US`. |
 | `AGENT_LANGUAGE`             |    –     | Turn-detection / interaction locale: `en-IN` (default), `hi-IN`, `bn-IN`, `ta-IN`, `te-IN`, `gu-IN`, `kn-IN`, `en-US`.                                                   |
 | `AGENT_STT_LANGUAGE`         |    –     | Deepgram language, default `multi` (Hindi/English code-switching).                                                                                                      |
 | `AGENT_TTS_VOICE_ID`         |    –     | MiniMax voice id, default `English_captivating_female1`.                                                                                                                |
@@ -151,23 +165,52 @@ Defined in [`env.local.example`](env.local.example).
 
 The agent pipeline in [`lib/agent-config.ts`](lib/agent-config.ts) uses Agora-managed Deepgram STT, OpenAI LLM and MiniMax TTS, so no vendor keys are required. The Conversational AI feature and Agora-managed vendors must be enabled on the Agora project (`agora project doctor --deep`). Without `NEXT_LLM_*`, chat is answered by the deterministic rule-based agent in [`lib/chat-agent.ts`](lib/chat-agent.ts) — it covers the demo flows (verify → orders → cancel/return/address → ticket → escalation) with fixed copy, so free-form questions get a "what can I do" reply rather than an LLM answer.
 
+### Demo data (optional)
+
+`/support-agent` is empty until somebody actually chats or calls, which makes a fresh
+deployment look broken. Set `NEXAVOICE_SEED=demo` (Vercel → Project Settings →
+Environment Variables, all three environments) and the first request to any support
+route writes three records into the store the app already uses:
+
+| Record | What it shows |
+| --- | --- |
+| `conv_demo_active_chat` | A live AI chat with Priya about `NM-10030` (out for delivery) — transcript + tool audit |
+| `conv_demo_waiting_case` | Rahul's refund demand for the faulty `NM-10023` headphones, escalated as a **HIGH** case with a handoff summary and a missing-information item |
+| `conv_demo_voice_resolved` | A Hindi voice call for Amit (`NM-10035`, address change) that a human joined, handled and resolved |
+
+They reference the real customers and order ids in `lib/shop/data.ts`, so you can accept
+the waiting case, reply to the customer, and resolve it as a walkthrough of the human
+side. Three rules keep it safe:
+
+- **Only an empty store.** Once your deployment has any conversation, the flag does nothing — no demo record is ever pushed into real traffic, and nothing existing is overwritten.
+- **Idempotent across instances.** Every record has a fixed id, so two cold instances seeding at once merge to one set instead of doubling the dashboard.
+- **Never fatal.** A seeding error is recorded and reported at `/api/health` (`seed.error`) instead of failing the request.
+
+To seed from a terminal instead (e.g. before anyone opens the dashboard), copy
+`BLOB_READ_WRITE_TOKEN` from Vercel → Storage → your Blob store into `.env.local` and
+run `pnpm run seed`. It goes through the same hydrate → merge → flush path as a request.
+Remove the flag afterwards if you don't want a store reset to repopulate the demo set.
+
 ### Troubleshooting a deployment
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | Voice call starts, then nothing; "The AI agent could not join this call" | `invite-agent` error, now surfaced in the banner | Read the message + `/api/health`; run `agora project doctor --deep` |
 | Agent never speaks but an `agent_id` came back | Conversational AI not enabled for the App ID | Agora Console → project → All features → **Conversational AI** |
-| Call never connects, no error at all | App ID missing from the client bundle | Enable `NEXT_PUBLIC_AGORA_APP_ID` for **Build** and redeploy (the token route now also serves it) |
+| Call never connects, no error at all | App ID missing from the client bundle (var added or changed after the last build, or targeted only at Development) | Redeploy with `NEXT_PUBLIC_AGORA_APP_ID` targeted at Production/Preview — or rely on the `appId` the token route now serves |
 | Chat says "Conversation not found" / forgets the phone number between turns | No shared state backend | Create a Vercel Blob store |
+| Agent cancels an order, then says it is still placed (or the dashboard disagrees) | The shop copy on the other instance was never updated | Blob store present — `shop` is part of the mirrored snapshot |
 | Agent talks but never looks up orders | Engine cannot reach `/api/agent-tools/*` | Check `agent.tools` in `/api/health`; needs a public https URL (Vercel URL, ngrok, cloudflared) |
 | Chat answers look canned | `NEXT_LLM_*` not set → rule-based agent | Set `NEXT_LLM_URL` / `NEXT_LLM_API_KEY` |
 | Dashboard shows nothing while a call is live | State not shared (see above) | Blob store; SSE is best-effort — the 3s poll reads the mirror |
+| Dashboard is empty and you want demo traffic to look at | Nothing has chatted yet | Set `NEXAVOICE_SEED=demo` (or `pnpm run seed`) |
 
 ## Commands
 
 ```bash
 # Dev
 pnpm dev                # start the Next.js dev server
+pnpm run seed           # demo queue into the durable store (.env.local is loaded)
 
 # Quality
 pnpm run lint           # eslint

@@ -10,6 +10,7 @@
  * exported functions.
  */
 import { randomUUID } from 'crypto';
+import { mergeShopSnapshot, snapshotShopDb } from '../shop/data';
 import {
   message as describeError,
   resolvePersistence,
@@ -135,6 +136,7 @@ function toSnapshot(store: SupportDb): StoreSnapshot {
   snapshot.conversations = [...store.conversations.values()];
   snapshot.messages = Object.fromEntries(store.messages);
   snapshot.cases = [...store.cases.values()];
+  snapshot.shop = snapshotShopDb();
   return pruneSnapshot(snapshot);
 }
 
@@ -144,6 +146,9 @@ function toSnapshot(store: SupportDb): StoreSnapshot {
  * instance happened to hold an older copy of the document.
  */
 function applySnapshot(store: SupportDb, remote: StoreSnapshot): void {
+  // Shop records are process-local globals rather than `store` fields, so they merge
+  // here directly; `toSnapshot` re-reads them on the way out.
+  mergeShopSnapshot(remote.shop);
   const merged = mergeSnapshots(toSnapshot(store), remote);
   store.counters.case = Math.max(store.counters.case, merged.caseCounter);
   store.conversations = new Map(

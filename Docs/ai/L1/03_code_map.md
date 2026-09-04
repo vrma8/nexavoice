@@ -49,14 +49,16 @@ types/               Shared TypeScript route/component contracts
 - `chat-completions.ts`: dependency-injected custom-LLM SSE handler with tool loop; keeping it outside the route module preserves Next.js route-export constraints.
 - `chat-agent.ts`: chat turn — LLM (`ai` SDK) when configured, else rule-based EN/HI/Hinglish agent over `executeTool`.
 - `support/types.ts`, `support/store.ts`, `support/tools.ts`: conversation/case model, in-memory store + event bus + dashboard snapshot, guarded tool execution + handoff summary.
+- `support/seed.ts`: opt-in demo fixture (`NEXAVOICE_SEED=demo`) — fixed record ids so a simultaneous seed from two instances merges instead of doubling, applied only to an empty store, never replacing an existing record.
 - `support/persist.ts`, `support/snapshot.ts`, `support/route-store.ts`: durable mirror — Blob/file/memory backends, the versioned snapshot + merge rules, and the `withStore()` hydrate/flush bracket every support route uses.
 - `agora.ts`: browser-safe Agora constants (`AGENT_UID`, `HUMAN_UID`, fallback App ID) and `resolveAppId()`.
-- `shop/data.ts`, `shop/service.ts`: NexaMart demo customers/orders/tickets and business rules (cancel/address/return windows).
+- `shop/data.ts`, `shop/service.ts`: NexaMart demo customers/orders/tickets and business rules (cancel/address/return windows). `data.ts` also owns the shop's slice of the durable mirror (`snapshotShopDb`/`mergeShopSnapshot`) plus the set of records this process wrote, which decides merge ties.
 - `api.ts`: browser API client for chat, conversations, escalation, dashboard, cases.
 
 ## Validation and Tooling
 
 - `scripts/verify-api-contracts.ts`: imports route handlers and validates contract behavior (tool schemas, guards, token/agent/health contracts, tool URL + secret derivation, snapshot round-trip, store bracketing).
+- `scripts/seed-demo-store.ts`: `pnpm run seed` — fills the durable store with the demo fixture from a terminal (loads `.env.local` for `BLOB_READ_WRITE_TOKEN`).
 - `scripts/doctor.mjs`: local setup checks consumed by `pnpm run doctor`.
 - `tailwind.config.ts`: includes `agora-agent-uikit` dist classes in content scan.
 

@@ -249,4 +249,64 @@ export function getShopDb(): ShopDb {
 /** Test helper — resets the demo data. */
 export function resetShopDb(): void {
   globalThis.__nexavoiceShopDb = seed();
+  touchedThisProcess.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Durable mirror support
+// ---------------------------------------------------------------------------
+
+/**
+ * Records this process actually changed (`cancel_order`, `update_shipping_address`,
+ * `request_return`, `create_ticket`). Every other record in this process's copy of the
+ * shop came out of `seed()` a moment ago, built from relative timestamps — so on a tie it
+ * has to lose to the shared document, or a cold instance would overwrite a real
+ * cancellation with pristine fixture data.
+ */
+const touchedThisProcess = new Set<string>();
+
+export function markShopTouched(id: string): void {
+  touchedThisProcess.add(id);
+}
+
+export interface ShopSnapshot {
+  customers: Customer[];
+  orders: Order[];
+  tickets: Ticket[];
+  counters: { order: number; ticket: number };
+}
+
+export function snapshotShopDb(): ShopSnapshot {
+  const db = getShopDb();
+  return {
+    customers: [...db.customers.values()],
+    orders: [...db.orders.values()],
+    tickets: [...db.tickets.values()],
+    counters: { ...db.counters },
+  };
+}
+
+/**
+ * Folds the shared shop document into this process's copy. Unmutated records take the
+ * remote version — that is the point, it carries other instances' cancellations — while a
+ * record this process changed keeps its own, so a merge can never undo a write made
+ * earlier in the same request. Anything the remote has and this seed does not (a ticket
+ * created elsewhere) is added.
+ */
+export function mergeShopSnapshot(remote: ShopSnapshot | null | undefined): void {
+  if (!remote) return;
+  const db = getShopDb();
+  const takeRemote = (id: string) => !touchedThisProcess.has(id);
+
+  for (const customer of remote.customers ?? []) {
+    if (customer && takeRemote(customer.id)) db.customers.set(customer.id, customer);
+  }
+  for (const order of remote.orders ?? []) {
+    if (order && takeRemote(order.id)) db.orders.set(order.id, order);
+  }
+  for (const ticket of remote.tickets ?? []) {
+    if (ticket && takeRemote(ticket.id)) db.tickets.set(ticket.id, ticket);
+  }
+  db.counters.order = Math.max(db.counters.order, remote.counters?.order ?? 0);
+  db.counters.ticket = Math.max(db.counters.ticket, remote.counters?.ticket ?? 0);
 }

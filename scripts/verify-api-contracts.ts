@@ -52,6 +52,15 @@ async function verifyGenerateAgoraTokenRoute() {
       body.channel === 'test-channel',
       'GET /api/generate-agora-token should preserve the requested channel',
     );
+    // Unit guard: Agora's token builder wants Unix *seconds*, but a client comparing an
+    // expiry against Date.now() needs milliseconds. Returning the builder's raw value
+    // reads as an expiry in 1970 and silently breaks anything that schedules on it.
+    assert(
+      typeof body.expiresAt === 'number' &&
+        body.expiresAt > Date.now() &&
+        body.expiresAt < Date.now() + 3_700_000,
+      `expiresAt must be Unix milliseconds about an hour out, got ${body.expiresAt}`,
+    );
 
     assert(
       Array.isArray(tokenBuilderArgs),
@@ -925,6 +934,278 @@ async function verifyDurableStoreMirror() {
   }
 }
 
+/**
+ * `NEXAVOICE_SEED=demo` demo data: opt-in, idempotent, and — the part that actually
+ * needs a test — safe when two cold instances seed at the same moment. Records carry
+ * fixed ids so the snapshot merge collapses the two sets into one instead of doubling
+ * the transcript in the dashboard.
+ */
+async function verifyDemoSeedFixture() {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const {
+    resetSupportDb,
+    resetPersistenceClient,
+    flushStore,
+    listConversations,
+    listMessages,
+    getConversation,
+    getCase,
+    createConversation,
+  } = await import('../lib/support/store');
+  const { seedDemoData, seedEnabled, maybeSeedDemoData, resetSeedState } = await import('../lib/support/seed');
+  const { getShopDb } = await import('../lib/shop/data');
+
+  const name = `seed-check-${process.pid}.json`;
+  const file = path.join(process.cwd(), '.data', name);
+  const previousStore = process.env.NEXAVOICE_STORE;
+  const previousFile = process.env.NEXAVOICE_STORE_FILE;
+  const previousSeed = process.env.NEXAVOICE_SEED;
+  process.env.NEXAVOICE_STORE = 'file';
+  process.env.NEXAVOICE_STORE_FILE = name;
+  resetPersistenceClient();
+  resetSupportDb();
+  await fs.rm(file, { force: true });
+
+  try {
+    // Off unless asked for.
+    delete process.env.NEXAVOICE_SEED;
+    assert(!seedEnabled(), 'seeding must be opt-in via NEXAVOICE_SEED');
+    resetSeedState();
+    await maybeSeedDemoData();
+    assert(listConversations().length === 0, 'no demo data without the flag');
+
+    // On: the fixture appears, and only on an empty store.
+    process.env.NEXAVOICE_SEED = 'demo';
+    assert(seedEnabled(), 'NEXAVOICE_SEED=demo should enable seeding');
+    resetSeedState();
+    await maybeSeedDemoData();
+    const conversations = listConversations();
+    assert(conversations.length === 3, `expected 3 demo conversations, got ${conversations.length}`);
+
+    const waiting = getConversation('conv_demo_waiting_case');
+    assert(waiting?.state === 'WAITING_FOR_HUMAN', 'the escalated demo chat should wait for a human');
+    assert(Boolean(waiting?.caseId), 'the escalated demo chat should own a case');
+    const waitingCase = waiting?.caseId ? getCase(waiting.caseId) : null;
+    assert(waitingCase?.priority === 'HIGH', 'a refund request should be seeded as HIGH');
+    assert(
+      (waitingCase?.handoff.missing_information.length ?? 0) > 0,
+      'the handoff summary should carry what the customer still owes',
+    );
+    const resolvedVoice = getConversation('conv_demo_voice_resolved');
+    assert(resolvedVoice?.state === 'RESOLVED', 'the demo voice case should read as resolved');
+    const resolvedCase = resolvedVoice?.caseId ? getCase(resolvedVoice.caseId) : null;
+    assert(resolvedCase?.status === 'RESOLVED' && Boolean(resolvedCase.resolutionNote), 'resolved case needs a note');
+    assert(
+      listMessages('conv_demo_active_chat').length === 2,
+      'the active demo chat should have exactly two turns',
+    );
+    assert(
+      listMessages('conv_demo_voice_resolved').some((m) => m.role === 'human_agent'),
+      'the demo voice transcript should include the human turn',
+    );
+
+    // Demo data has to be consistent with the shop, or a human agent clicking through
+    // a seeded case lands on an order that does not exist.
+    const shop = getShopDb();
+    for (const conversation of listConversations()) {
+      for (const orderId of conversation.context.orderIds) {
+        assert(shop.orders.has(orderId), `seeded order ${orderId} must exist in the shop data`);
+      }
+      if (conversation.context.customer) {
+        assert(shop.customers.has(conversation.context.customer.id), 'seeded customer must exist in the shop data');
+      }
+      assert(conversation.createdAt < Date.now() - 60_000, 'demo records should be back-dated, not "just now"');
+    }
+
+    // Second call changes nothing, and never on a store that already has data.
+    const second = seedDemoData({ onlyIfEmpty: true });
+    assert(second.skipped && second.created.length === 0, 'a non-empty store must not be re-seeded');
+    const third = seedDemoData();
+    assert(third.created.length === 0 && third.skipped, 'existing demo records must not be replaced');
+    assert(listConversations().length === 3, 'the store must still hold exactly the demo set');
+
+    // A conversation added by a real customer is untouched by seeding.
+    const live = createConversation({ mode: 'CHAT' });
+    const seeded = seedDemoData();
+    assert(seeded.created.length === 0, 'seeding must not add records that already exist');
+    assert(Boolean(getConversation(live.id)), 'live conversations must survive seeding');
+
+    // The race: a cold instance that seeded without ever seeing the first one's write
+    // must merge to the same document, not a doubled one.
+    await flushStore();
+    const first = JSON.parse(await fs.readFile(file, 'utf8'));
+    const firstMessages = Object.values(first.messages as Record<string, unknown[]>[])
+      .flat().length;
+    resetSupportDb();
+    assert(listConversations().length === 0, 'the simulated instance starts empty');
+    seedDemoData();
+    await flushStore();
+    const merged = JSON.parse(await fs.readFile(file, 'utf8'));
+    assert(
+      merged.conversations.length === first.conversations.length,
+      `conversations must not double after a racing seed (${first.conversations.length} → ${merged.conversations.length})`,
+    );
+    const mergedMessages = Object.values(merged.messages as Record<string, { id: string }[]>[])
+      .flat();
+    assert(
+      mergedMessages.length === firstMessages,
+      `transcript must not double after a racing seed (${firstMessages} → ${mergedMessages.length})`,
+    );
+    assert(
+      new Set(mergedMessages.map((m) => m.id)).size === mergedMessages.length,
+      'seeded message ids must be stable so the merge dedupes them',
+    );
+    assert(
+      merged.events.length === first.events.length,
+      `activity feed must not double after a racing seed (${first.events.length} → ${merged.events.length})`,
+    );
+    console.log('demo seed fixture: opt-in, idempotent, race-safe');
+  } finally {
+    await fs.rm(file, { force: true });
+    if (previousStore === undefined) delete process.env.NEXAVOICE_STORE;
+    else process.env.NEXAVOICE_STORE = previousStore;
+    if (previousFile === undefined) delete process.env.NEXAVOICE_STORE_FILE;
+    else process.env.NEXAVOICE_STORE_FILE = previousFile;
+    if (previousSeed === undefined) delete process.env.NEXAVOICE_SEED;
+    else process.env.NEXAVOICE_SEED = previousSeed;
+    resetSeedState();
+    resetSupportDb();
+    resetPersistenceClient();
+  }
+}
+
+/**
+ * The demo shop is process-local global state, so a cancellation made on one serverless
+ * instance used to be invisible to the next — the customer was told "cancelled" and the
+ * following turn (or the human dashboard) still read the order as PLACED. It now rides in
+ * the same mirror as conversations, with one rule that needs pinning: a record this
+ * instance actually wrote wins a tie, so a freshly seeded copy cannot clobber a real
+ * cancellation back to pristine fixture data.
+ */
+async function verifyShopWritesAreMirrored() {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const { resetSupportDb, resetPersistenceClient, hydrateStore, flushStore, appendMessage, createConversation } =
+    await import('../lib/support/store');
+  const { cancelOrder, getOrder } = await import('../lib/shop/service');
+  const { getShopDb, resetShopDb } = await import('../lib/shop/data');
+
+  const name = `shop-check-${process.pid}.json`;
+  const file = path.join(process.cwd(), '.data', name);
+  const previousStore = process.env.NEXAVOICE_STORE;
+  const previousFile = process.env.NEXAVOICE_STORE_FILE;
+  process.env.NEXAVOICE_STORE = 'file';
+  process.env.NEXAVOICE_STORE_FILE = name;
+  resetPersistenceClient();
+  resetSupportDb();
+  resetShopDb();
+  await fs.rm(file, { force: true });
+
+  const doc = async () =>
+    JSON.parse(await fs.readFile(file, 'utf8')) as {
+      shop: { orders: { id: string; status: string; cancellationReason?: string }[] };
+    };
+  const statusOf = async (id: string) =>
+    (await doc()).shop.orders.find((order) => order.id === id)?.status;
+
+  try {
+    // Instance A cancels and flushes.
+    createConversation({ id: 'conv_shop_check', mode: 'CHAT' });
+    assert(cancelOrder('cust_rahul', 'NM-10023', 'faulty item').ok, 'NM-10023 should be cancellable');
+    await flushStore();
+    assert((await statusOf('NM-10023')) === 'CANCELLED', 'a cancellation must reach the shared document');
+
+    // Instance B is cold: freshly seeded, no memory of A.
+    resetSupportDb();
+    resetShopDb();
+    assert(getOrder('NM-10023')?.status === 'PLACED', 'a fresh seed starts un-cancelled');
+    await hydrateStore();
+    assert(getOrder('NM-10023')?.status === 'CANCELLED', 'a cold instance must see the other instance\'s cancellation');
+    assert(getOrder('NM-10021')?.status === 'SHIPPED', 'unrelated orders survive the merge');
+    assert(getShopDb().customers.size >= 3, 'customers should still be present after a merge');
+
+    // B writes its own change: both cancellations must end up in the document, and a
+    // record B merely read must not be reverted to B's pristine seed.
+    assert(cancelOrder('cust_amit', 'NM-10035', 'ordered the wrong size').ok, 'NM-10035 should be cancellable');
+    appendMessage('conv_shop_check', 'ai', 'Noted — that order is cancelled too.');
+    await flushStore();
+    assert((await statusOf('NM-10023')) === 'CANCELLED', 'A\'s write must not be clobbered by B');
+    assert((await statusOf('NM-10035')) === 'CANCELLED', 'B\'s own write must be published');
+
+    // A third cold instance sees both.
+    resetSupportDb();
+    resetShopDb();
+    await hydrateStore();
+    assert(
+      getOrder('NM-10023')?.status === 'CANCELLED' && getOrder('NM-10035')?.status === 'CANCELLED',
+      'every instance should converge on the same shop state',
+    );
+    console.log('shop state: mirrored across instances, local writes win ties');
+  } finally {
+    await fs.rm(file, { force: true });
+    resetShopDb();
+    if (previousStore === undefined) delete process.env.NEXAVOICE_STORE;
+    else process.env.NEXAVOICE_STORE = previousStore;
+    if (previousFile === undefined) delete process.env.NEXAVOICE_STORE_FILE;
+    else process.env.NEXAVOICE_STORE_FILE = previousFile;
+    resetSupportDb();
+    resetPersistenceClient();
+  }
+}
+
+
+/**
+ * Route-bracketing invariant. The durable mirror only works if a handler reads the shared
+ * document before touching state and writes it back before responding, and that is exactly
+ * the kind of requirement a new route quietly forgets (the demo shop read routes did —
+ * they answered from a stale copy on a warm instance and it looked fine locally).
+ *
+ * So: any `app/api` route that imports support or shop state must either go through
+ * `withStore()` or hydrate explicitly, and no route may flush by hand — a hand-written
+ * flush skips the read-merge that keeps other instances' writes alive.
+ */
+async function verifyStatefulRoutesAreBracketed() {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const root = 'app/api';
+
+  const routes: string[] = [];
+  const walk = async (dir: string) => {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.name === 'route.ts') routes.push(full);
+    }
+  };
+  await walk(root);
+  assert(routes.length >= 15, `expected the whole api surface, found ${routes.length} routes`);
+
+  const stateful = /from '[^']*(lib\/shop|lib\/support)[^']*'/;
+  let checked = 0;
+  for (const file of routes) {
+    const source = await fs.readFile(file, 'utf8');
+    if (!stateful.test(source)) continue;
+    checked += 1;
+    const bracketed = source.includes('withStore(');
+    const hydrates = source.includes('hydrateStore(');
+    assert(
+      bracketed || hydrates,
+      `${file} reads support/shop state but neither uses withStore() nor hydrateStore() — it would serve stale data on another instance`,
+    );
+    assert(
+      !bracketed || !source.includes('flushStore('),
+      `${file} uses withStore() and calls flushStore() directly — the wrapper already flushes, and a manual flush can publish an unmerged document`,
+    );
+  }
+  assert(checked >= 15, `expected at least 15 stateful routes to be checked, got ${checked}`);
+
+  // And a handler must not be able to skip the bracket by exporting the raw function.
+  const conversationRoute = await fs.readFile('app/api/conversations/[id]/messages/route.ts', 'utf8');
+  assert(/export const POST = withStore\(/.test(conversationRoute), 'the chat turn route must be bracketed');
+  console.log(`route bracketing: ${checked} stateful routes checked`);
+}
+
 async function verifyHealthRoute() {
   const { GET: health } = await import('../app/api/health/route');
   const response = await health();
@@ -980,6 +1261,9 @@ async function main() {
   await verifyToolsUrlAndSecret();
   await verifyEnableToolsFollowsTools();
   await verifyDurableStoreMirror();
+  await verifyStatefulRoutesAreBracketed();
+  await verifyDemoSeedFixture();
+  await verifyShopWritesAreMirrored();
   await verifyHealthRoute();
 
   console.log('API contract checks passed');
