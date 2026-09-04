@@ -98,10 +98,11 @@ rg "^(NEXT_PUBLIC_AGORA_APP_ID|NEXT_AGORA_APP_CERTIFICATE)=" .env.local
 ```
 
 Copy those two values into Vercel Project Settings → Environment Variables. Mark
-`NEXT_PUBLIC_AGORA_APP_ID` for **both** Build and Runtime environments — the browser
-bundle reads it at build time, while the API routes read it at runtime. (The app now
-also serves the App ID from `GET /api/generate-agora-token`, so a Runtime-only value
-still lets voice calls connect.)
+`NEXT_PUBLIC_AGORA_APP_ID` for **Build** as well as Runtime: a `NEXT_PUBLIC_*` value is
+inlined into the browser bundle at build time, so ticking Runtime alone leaves the
+client with `undefined`. The app no longer breaks on that — the client joins with the
+App ID returned by `GET /api/generate-agora-token`, which the server reads at runtime —
+but keep both set so the fallback and the signed token always agree.
 
 ### Two things a Vercel deployment needs that local dev does not
 

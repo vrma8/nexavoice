@@ -107,7 +107,9 @@ Vercel:
 - Keep `NEXT_AGORA_APP_CERTIFICATE` private server variable.
 - Tick **Build** for `NEXT_PUBLIC_AGORA_APP_ID` as well as Development/Preview/Production:
   it is inlined into the client bundle, and a Runtime-only value leaves the browser with
-  `undefined` (the app then relies on the `appId` returned by `/api/generate-agora-token`).
+  `undefined`. The client then joins with the `appId` returned by
+  `/api/generate-agora-token` (which the server reads at runtime), so calls still connect —
+  keep both environments set so the fallback and the signed token agree.
 - Create a Blob store (Project → Storage → Create Database → Blob) so conversation and
   case state are shared between function instances; `BLOB_READ_WRITE_TOKEN` is injected
   and `lib/support/persist.ts` picks it up automatically. Without it the chat cannot
