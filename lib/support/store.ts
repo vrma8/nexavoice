@@ -31,6 +31,7 @@ import type {
   ConversationMessage,
   ConversationMode,
   ConversationState,
+  CustomerSnapshot,
   HandoffSummary,
   MessageRole,
   SupportCase,

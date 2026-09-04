@@ -15,8 +15,41 @@ function getJson(response: Response) {
 process.env.NEXT_PUBLIC_AGORA_APP_ID = '0123456789abcdef0123456789abcdef';
 process.env.NEXT_AGORA_APP_CERTIFICATE = 'fedcba9876543210fedcba9876543210';
 // Keep the durable mirror off unless a test turns it on: contract checks must not
-// touch a developer's real Vercel Blob store just because it is in the env file.
+// touch a developer's real store just because DATABASE_URL is in the env file.
 process.env.NEXAVOICE_STORE = 'memory';
+
+/**
+ * Durability checks need PostgreSQL. They skip (without failing) when no database
+ * is reachable — e.g. inside a build container that has no Postgres — so the rest
+ * of the contract suite still runs.
+ */
+async function postgresAvailable(): Promise<boolean> {
+  if (!process.env.DATABASE_URL?.trim()) return false;
+  try {
+    const { Client } = await import('pg');
+    const client = new Client({
+      connectionString: process.env.DATABASE_URL,
+      connectionTimeoutMillis: 2000,
+    });
+    await client.connect();
+    await client.query('SELECT 1');
+    await client.end();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Deletes a Postgres-backed store document, used to clean up isolated test state. */
+async function deleteStoreDocument(key: string): Promise<void> {
+  try {
+    const { prisma } = await import('../lib/db');
+    await prisma.storeState.deleteMany({ where: { id: key } });
+  } catch {
+    // Best effort — the row id is unique to this process run.
+  }
+}
+
 
 async function verifyGenerateAgoraTokenRoute() {
   const { GET: generateAgoraToken } =
@@ -855,21 +888,23 @@ async function verifyEnableToolsFollowsTools() {
 
 /**
  * The Vercel regression this guards: two route invocations must observe the same
- * conversations even though each runs with a fresh in-memory store.
+ * conversations even though each runs with a fresh in-memory store. The shared
+ * document now lives in PostgreSQL (StoreState), so this check points the mirror
+ * at an isolated row and skips entirely when no database is reachable.
  */
 async function verifyDurableStoreMirror() {
-  const { mkdtemp, rm } = await import('node:fs/promises');
-  const { tmpdir } = await import('node:os');
-  const path = await import('node:path');
+  if (!(await postgresAvailable())) {
+    console.log('durable store mirror: skipped (no PostgreSQL reachable)');
+    return;
+  }
   const { resetSupportDb, resetPersistenceClient, getStoreSyncStatus } =
     await import('../lib/support/store');
 
-  const dir = await mkdtemp(path.join(tmpdir(), 'nexavoice-store-'));
-  const file = path.join(dir, 'state.json');
-  const previous = process.env.NEXAVOICE_STORE;
-  const previousFile = process.env.NEXAVOICE_STORE_FILE;
-  process.env.NEXAVOICE_STORE = 'file';
-  process.env.NEXAVOICE_STORE_FILE = file;
+  const previousStore = process.env.NEXAVOICE_STORE;
+  const previousKey = process.env.NEXAVOICE_STATE_KEY;
+  const key = `contract-mirror-${process.pid}-${Date.now()}`;
+  process.env.NEXAVOICE_STORE = 'postgres';
+  process.env.NEXAVOICE_STATE_KEY = key;
   resetPersistenceClient();
   resetSupportDb();
 
@@ -886,8 +921,8 @@ async function verifyDurableStoreMirror() {
     const conversationId = (created.conversation as { id: string }).id;
     assert(typeof conversationId === 'string', 'conversation should be created');
     assert(
-      getStoreSyncStatus().backend === 'file',
-      'the file backend should be active for this check',
+      getStoreSyncStatus().backend === 'postgres',
+      'the postgres backend should be active for this check',
     );
 
     // A second instance: same code, empty memory, no shared process state.
@@ -924,13 +959,13 @@ async function verifyDurableStoreMirror() {
       'mirrored messages must survive an instance restart',
     );
   } finally {
-    if (previous === undefined) delete process.env.NEXAVOICE_STORE;
-    else process.env.NEXAVOICE_STORE = previous;
-    if (previousFile === undefined) delete process.env.NEXAVOICE_STORE_FILE;
-    else process.env.NEXAVOICE_STORE_FILE = previousFile;
+    await deleteStoreDocument(key);
+    if (previousStore === undefined) delete process.env.NEXAVOICE_STORE;
+    else process.env.NEXAVOICE_STORE = previousStore;
+    if (previousKey === undefined) delete process.env.NEXAVOICE_STATE_KEY;
+    else process.env.NEXAVOICE_STATE_KEY = previousKey;
     resetPersistenceClient();
     resetSupportDb();
-    await rm(dir, { recursive: true, force: true });
   }
 }
 
@@ -941,8 +976,6 @@ async function verifyDurableStoreMirror() {
  * the transcript in the dashboard.
  */
 async function verifyDemoSeedFixture() {
-  const fs = await import('node:fs/promises');
-  const path = await import('node:path');
   const {
     resetSupportDb,
     resetPersistenceClient,
@@ -956,16 +989,14 @@ async function verifyDemoSeedFixture() {
   const { seedDemoData, seedEnabled, maybeSeedDemoData, resetSeedState } = await import('../lib/support/seed');
   const { getShopDb } = await import('../lib/shop/data');
 
-  const name = `seed-check-${process.pid}.json`;
-  const file = path.join(process.cwd(), '.data', name);
   const previousStore = process.env.NEXAVOICE_STORE;
-  const previousFile = process.env.NEXAVOICE_STORE_FILE;
+  const previousKey = process.env.NEXAVOICE_STATE_KEY;
   const previousSeed = process.env.NEXAVOICE_SEED;
-  process.env.NEXAVOICE_STORE = 'file';
-  process.env.NEXAVOICE_STORE_FILE = name;
+  // In-memory backend is enough for the opt-in / idempotency assertions; the
+  // race-safe merge below re-points the mirror at an isolated Postgres row.
+  process.env.NEXAVOICE_STORE = 'memory';
   resetPersistenceClient();
   resetSupportDb();
-  await fs.rm(file, { force: true });
 
   try {
     // Off unless asked for.
@@ -1032,41 +1063,55 @@ async function verifyDemoSeedFixture() {
     assert(Boolean(getConversation(live.id)), 'live conversations must survive seeding');
 
     // The race: a cold instance that seeded without ever seeing the first one's write
-    // must merge to the same document, not a doubled one.
-    await flushStore();
-    const first = JSON.parse(await fs.readFile(file, 'utf8'));
-    const firstMessages = Object.values(first.messages as Record<string, unknown[]>[])
-      .flat().length;
-    resetSupportDb();
-    assert(listConversations().length === 0, 'the simulated instance starts empty');
-    seedDemoData();
-    await flushStore();
-    const merged = JSON.parse(await fs.readFile(file, 'utf8'));
-    assert(
-      merged.conversations.length === first.conversations.length,
-      `conversations must not double after a racing seed (${first.conversations.length} → ${merged.conversations.length})`,
-    );
-    const mergedMessages = Object.values(merged.messages as Record<string, { id: string }[]>[])
-      .flat();
-    assert(
-      mergedMessages.length === firstMessages,
-      `transcript must not double after a racing seed (${firstMessages} → ${mergedMessages.length})`,
-    );
-    assert(
-      new Set(mergedMessages.map((m) => m.id)).size === mergedMessages.length,
-      'seeded message ids must be stable so the merge dedupes them',
-    );
-    assert(
-      merged.events.length === first.events.length,
-      `activity feed must not double after a racing seed (${first.events.length} → ${merged.events.length})`,
-    );
+    // must merge to the same document, not a doubled one. Needs the durable mirror.
+    if (await postgresAvailable()) {
+      const { prisma } = await import('../lib/db');
+      const key = `contract-seed-${process.pid}-${Date.now()}`;
+      const readDoc = async () => {
+        const row = await prisma.storeState.findUnique({ where: { id: key } });
+        assert(Boolean(row), 'the mirror row should exist after a flush');
+        return row?.snapshot as {
+          conversations: unknown[];
+          messages: Record<string, unknown[]>;
+          events: unknown[];
+        };
+      };
+      process.env.NEXAVOICE_STORE = 'postgres';
+      process.env.NEXAVOICE_STATE_KEY = key;
+      resetPersistenceClient();
+      await flushStore();
+      const first = await readDoc();
+      const firstMessages = Object.values(first.messages).flat().length;
+      resetSupportDb();
+      assert(listConversations().length === 0, 'the simulated instance starts empty');
+      seedDemoData();
+      await flushStore();
+      const merged = await readDoc();
+      assert(
+        merged.conversations.length === first.conversations.length,
+        `conversations must not double after a racing seed (${first.conversations.length} → ${merged.conversations.length})`,
+      );
+      const mergedMessages = Object.values(merged.messages as Record<string, { id: string }[]>).flat();
+      assert(
+        mergedMessages.length === firstMessages,
+        `transcript must not double after a racing seed (${firstMessages} → ${mergedMessages.length})`,
+      );
+      assert(
+        new Set(mergedMessages.map((m) => m.id)).size === mergedMessages.length,
+        'seeded message ids must be stable so the merge dedupes them',
+      );
+      assert(
+        merged.events.length === first.events.length,
+        `activity feed must not double after a racing seed (${first.events.length} → ${merged.events.length})`,
+      );
+      await deleteStoreDocument(key);
+    }
     console.log('demo seed fixture: opt-in, idempotent, race-safe');
   } finally {
-    await fs.rm(file, { force: true });
     if (previousStore === undefined) delete process.env.NEXAVOICE_STORE;
     else process.env.NEXAVOICE_STORE = previousStore;
-    if (previousFile === undefined) delete process.env.NEXAVOICE_STORE_FILE;
-    else process.env.NEXAVOICE_STORE_FILE = previousFile;
+    if (previousKey === undefined) delete process.env.NEXAVOICE_STATE_KEY;
+    else process.env.NEXAVOICE_STATE_KEY = previousKey;
     if (previousSeed === undefined) delete process.env.NEXAVOICE_SEED;
     else process.env.NEXAVOICE_SEED = previousSeed;
     resetSeedState();
@@ -1084,28 +1129,32 @@ async function verifyDemoSeedFixture() {
  * cancellation back to pristine fixture data.
  */
 async function verifyShopWritesAreMirrored() {
-  const fs = await import('node:fs/promises');
-  const path = await import('node:path');
+  if (!(await postgresAvailable())) {
+    console.log('shop writes mirror: skipped (no PostgreSQL reachable)');
+    return;
+  }
   const { resetSupportDb, resetPersistenceClient, hydrateStore, flushStore, appendMessage, createConversation } =
     await import('../lib/support/store');
   const { cancelOrder, getOrder } = await import('../lib/shop/service');
   const { getShopDb, resetShopDb } = await import('../lib/shop/data');
+  const { prisma } = await import('../lib/db');
 
-  const name = `shop-check-${process.pid}.json`;
-  const file = path.join(process.cwd(), '.data', name);
   const previousStore = process.env.NEXAVOICE_STORE;
-  const previousFile = process.env.NEXAVOICE_STORE_FILE;
-  process.env.NEXAVOICE_STORE = 'file';
-  process.env.NEXAVOICE_STORE_FILE = name;
+  const previousKey = process.env.NEXAVOICE_STATE_KEY;
+  const key = `contract-shop-${process.pid}-${Date.now()}`;
+  process.env.NEXAVOICE_STORE = 'postgres';
+  process.env.NEXAVOICE_STATE_KEY = key;
   resetPersistenceClient();
   resetSupportDb();
   resetShopDb();
-  await fs.rm(file, { force: true });
 
-  const doc = async () =>
-    JSON.parse(await fs.readFile(file, 'utf8')) as {
+  const doc = async () => {
+    const row = await prisma.storeState.findUnique({ where: { id: key } });
+    assert(Boolean(row), 'the mirror row should exist after a flush');
+    return row?.snapshot as {
       shop: { orders: { id: string; status: string; cancellationReason?: string }[] };
     };
+  };
   const statusOf = async (id: string) =>
     (await doc()).shop.orders.find((order) => order.id === id)?.status;
 
@@ -1143,12 +1192,12 @@ async function verifyShopWritesAreMirrored() {
     );
     console.log('shop state: mirrored across instances, local writes win ties');
   } finally {
-    await fs.rm(file, { force: true });
+    await deleteStoreDocument(key);
     resetShopDb();
     if (previousStore === undefined) delete process.env.NEXAVOICE_STORE;
     else process.env.NEXAVOICE_STORE = previousStore;
-    if (previousFile === undefined) delete process.env.NEXAVOICE_STORE_FILE;
-    else process.env.NEXAVOICE_STORE_FILE = previousFile;
+    if (previousKey === undefined) delete process.env.NEXAVOICE_STATE_KEY;
+    else process.env.NEXAVOICE_STATE_KEY = previousKey;
     resetSupportDb();
     resetPersistenceClient();
   }

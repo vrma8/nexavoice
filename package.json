@@ -17,7 +17,7 @@
     "seed": "node --env-file-if-exists=.env.local --import tsx scripts/seed-demo-store.ts",
     "typecheck": "tsc --noEmit",
     "postinstall": "prisma generate",
-    "db:push": "prisma db push",
+    "db:push": "node scripts/db-push.mjs",
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
     "verify": "pnpm run doctor && pnpm run lint && pnpm run typecheck && pnpm run verify:api && pnpm run build"
