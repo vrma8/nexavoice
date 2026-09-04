@@ -16,6 +16,10 @@
 - **No hydration TTL.** Consecutive requests from one browser land on different
   instances; skipping a read because "we just synced" answers the next turn from stale
   state (the customer is asked for their phone number again).
+- **Demo records need fixed ids.** `NEXAVOICE_SEED=demo` data is written by whichever
+  instance cold-starts first, and two at once is normal on Vercel. The seeded
+  conversations, messages and events in `lib/support/seed.ts` therefore use deterministic
+  ids so `mergeSnapshots` dedupes them — random ids double the seeded transcript.
 - **Anything added to `lib/support/types.ts` must be mirrored** in
   `lib/support/snapshot.ts`'s `toSnapshot()`/`applySnapshot()`, or it works locally and
   vanishes on a serverless deployment.

@@ -3,6 +3,7 @@ import { getAgoraCredentials } from '@/lib/agora-server';
 import { getToolSecret, resolveToolsBaseUrl } from '@/lib/agent-tools';
 import { INTERACTION_LANGUAGE, STT_LANGUAGE, TTS_VOICE_ID } from '@/lib/agent-config';
 import { getStoreSyncStatus } from '@/lib/support/store';
+import { getSeedStatus } from '@/lib/support/seed';
 import { listConversations } from '@/lib/support/store';
 
 export const dynamic = 'force-dynamic';
@@ -58,6 +59,7 @@ export async function GET() {
         sttLanguage: STT_LANGUAGE,
         ttsVoice: TTS_VOICE_ID,
       },
+      seed: getSeedStatus(),
       store: {
         ...sync,
         conversations: listConversations().length,

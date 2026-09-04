@@ -31,6 +31,7 @@ The sections below (Start Here, Patterns, Anti-Patterns, etc.) remain the canoni
 - UI components: `agora-agent-uikit` for visualizer, transcript, and mic controls
 - Server SDK: `agora-agents` for managed agent session startup, `stopAgent`, and `agents.speak` (handover line)
 - API routes in `app/api`: token, invite/stop agent, REST tool endpoint for the engine, custom-LLM proxy, conversations/messages (chat), escalation, cases (accept/takeover/resolve), dashboard (+SSE), demo shop, health (deployment self-check)
+- Optional demo fixture in `lib/support/seed.ts` (`NEXAVOICE_SEED=demo`), applied through `withStore()`; `pnpm run seed` (`scripts/seed-demo-store.ts`) is the terminal path
 - Support domain in `lib/support` (conversation/case store, guarded `executeTool`, handoff summary) and demo shop in `lib/shop` (data + business rules). The store is an in-memory cache on `globalThis`, mirrored to a durable backend (Vercel Blob, or a file for a single container) so state survives across serverless instances — `lib/support/persist.ts` + `snapshot.ts` own that layer.
 - Default agent config (`lib/agent-config.ts`): Agora-managed Deepgram STT (`multi`), OpenAI `gpt-4o-mini`, MiniMax TTS; NexaMart system prompt in `lib/agent-prompt.ts`; inline REST tools from `lib/agent-tools.ts`. `/api/health` reports the deployment self-check. `.env.local` needs only Agora credentials — `AGENT_TOOLS_BASE_URL`/`AGENT_TOOLS_SECRET` are optional now (tool origin comes from the request URL, the secret is derived from the App Certificate).
 - Chat: `lib/chat-agent.ts` — LLM (`ai` + `@ai-sdk/openai`) when `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` are set, otherwise a rule-based EN/HI/Hinglish agent over the same tools.
@@ -52,7 +53,9 @@ The sections below (Start Here, Patterns, Anti-Patterns, etc.) remain the canoni
 - Create a **Vercel Blob store** (Project → Storage → Create Database → Blob) so `BLOB_READ_WRITE_TOKEN` exists and conversation/case state is shared between function instances. Without it, the second chat request lands on an instance that never saw the conversation and answers "Conversation not found".
 - Voice tools need the Agora engine to reach `/api/agent-tools/*`; the deployment origin is used automatically and `AGENT_TOOLS_BASE_URL` / `AGENT_TOOLS_SECRET` only override it. A custom `asr.llmTools` object in the `POST /api/invite-agent` body must carry the same `toolsUrl`/`toolsSecret`, because those values are generated server-side.
 - Each Vercel function needs a `maxDuration` (exported per route) that fits the plan: without Fluid compute the default is 10s, which cuts `invite-agent` and a streamed LLM turn off mid-flight.
-- Check a deployment with `curl https://<deployment>/api/health` — credential state, tool wiring, LLM provider and store backend, without leaking secrets.
+- Check a deployment with `curl https://<deployment>/api/health` — credential state, tool wiring, LLM provider, store backend and what `NEXAVOICE_SEED` did, without leaking secrets.
+- Set `AGORA_AREA` to the project's service area: `US` (default) | `EU` | `AP` | `CN`. Agora has no separate India gateway — Asia-Pacific, including India, is `AP`. An unrecognised value warns once and falls back to `US` (`lib/agora-server.ts`), because a wrong region otherwise surfaces as an agent that never starts.
+- `NEXAVOICE_SEED=demo` is the opt-in demo fixture; see the Demo Data pattern above before changing it.
 
 ## Routing / Ownership
 
@@ -146,6 +149,19 @@ reads on every request and coalesces concurrent reads on one instance instead.
 Anything new in the store must round-trip through `toSnapshot()`/`applySnapshot()` in
 `lib/support/snapshot.ts` — that list is the contract; unlisted fields work locally
 and vanish on Vercel.
+
+### Demo Data (`NEXAVOICE_SEED=demo`)
+
+`lib/support/seed.ts` writes a three-record fixture (active chat, escalated HIGH case,
+resolved voice call) into the active durable backend so a fresh deployment has a
+populated dashboard. It runs from `withStore()` — after hydration, so it sees what other
+instances already wrote — once per process, only when the store has **no** conversations,
+and never replacing a record that exists. Seeded conversations, messages and events carry
+**fixed ids** because two cold instances can seed simultaneously and `mergeSnapshots`
+dedupes by id; anything added to the fixture must keep that property or the transcript
+doubles. `pnpm run seed` is the explicit terminal path (it reads `.env.local` for
+`BLOB_READ_WRITE_TOKEN`). Failures are recorded for `/api/health` and never thrown: demo
+data must not be able to break a real conversation.
 
 ### Client App ID (`resolveAppId`)
 

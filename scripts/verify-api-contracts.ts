@@ -925,6 +925,147 @@ async function verifyDurableStoreMirror() {
   }
 }
 
+/**
+ * `NEXAVOICE_SEED=demo` demo data: opt-in, idempotent, and — the part that actually
+ * needs a test — safe when two cold instances seed at the same moment. Records carry
+ * fixed ids so the snapshot merge collapses the two sets into one instead of doubling
+ * the transcript in the dashboard.
+ */
+async function verifyDemoSeedFixture() {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const {
+    resetSupportDb,
+    resetPersistenceClient,
+    flushStore,
+    listConversations,
+    listMessages,
+    getConversation,
+    getCase,
+    createConversation,
+  } = await import('../lib/support/store');
+  const { seedDemoData, seedEnabled, maybeSeedDemoData, resetSeedState } = await import('../lib/support/seed');
+  const { getShopDb } = await import('../lib/shop/data');
+
+  const name = `seed-check-${process.pid}.json`;
+  const file = path.join(process.cwd(), '.data', name);
+  const previousStore = process.env.NEXAVOICE_STORE;
+  const previousFile = process.env.NEXAVOICE_STORE_FILE;
+  const previousSeed = process.env.NEXAVOICE_SEED;
+  process.env.NEXAVOICE_STORE = 'file';
+  process.env.NEXAVOICE_STORE_FILE = name;
+  resetPersistenceClient();
+  resetSupportDb();
+  await fs.rm(file, { force: true });
+
+  try {
+    // Off unless asked for.
+    delete process.env.NEXAVOICE_SEED;
+    assert(!seedEnabled(), 'seeding must be opt-in via NEXAVOICE_SEED');
+    resetSeedState();
+    await maybeSeedDemoData();
+    assert(listConversations().length === 0, 'no demo data without the flag');
+
+    // On: the fixture appears, and only on an empty store.
+    process.env.NEXAVOICE_SEED = 'demo';
+    assert(seedEnabled(), 'NEXAVOICE_SEED=demo should enable seeding');
+    resetSeedState();
+    await maybeSeedDemoData();
+    const conversations = listConversations();
+    assert(conversations.length === 3, `expected 3 demo conversations, got ${conversations.length}`);
+
+    const waiting = getConversation('conv_demo_waiting_case');
+    assert(waiting?.state === 'WAITING_FOR_HUMAN', 'the escalated demo chat should wait for a human');
+    assert(Boolean(waiting?.caseId), 'the escalated demo chat should own a case');
+    const waitingCase = waiting?.caseId ? getCase(waiting.caseId) : null;
+    assert(waitingCase?.priority === 'HIGH', 'a refund request should be seeded as HIGH');
+    assert(
+      (waitingCase?.handoff.missing_information.length ?? 0) > 0,
+      'the handoff summary should carry what the customer still owes',
+    );
+    const resolvedVoice = getConversation('conv_demo_voice_resolved');
+    assert(resolvedVoice?.state === 'RESOLVED', 'the demo voice case should read as resolved');
+    const resolvedCase = resolvedVoice?.caseId ? getCase(resolvedVoice.caseId) : null;
+    assert(resolvedCase?.status === 'RESOLVED' && Boolean(resolvedCase.resolutionNote), 'resolved case needs a note');
+    assert(
+      listMessages('conv_demo_active_chat').length === 2,
+      'the active demo chat should have exactly two turns',
+    );
+    assert(
+      listMessages('conv_demo_voice_resolved').some((m) => m.role === 'human_agent'),
+      'the demo voice transcript should include the human turn',
+    );
+
+    // Demo data has to be consistent with the shop, or a human agent clicking through
+    // a seeded case lands on an order that does not exist.
+    const shop = getShopDb();
+    for (const conversation of listConversations()) {
+      for (const orderId of conversation.context.orderIds) {
+        assert(shop.orders.has(orderId), `seeded order ${orderId} must exist in the shop data`);
+      }
+      if (conversation.context.customer) {
+        assert(shop.customers.has(conversation.context.customer.id), 'seeded customer must exist in the shop data');
+      }
+      assert(conversation.createdAt < Date.now() - 60_000, 'demo records should be back-dated, not "just now"');
+    }
+
+    // Second call changes nothing, and never on a store that already has data.
+    const second = seedDemoData({ onlyIfEmpty: true });
+    assert(second.skipped && second.created.length === 0, 'a non-empty store must not be re-seeded');
+    const third = seedDemoData();
+    assert(third.created.length === 0 && third.skipped, 'existing demo records must not be replaced');
+    assert(listConversations().length === 3, 'the store must still hold exactly the demo set');
+
+    // A conversation added by a real customer is untouched by seeding.
+    const live = createConversation({ mode: 'CHAT' });
+    const seeded = seedDemoData();
+    assert(seeded.created.length === 0, 'seeding must not add records that already exist');
+    assert(Boolean(getConversation(live.id)), 'live conversations must survive seeding');
+
+    // The race: a cold instance that seeded without ever seeing the first one's write
+    // must merge to the same document, not a doubled one.
+    await flushStore();
+    const first = JSON.parse(await fs.readFile(file, 'utf8'));
+    const firstMessages = Object.values(first.messages as Record<string, unknown[]>[])
+      .flat().length;
+    resetSupportDb();
+    assert(listConversations().length === 0, 'the simulated instance starts empty');
+    seedDemoData();
+    await flushStore();
+    const merged = JSON.parse(await fs.readFile(file, 'utf8'));
+    assert(
+      merged.conversations.length === first.conversations.length,
+      `conversations must not double after a racing seed (${first.conversations.length} → ${merged.conversations.length})`,
+    );
+    const mergedMessages = Object.values(merged.messages as Record<string, { id: string }[]>[])
+      .flat();
+    assert(
+      mergedMessages.length === firstMessages,
+      `transcript must not double after a racing seed (${firstMessages} → ${mergedMessages.length})`,
+    );
+    assert(
+      new Set(mergedMessages.map((m) => m.id)).size === mergedMessages.length,
+      'seeded message ids must be stable so the merge dedupes them',
+    );
+    assert(
+      merged.events.length === first.events.length,
+      `activity feed must not double after a racing seed (${first.events.length} → ${merged.events.length})`,
+    );
+    console.log('demo seed fixture: opt-in, idempotent, race-safe');
+  } finally {
+    await fs.rm(file, { force: true });
+    if (previousStore === undefined) delete process.env.NEXAVOICE_STORE;
+    else process.env.NEXAVOICE_STORE = previousStore;
+    if (previousFile === undefined) delete process.env.NEXAVOICE_STORE_FILE;
+    else process.env.NEXAVOICE_STORE_FILE = previousFile;
+    if (previousSeed === undefined) delete process.env.NEXAVOICE_SEED;
+    else process.env.NEXAVOICE_SEED = previousSeed;
+    resetSeedState();
+    resetSupportDb();
+    resetPersistenceClient();
+  }
+}
+
 async function verifyHealthRoute() {
   const { GET: health } = await import('../app/api/health/route');
   const response = await health();
@@ -980,6 +1121,7 @@ async function main() {
   await verifyToolsUrlAndSecret();
   await verifyEnableToolsFollowsTools();
   await verifyDurableStoreMirror();
+  await verifyDemoSeedFixture();
   await verifyHealthRoute();
 
   console.log('API contract checks passed');

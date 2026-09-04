@@ -14,6 +14,7 @@
     "start": "next start",
     "lint": "eslint .",
     "verify:api": "node --import tsx scripts/verify-api-contracts.ts",
+    "seed": "node --env-file-if-exists=.env.local --import tsx scripts/seed-demo-store.ts",
     "typecheck": "tsc --noEmit",
     "verify": "pnpm run doctor && pnpm run lint && pnpm run typecheck && pnpm run verify:api && pnpm run build"
   },

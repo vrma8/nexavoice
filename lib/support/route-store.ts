@@ -10,6 +10,7 @@
  * `persist: 'always'` is for read-only routes that still have to record that they
  * observed remote state; the default only writes when something actually changed.
  */
+import { maybeSeedDemoData } from './seed';
 import { flushStore, hydrateStore } from './store';
 
 export interface WithStoreOptions {
@@ -22,7 +23,12 @@ export function withStore<T extends (...args: never[]) => Promise<unknown>>(
   options: WithStoreOptions = {},
 ): T {
   const wrapped = async (...args: Parameters<T>): Promise<Awaited<ReturnType<T>>> => {
-    if (options.hydrate !== false) await hydrateStore();
+    if (options.hydrate !== false) {
+      await hydrateStore();
+      // Opt-in demo data (`NEXAVOICE_SEED=demo`), after the hydration so it sees what
+      // other instances already wrote, and once per process. Never throws.
+      await maybeSeedDemoData();
+    }
     try {
       return (await handler(...args)) as Awaited<ReturnType<T>>;
     } finally {

@@ -36,7 +36,10 @@ The base `.env.local` contract contains only these Agora credentials; chat, dash
 ## NexaVoice Optional Variables
 
 - `AGENT_TOOLS_BASE_URL` + `AGENT_TOOLS_SECRET` (≥ 8 chars): enable the voice agent's REST tools (order lookup/changes/escalation). The URL must be publicly reachable by Agora (Vercel URL, or a tunnel for local dev).
-- `AGORA_AREA`: `US` (default) | `EU` | `AP`.
+- `AGORA_AREA`: `US` (default) | `EU` | `AP` | `CN` — the Agora REST gateway region, which
+  must match the project's service area (Asia-Pacific, including India, is `AP`). Anything
+  else logs a warning once and falls back to `US`, because a wrong region surfaces as an
+  agent that never starts rather than a clear error.
 - `AGENT_LANGUAGE` (`en-IN` default), `AGENT_STT_LANGUAGE` (`multi`), `AGENT_TTS_VOICE_ID`.
 - `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` (+ `NEXT_LLM_MODEL`): BYOK LLM for the chat agent and the custom-LLM voice path. Without them chat falls back to the rule-based agent.
 
@@ -90,8 +93,9 @@ Requires env/project binding:
 | Chat "Conversation not found", or the agent re-asks for the phone number every turn | Each Vercel function got its own in-memory store | `GET /api/health` → `store.backend` is `memory` | Create a Vercel Blob store (sets `BLOB_READ_WRITE_TOKEN`), or `NEXAVOICE_STORE=file` for one container |
 | Voice banner stays on "Connecting…" / call never joins with no error | App ID absent from the client bundle (`NEXT_PUBLIC_*` inlined at build time) or the join error was swallowed | `GET /api/health` → `agora.appId`; the banner now renders the `useJoin` error | Tick **Build** for `NEXT_PUBLIC_AGORA_APP_ID`, or rely on the `appId` served by `/api/generate-agora-token` |
 | Agent answers without looking up orders | Engine could not reach the tool URL | `GET /api/health` → `agent.tools` (`enabled`, `baseUrl`, `secretSource`) | Expose the app over https (Vercel URL / ngrok) and set `AGENT_TOOLS_BASE_URL` |
+| Dashboard is empty on a fresh deployment | Nothing has chatted yet | `/api/health` → `seed.requested` is `false` | Set `NEXAVOICE_SEED=demo` (or `pnpm run seed` with the store token in `.env.local`) |
 | Chat answers look canned, no free discussion | No LLM configured — the rule-based agent is active | `GET /api/health` → `agent.llm` is `agora-managed` | Set `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` (and `NEXT_LLM_MODEL`) |
-| `Agent invite failed: fetch failed` | Region mismatch with the Agora project | `AGORA_AREA`, `agora project doctor --deep` | Set `AGORA_AREA` to the project region (`US`/`EU`/`AP`) |
+| `Agent invite failed: fetch failed` | Region mismatch with the Agora project | `AGORA_AREA`, `agora project doctor --deep` | Set `AGORA_AREA` to the project region (`US`/`EU`/`AP`/`CN`) |
 
 ## Local-Only vs Deploy-Specific
 
@@ -114,7 +118,8 @@ Vercel:
   case state are shared between function instances; `BLOB_READ_WRITE_TOKEN` is injected
   and `lib/support/persist.ts` picks it up automatically. Without it the chat cannot
   complete a second turn.
-- Set `AGORA_AREA` when the project is not in the `US` area, and `NEXT_LLM_URL` +
+- Set `AGORA_AREA` when the project is not in the `US` area (`AP` for India), and
+  `NEXT_LLM_URL` +
   `NEXT_LLM_API_KEY` to replace the rule-based chat agent with the LLM one.
 - Check the deployment with `curl https://<deployment>/api/health` — it reports
   credential presence, tool wiring, LLM provider and the store backend, never a secret.

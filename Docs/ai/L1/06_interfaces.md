@@ -87,6 +87,7 @@ or a value derived from `NEXT_AGORA_APP_CERTIFICATE` when that variable is unset
 - `GET /api/health` → always HTTP 200 with `{ status: "ok" | "degraded" | "error", agora, agent, store, checkedAt }`:
   - `agora`: `{ appIdConfigured, appId (masked: first 6 + last 4 chars), appCertificateConfigured, publicAppIdInlined, area, error }` — `publicAppIdInlined: false` means the browser bundle was built without the App ID.
   - `agent`: `{ llm: "custom" | "agora-managed", tools: { enabled, baseUrl, secretSource: "AGENT_TOOLS_SECRET" | "derived-from-app-certificate" | null }, interactionLanguage, sttLanguage, ttsVoice }`.
+  - `seed`: `{ requested, created, skipped, reason?, error? }` — what the opt-in `NEXAVOICE_SEED=demo` fixture did on this instance.
   - `store`: `getStoreSyncStatus()` (`backend`, `revision`, `remoteRev`, `lastSyncAt`, `lastError`, …) plus `conversations` and a `note` naming the fix when `backend: "none"`.
 
   Public and safe to open in a browser: booleans, masked ids and non-secret config only — never a certificate, token, or secret value.
@@ -113,7 +114,7 @@ Required:
 
 Voice tools (both required for the engine to call the backend): `AGENT_TOOLS_BASE_URL` (public https origin; falls back to `VERCEL_URL`), `AGENT_TOOLS_SECRET` (≥ 8 chars).
 
-Optional: `AGORA_AREA` (`US`|`EU`|`AP`), `AGENT_LANGUAGE` (`en-IN` default; `hi-IN`, `bn-IN`, `ta-IN`, `te-IN`, `gu-IN`, `kn-IN`, `en-US`), `AGENT_STT_LANGUAGE` (`multi`), `AGENT_TTS_VOICE_ID`, `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` (+ `NEXT_LLM_MODEL`) for BYOK LLM (chat agent + custom-LLM voice path).
+Optional: `AGORA_AREA` (`US`|`EU`|`AP`|`CN`; unknown values warn and fall back to `US`), `AGENT_LANGUAGE` (`en-IN` default; `hi-IN`, `bn-IN`, `ta-IN`, `te-IN`, `gu-IN`, `kn-IN`, `en-US`), `AGENT_STT_LANGUAGE` (`multi`), `AGENT_TTS_VOICE_ID`, `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` (+ `NEXT_LLM_MODEL`) for BYOK LLM (chat agent + custom-LLM voice path).
 
 ## Test Coverage for Interfaces
 
