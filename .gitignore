@@ -27,3 +27,4 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 .local*
 # Durable store mirror (NEXAVOICE_STORE=file)
 .data/
+*.patch
