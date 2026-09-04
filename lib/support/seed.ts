@@ -3,9 +3,10 @@
  *
  * The dashboard is empty until someone actually chats or calls, which makes a fresh
  * deployment look broken. Setting `NEXAVOICE_SEED=demo` writes a small, realistic
- * fixture into whatever durable backend is active (Vercel Blob, a file, or memory)
- * the first time any support route runs, so the queue, the handoff summary, the tool
- * audit trail and a resolved voice case are all visible immediately.
+ * fixture into whatever durable backend is active (PostgreSQL, or in-memory when no
+ * database is configured) the first time any support route runs, so the queue, the
+ * handoff summary, the tool audit trail and a resolved voice case are all visible
+ * immediately.
  *
  * Three properties matter more than the content:
  *
