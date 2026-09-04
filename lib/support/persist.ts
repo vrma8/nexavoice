@@ -1,37 +1,32 @@
 /**
- * Durable backing for the support store.
+ * Durable backing for the support store — now PostgreSQL via Prisma.
  *
- * The store itself is synchronous and lives on `globalThis`. That is fine for one
- * long-lived Node process (`pnpm dev`, Docker) but not for serverless: on Vercel
- * each API route is an invocation that may land on a different (or cold) instance,
- * so a conversation created by `POST /api/conversations` or `/api/invite-agent`
- * was invisible to the next request — "Conversation not found" 404s, an empty
- * dashboard, and a chat that forgot the customer every turn.
+ * The store itself (`store.ts`) is synchronous and lives on `globalThis`. That is
+ * fine for one long-lived Node process, but on a serverless platform every API
+ * route is an invocation that may land on a different (or cold) instance, so a
+ * conversation created by one request must be visible to the next.
  *
- * This module mirrors the store as a single JSON document in a backend shared by
- * all instances:
+ * This module mirrors the store as a single JSONB document in a Postgres table
+ * (`StoreState`) that every instance shares:
  *
- *  - `blob`  auto-selected when `BLOB_READ_WRITE_TOKEN` exists (Vercel dashboard →
- *            Storage → Create Database → Blob injects it for you). Written with
- *            `allowOverwrite`, read with `useCache: false` for a consistent read.
- *  - `file`  `NEXAVOICE_STORE=file` writes `.data/nexavoice-store.json` — shared
- *            state across processes on one machine (Docker, PM2).
- *  - `none`  in-memory only: local dev without a store, and the contract tests.
- *            Behaviour is exactly what it was before this module existed.
+ *  - `postgres`  auto-selected when `DATABASE_URL` exists. The document is read
+ *                and written with Prisma; `NEXAVOICE_STATE_KEY` picks the row id
+ *                (default `nexavoice`) so tests can isolate themselves.
+ *  - `none`      in-memory only: local dev without a database, and the contract
+ *                tests. Behaviour is exactly what it was before a database
+ *                existed.
  *
- * `NEXAVOICE_STORE=memory|file|blob` overrides the auto-detection;
- * `NEXAVOICE_BLOB_ACCESS=public|private` pins the blob access mode (default: try
- * the mode matching the store, falling back to the other one once).
+ * `NEXAVOICE_STORE=memory|postgres` overrides the auto-detection.
  *
- * Writes are last-writer-wins per conversation document (see `mergeRemote`).
- * That is correct for one customer + one human agent, and is the reason this stays
- * a mirror rather than a source of truth: swap in a real database by replacing
- * this module and nothing else in the app changes.
+ * Writes are last-writer-wins per conversation document (see `mergeRemote` in
+ * `snapshot.ts`). That is correct for one customer + one human agent. The old
+ * Vercel Blob and `.data/` file backends lived here and have been removed —
+ * Postgres is the single shared backend now.
  */
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import { prisma } from '../db';
+import type { Prisma } from '@/generated/prisma/client';
 
-export type PersistenceKind = 'none' | 'blob' | 'file';
+export type PersistenceKind = 'none' | 'postgres';
 
 export interface PersistenceBackend {
   kind: PersistenceKind;
@@ -41,36 +36,13 @@ export interface PersistenceBackend {
   write(body: string): Promise<void>;
 }
 
-const DEFAULT_BLOB_PATHNAME = 'nexavoice/support-store.json';
-/**
- * Local state lives under `.data/` on purpose: a path that is only partly static
- * (`path.resolve(process.cwd(), process.env.X)`) makes Next.js trace — and deploy —
- * the whole project, which bloats and can fail a Vercel build.
- */
-const STATE_DIR = '.data';
-const DEFAULT_FILE_NAME = 'nexavoice-store.json';
-
-type BlobAccess = 'public' | 'private';
-
-function statePathname(): string {
-  return (process.env.NEXAVOICE_STATE_PATHNAME?.trim() || DEFAULT_BLOB_PATHNAME).replace(/^\/+/, '');
+/** Row id for the single support-store document. */
+function stateKey(): string {
+  return process.env.NEXAVOICE_STATE_KEY?.trim() || 'nexavoice';
 }
 
-function preferredAccess(): BlobAccess {
-  return process.env.NEXAVOICE_BLOB_ACCESS?.trim().toLowerCase() === 'private' ? 'private' : 'public';
-}
-
-function hasBlobToken(): boolean {
-  return Boolean(process.env.BLOB_READ_WRITE_TOKEN?.trim());
-}
-
-/** Blob state resolved at runtime so switching stores never needs a redeploy. */
-let blobAccess: BlobAccess | null = null;
-let blobPublicUrl: string | null = null;
-
-export function resetPersistenceRuntimeState(): void {
-  blobAccess = null;
-  blobPublicUrl = null;
+function hasDatabaseUrl(): boolean {
+  return Boolean(process.env.DATABASE_URL?.trim());
 }
 
 /**
@@ -80,11 +52,11 @@ export function resetPersistenceRuntimeState(): void {
 export function resolvePersistence(): PersistenceBackend {
   const forced = process.env.NEXAVOICE_STORE?.trim().toLowerCase();
 
-  if (forced === 'memory') return noneBackend();
-  if (forced === 'file') return fileBackend();
-  if (forced === 'blob') return hasBlobToken() ? blobBackend() : unavailableBlobBackend();
-  if (hasBlobToken()) return blobBackend();
-  if (process.env.NEXAVOICE_STORE_FILE) return fileBackend();
+  if (forced === 'memory' || forced === 'none') return noneBackend();
+  if (forced === 'postgres' || forced === 'prisma') {
+    return hasDatabaseUrl() ? postgresBackend() : unavailablePostgresBackend();
+  }
+  if (hasDatabaseUrl()) return postgresBackend();
   return noneBackend();
 }
 
@@ -99,128 +71,47 @@ function noneBackend(): PersistenceBackend {
   };
 }
 
-/** Configured for Blob but the token is missing: fail loudly instead of silently losing state. */
-function unavailableBlobBackend(): PersistenceBackend {
+/** Configured for Postgres but the URL is missing: fail loudly instead of silently losing state. */
+function unavailablePostgresBackend(): PersistenceBackend {
   return {
     kind: 'none',
-    target: 'blob (unconfigured: BLOB_READ_WRITE_TOKEN missing)',
+    target: 'postgres (unconfigured: DATABASE_URL missing)',
     async read() {
-      throw new Error('NEXAVOICE_STORE=blob requires BLOB_READ_WRITE_TOKEN');
+      throw new Error('NEXAVOICE_STORE=postgres requires DATABASE_URL');
     },
     async write() {
-      throw new Error('NEXAVOICE_STORE=blob requires BLOB_READ_WRITE_TOKEN');
+      throw new Error('NEXAVOICE_STORE=postgres requires DATABASE_URL');
     },
   };
 }
 
-function fileBackend(): PersistenceBackend {
-  // basename(): the configured name cannot escape STATE_DIR via `../`.
-  const requested = process.env.NEXAVOICE_STORE_FILE?.trim();
-  const file = path.join(
-    process.cwd(),
-    STATE_DIR,
-    requested ? path.basename(requested) : DEFAULT_FILE_NAME,
-  );
+function postgresBackend(): PersistenceBackend {
   return {
-    kind: 'file',
-    target: path.join(STATE_DIR, path.basename(file)),
+    kind: 'postgres',
+    target: describeTarget(),
     async read() {
-      try {
-        return await readFile(file, 'utf8');
-      } catch {
-        return null;
-      }
+      const row = await prisma.storeState.findUnique({ where: { id: stateKey() } });
+      return row ? JSON.stringify(row.snapshot) : null;
     },
     async write(body) {
-      await mkdir(path.dirname(file), { recursive: true });
-      // Write to a temp file then rename: readers never observe a partial document.
-      const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-      await writeFile(tmp, body, 'utf8');
-      await rename(tmp, file);
-    },
-  };
-}
-
-function blobBackend(): PersistenceBackend {
-  const pathname = statePathname();
-  return {
-    kind: 'blob',
-    target: `vercel-blob:${pathname}`,
-    async read() {
-      const { get } = await import('@vercel/blob');
-      const access = blobAccess ?? preferredAccess();
-      const target = access === 'public' ? await publicBlobUrl() : pathname;
-      if (!target) return null;
-      try {
-        const result = await get(target, { access, useCache: false });
-        if (!result || result.statusCode !== 200 || !result.stream) return null;
-        blobAccess = access;
-        return await new Response(result.stream).text();
-      } catch (error) {
-        if (isNotFound(error)) return null;
-        throw error;
-      }
-    },
-    async write(body) {
-      const { put } = await import('@vercel/blob');
-      const options = (access: BlobAccess) => ({
-        access,
-        addRandomSuffix: false,
-        allowOverwrite: true,
-        contentType: 'application/json',
-        cacheControlMaxAge: 0,
+      const parsed = JSON.parse(body) as { rev?: number };
+      const snapshot = parsed as unknown as Prisma.InputJsonValue;
+      const rev = typeof parsed.rev === 'number' ? parsed.rev : 0;
+      await prisma.storeState.upsert({
+        where: { id: stateKey() },
+        create: { id: stateKey(), rev, snapshot },
+        update: { rev, snapshot },
       });
-      const access = blobAccess ?? preferredAccess();
-      try {
-        const blob = await put(pathname, body, options(access));
-        blobAccess = access;
-        blobPublicUrl = blob.url;
-      } catch (error) {
-        // Store access mode is fixed at creation; retry once with the other one.
-        const other: BlobAccess = access === 'public' ? 'private' : 'public';
-        if (blobAccess || !looksLikeAccessMismatch(error)) throw error;
-        const blob = await put(pathname, body, options(other));
-        blobAccess = other;
-        blobPublicUrl = blob.url;
-      }
     },
   };
 }
 
-/**
- * Public blobs are read by absolute URL, which includes a per-store host we do not
- * know at build time — resolve it once per process with `list()`.
- */
-async function publicBlobUrl(): Promise<string | null> {
-  if (blobPublicUrl) return blobPublicUrl;
-  try {
-    const { list } = await import('@vercel/blob');
-    const { blobs } = await list({ prefix: statePathname().split('/')[0] });
-    const match =
-      blobs.find((blob) => blob.pathname.endsWith('support-store.json')) ??
-      blobs.find((blob) => blob.pathname === statePathname()) ??
-      blobs[0];
-    blobPublicUrl = match?.url ?? null;
-    return blobPublicUrl;
-  } catch (error) {
-    console.warn('[persist] could not locate the state blob:', message(error));
-    return null;
-  }
-}
-
-function looksLikeAccessMismatch(error: unknown): boolean {
-  const text = message(error).toLowerCase();
-  return (
-    text.includes('access') ||
-    text.includes('private') ||
-    text.includes('public') ||
-    text.includes('not allowed')
-  );
-}
-
-function isNotFound(error: unknown): boolean {
-  const text = message(error).toLowerCase();
-  return text.includes('404') || text.includes('not found') || text.includes('no blob');
+/** `postgresql:<database>` — the database name never contains credentials. */
+function describeTarget(): string {
+  const url = process.env.DATABASE_URL?.trim() ?? '';
+  const match = url.match(/postgres(?:ql)?:\/\/[^/]*\/([^?]+)/i);
+  const database = match ? decodeURIComponent(match[1]) : 'unknown';
+  return `postgresql:${database}`;
 }
 
 export function message(error: unknown): string {

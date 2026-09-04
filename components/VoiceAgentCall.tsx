@@ -12,6 +12,7 @@ import type {
 } from "@/types/conversation";
 import { mirrorVoiceState } from "@/lib/api";
 import { MISSING_APP_ID_MESSAGE, resolveAppId } from "@/lib/agora";
+import { getClientSession } from "@/lib/session";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { LoadingSkeleton } from "./LoadingSkeleton";
 import { Button } from "@/components/ui/button";
@@ -116,6 +117,7 @@ export default function VoiceAgentCall() {
       }
 
       // 2. Run agent invite and RTM setup in parallel
+      const session = getClientSession();
       const [agentData, rtm] = await Promise.all([
         // 2a. Start the AI agent
         fetch("/api/invite-agent", {
@@ -124,6 +126,8 @@ export default function VoiceAgentCall() {
           body: JSON.stringify({
             requester_id: responseData.uid,
             channel_name: responseData.channel,
+            customer_name: session?.name,
+            customer_phone: session?.phone,
           } as ClientStartRequest),
         })
           .then(async (res) => {

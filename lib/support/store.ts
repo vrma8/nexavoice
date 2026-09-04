@@ -264,6 +264,9 @@ export interface CreateConversationInput {
   channel?: string;
   customerUid?: string;
   id?: string;
+  /** Signed-in client details (from /login) attached when the conversation starts. */
+  customerName?: string;
+  customer?: CustomerSnapshot;
 }
 
 export function createConversation(input: CreateConversationInput): Conversation {
@@ -276,7 +279,13 @@ export function createConversation(input: CreateConversationInput): Conversation
     updatedAt: now,
     channel: input.channel,
     customerUid: input.customerUid,
-    context: { orderIds: [], missingInformation: [], confirmedInformation: [] },
+    context: {
+      orderIds: [],
+      missingInformation: [],
+      confirmedInformation: [],
+      customerName: input.customerName,
+      customer: input.customer,
+    },
     toolAudit: [],
     lastActivityAt: now,
   };
@@ -462,7 +471,7 @@ export function listCases(filter?: { status?: SupportCase['status'][] }): Suppor
   return all;
 }
 
-export function acceptCase(id: string, agentName: string): SupportCase | null {
+export function acceptCase(id: string, agentName: string, agentEmail?: string): SupportCase | null {
   const store = db();
   const supportCase = store.cases.get(id);
   if (!supportCase) return null;
@@ -471,6 +480,7 @@ export function acceptCase(id: string, agentName: string): SupportCase | null {
     supportCase.acceptedAt = Date.now();
   }
   supportCase.assignedTo = agentName;
+  if (agentEmail) supportCase.assignedAgentEmail = agentEmail;
   supportCase.updatedAt = Date.now();
   const conversation = store.conversations.get(supportCase.conversationId);
   if (conversation) {

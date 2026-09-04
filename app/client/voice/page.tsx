@@ -1,5 +1,6 @@
 import Link from "next/link";
 import VoiceAgentCall from "@/components/VoiceAgentCall";
+import SignedInClient from "@/components/SignedInClient";
 import { ArrowLeft } from "lucide-react";
 
 export default function VoicePage() {
@@ -15,8 +16,9 @@ export default function VoicePage() {
             <p className="text-xs text-zinc-500">NexaMart support · voice</p>
           </div>
         </div>
-        <div className="flex items-center gap-2 text-sm text-zinc-400">
-          <span>Hindi · English · Hinglish</span>
+        <div className="flex items-center gap-4">
+          <SignedInClient />
+          <span className="text-sm text-zinc-400">Hindi · English · Hinglish</span>
         </div>
       </div>
 

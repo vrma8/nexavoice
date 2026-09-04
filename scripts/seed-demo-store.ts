@@ -6,10 +6,9 @@
  *
  * Normally you do not need this: set `NEXAVOICE_SEED=demo` on the deployment and the app
  * seeds itself with its own credentials. This script is for pointing at a store from a
- * terminal — e.g. seeding the Vercel Blob store before anyone opens the dashboard. In
- * that case `BLOB_READ_WRITE_TOKEN` must be in the environment (Vercel → Storage → your
- * Blob store → "Copy .env.local snippet" puts it in `.env.local`, which this script
- * loads and which `.gitignore` keeps out of the repository).
+ * terminal — e.g. seeding the PostgreSQL database before anyone opens the dashboard. In
+ * that case `DATABASE_URL` must be in the environment (put it in `.env.local`, which
+ * this script loads and which `.gitignore` keeps out of the repository).
  *
  * The write goes through the same hydrate → merge → flush path as a request, so seeding
  * never clobbers a conversation that already exists in the store.
@@ -27,12 +26,11 @@ async function main(): Promise<void> {
         'Nothing to seed: no durable backend is configured, so writes would live in this',
         'process only and disappear the moment it exits.',
         '',
-        '  • Seeding a Vercel deployment: set NEXAVOICE_SEED=demo in the project instead',
+        '  • Seeding a deployment: set NEXAVOICE_SEED=demo in the project instead',
         '    (Project Settings → Environment Variables → Production). The app will fill',
         '    its own store on the next request — no token needed here.',
-        '  • Seeding a store from this terminal: put BLOB_READ_WRITE_TOKEN in .env.local',
-        '    (Vercel → Storage → your Blob store → connection string), then re-run.',
-        '  • Seeding a local file store: NEXAVOICE_STORE=file pnpm run seed',
+        '  • Seeding a store from this terminal: put DATABASE_URL in .env.local',
+        '    (PostgreSQL connection string) and run `pnpm db:push`, then re-run.',
       ].join('\n'),
     );
     process.exitCode = 1;

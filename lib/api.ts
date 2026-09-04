@@ -23,11 +23,20 @@ async function json<T>(response: Response): Promise<T> {
 // Conversations (chat + voice tracking)
 // ---------------------------------------------------------------------------
 
-export async function createConversation(mode: 'CHAT' | 'VOICE'): Promise<Conversation> {
+export interface CreateConversationOptions {
+  /** Signed-in client details (from /login) attached to the conversation. */
+  customerName?: string;
+  customerPhone?: string;
+}
+
+export async function createConversation(
+  mode: 'CHAT' | 'VOICE',
+  options: CreateConversationOptions = {},
+): Promise<Conversation> {
   const res = await fetch('/api/conversations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify({ mode, ...options }),
   });
   return (await json<{ conversation: Conversation }>(res)).conversation;
 }
@@ -133,11 +142,11 @@ export interface AcceptCaseResult {
   voice: { token: string; uid: string; channel: string; agentUid: string; appId?: string } | null;
 }
 
-export async function acceptCase(id: string, agentName: string): Promise<AcceptCaseResult> {
+export async function acceptCase(id: string, agentName: string, agentEmail?: string): Promise<AcceptCaseResult> {
   const res = await fetch(`/api/cases/${id}/accept`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ agentName }),
+    body: JSON.stringify({ agentName, agentEmail }),
   });
   return json<AcceptCaseResult>(res);
 }

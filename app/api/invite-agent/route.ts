@@ -12,6 +12,7 @@ import {
   updateConversation,
 } from '@/lib/support/store';
 import { withStore } from '@/lib/support/route-store';
+import * as shop from '@/lib/shop/service';
 
 // agentUid identifies the AI in the RTC channel and shares its default with the client.
 const agentUid = String(DEFAULT_AGENT_UID);
@@ -46,9 +47,22 @@ async function handlePost(request: NextRequest) {
     }
 
     // One conversation per channel; re-invites (e.g. after an agent crash) reuse it.
-    const conversation =
-      findConversationByChannel(channel_name) ??
-      createConversation({ mode: 'VOICE', channel: channel_name, customerUid: requester_id });
+    const existing = findConversationByChannel(channel_name);
+    let conversation = existing;
+    if (!conversation) {
+      const customerPhone = body.customer_phone?.trim();
+      const shopCustomer = customerPhone ? shop.findCustomerByPhone(customerPhone) : null;
+      conversation = createConversation({
+        mode: 'VOICE',
+        channel: channel_name,
+        customerUid: requester_id,
+        customerName: shopCustomer ? shopCustomer.name : body.customer_name?.trim() || undefined,
+        customer: shopCustomer ? shop.toCustomerSnapshot(shopCustomer) : undefined,
+      });
+    } else if (!conversation.context.customerName && body.customer_name?.trim()) {
+      // A re-invite after an agent crash: keep the signed-in client's name if it was missing.
+      updateConversation(conversation.id, { context: { customerName: body.customer_name.trim() } });
+    }
     conversationIdForFailure = conversation.id;
 
     const client = createAgoraClient();

@@ -20,19 +20,20 @@ type Params = { params: Promise<{ id: string }> };
  */
 async function handlePost(request: NextRequest, { params }: Params) {
   const { id } = await params;
-  let body: { agentName?: string } = {};
+  let body: { agentName?: string; agentEmail?: string } = {};
   try {
     body = await request.json();
   } catch {
     // agentName optional
   }
   const agentName = body.agentName?.trim() || 'Support Agent';
+  const agentEmail = body.agentEmail?.trim() || undefined;
 
   const existing = getCase(id);
   if (!existing) {
     return NextResponse.json({ error: 'Case not found' }, { status: 404 });
   }
-  const supportCase = acceptCase(id, agentName)!;
+  const supportCase = acceptCase(id, agentName, agentEmail)!;
   const conversation = getConversation(supportCase.conversationId);
 
   let voice: { token: string; uid: string; channel: string; agentUid: string; appId: string } | null = null;

@@ -22,6 +22,9 @@ export interface AgoraTokenData {
 export interface ClientStartRequest {
   requester_id: string;
   channel_name: string;
+  /** Signed-in client details (from /login) attached to the voice conversation. */
+  customer_name?: string;
+  customer_phone?: string;
 }
 
 export interface StopConversationRequest {

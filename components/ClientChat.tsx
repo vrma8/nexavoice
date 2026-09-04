@@ -11,6 +11,7 @@ import {
 } from "@/lib/api";
 import type { Conversation, ConversationMessage, SupportCase } from "@/lib/support/types";
 import { CHAT_GREETING } from "@/lib/agent-prompt";
+import { getClientSession } from "@/lib/session";
 
 type Message = {
   id: string;
@@ -33,10 +34,14 @@ export default function ClientChat() {
   const seenIds = useRef<Set<string>>(new Set());
   const lastSyncRef = useRef(0);
 
-  // Create the backend conversation once.
+  // Create the backend conversation once, attaching the signed-in client's details.
   useEffect(() => {
     let cancelled = false;
-    createConversation("CHAT")
+    const session = getClientSession();
+    createConversation("CHAT", {
+      customerName: session?.name,
+      customerPhone: session?.phone,
+    })
       .then((c) => {
         if (!cancelled) setConversation(c);
       })

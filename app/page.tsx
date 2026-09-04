@@ -12,13 +12,13 @@ export default function Home() {
         </div>
 
         <div className="flex flex-col gap-4 pt-4">
-          <Link href="/client" className="w-full">
+          <Link href="/login?role=client" className="w-full">
             <Button className="w-full text-lg py-6 bg-blue-600 hover:bg-blue-700 text-white transition-all">
               Get Support
             </Button>
           </Link>
 
-          <Link href="/support-agent" className="w-full">
+          <Link href="/login?role=agent" className="w-full">
             <Button variant="outline" className="w-full text-lg py-6 border-zinc-700 hover:bg-zinc-800 text-zinc-300">
               Support Agent Login
             </Button>

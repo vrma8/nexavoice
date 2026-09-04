@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { acceptCase, getDashboard, type DashboardSnapshot } from "@/lib/api";
 import type { Conversation, ConversationEvent, SupportCase } from "@/lib/support/types";
+import { getAgentSession } from "@/lib/session";
 
 const POLL_MS = 3000;
 const AGENT_NAME_KEY = "nexavoice.agentName";
@@ -66,8 +67,9 @@ export default function SupportDashboard() {
   const refreshing = useRef(false);
 
   useEffect(() => {
+    const session = getAgentSession();
     const saved = window.localStorage.getItem(AGENT_NAME_KEY);
-    if (saved) setAgentName(saved);
+    setAgentName(session?.name ?? saved ?? "");
   }, []);
 
   useEffect(() => {
@@ -116,11 +118,11 @@ export default function SupportDashboard() {
   const now = clock;
 
   const handleAccept = async (c: SupportCase) => {
-    const name = agentName.trim() || "Support Agent";
+    const name = agentName.trim() || getAgentSession()?.name || "Support Agent";
     window.localStorage.setItem(AGENT_NAME_KEY, name);
     setAccepting(c.id);
     try {
-      await acceptCase(c.id, name);
+      await acceptCase(c.id, name, getAgentSession()?.email);
       router.push(`/support-agent/cases/${c.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to accept case");
@@ -226,7 +228,9 @@ export default function SupportDashboard() {
                 <p className="mt-1 text-xs text-zinc-500">
                   {selectedCase.id} · {selectedCase.mode === "VOICE" ? "Voice call" : "Chat"} ·{" "}
                   {selectedCase.handoff.language} · created {formatAge(selectedCase.createdAt, now)} ago
-                  {selectedCase.assignedTo ? ` · assigned to ${selectedCase.assignedTo}` : ""}
+                  {selectedCase.assignedTo
+                    ? ` · assigned to ${selectedCase.assignedTo}${selectedCase.assignedAgentEmail ? ` (${selectedCase.assignedAgentEmail})` : ""}`
+                    : ""}
                 </p>
               </div>
               <div className="flex items-center gap-2">

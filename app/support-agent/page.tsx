@@ -1,5 +1,6 @@
 import Link from "next/link";
 import SupportDashboard from "@/components/SupportDashboard";
+import SignedInAgent from "@/components/SignedInAgent";
 
 export default function SupportAgentPage() {
   return (
@@ -9,9 +10,12 @@ export default function SupportAgentPage() {
           <h1 className="text-xl font-bold tracking-tight">NexaVoice Support</h1>
           <p className="text-xs text-zinc-500">Human agent dashboard · live calls, chats and AI escalations</p>
         </div>
-        <Link href="/" className="text-sm text-zinc-400 hover:text-zinc-200">
-          Home
-        </Link>
+        <div className="flex items-center gap-4">
+          <SignedInAgent />
+          <Link href="/" className="text-sm text-zinc-400 hover:text-zinc-200">
+            Home
+          </Link>
+        </div>
       </header>
 
       <main className="flex-1 p-6">

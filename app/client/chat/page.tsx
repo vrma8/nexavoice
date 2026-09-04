@@ -1,5 +1,6 @@
 import Link from "next/link";
 import ClientChat from "@/components/ClientChat";
+import SignedInClient from "@/components/SignedInClient";
 import { ArrowLeft } from "lucide-react";
 
 export default function ChatPage() {
@@ -15,9 +16,12 @@ export default function ChatPage() {
             <p className="text-xs text-zinc-500">NexaMart support · chat</p>
           </div>
         </div>
-        <Link href="/client/voice" className="text-sm text-blue-400 hover:text-blue-300">
-          Switch to voice call →
-        </Link>
+        <div className="flex items-center gap-4">
+          <SignedInClient />
+          <Link href="/client/voice" className="text-sm text-blue-400 hover:text-blue-300">
+            Switch to voice call →
+          </Link>
+        </div>
       </div>
 
       <main className="flex-1 overflow-hidden relative">
