@@ -65,8 +65,12 @@ export async function GET(request: NextRequest) {
       uid: uid.toString(),
       channel: channelName,
       appId,
-      /** RTC tokens expire; the client renews via `token-privilege-will-expire`. */
-      expiresAt: expirationTime,
+      /**
+       * Unix **milliseconds**, to match every other timestamp this API returns — the
+       * builder above is the only place Agora's seconds unit applies. Renewal itself is
+       * event-driven (`token-privilege-will-expire`); this is for display/debugging.
+       */
+      expiresAt: expirationTime * 1000,
     });
   } catch (error) {
     console.error('Error generating Agora token:', error);

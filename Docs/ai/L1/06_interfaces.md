@@ -24,7 +24,8 @@ Success response:
 client must join with — the same value signs the token, so the pair cannot drift. It is
 what lets the app work when `NEXT_PUBLIC_AGORA_APP_ID` is configured for Runtime only: a
 `NEXT_PUBLIC_*` var is inlined into the bundle at build time. `expiresAt` is
-`issuedAt + 3600s` and drives token/RTM renewal.
+`issuedAt + 3600` expressed in **milliseconds**; renewal itself is event-driven
+(`token-privilege-will-expire`), so the field is for display and debugging.
 
 Failure response: `{ "error": string, "details"?: string }` — `503` while
 `NEXT_AGORA_APP_CERTIFICATE` is missing (the `details` name the variable and the Vercel
@@ -79,7 +80,9 @@ or a value derived from `NEXT_AGORA_APP_CERTIFICATE` when that variable is unset
 
 - `GET /api/cases?status=A,B` → `{ cases }` (newest first).
 - `GET /api/cases/:id` → `{ case, conversation, messages, now }`.
-- `POST /api/cases/:id/accept` `{ agentName }` → `{ case, conversation, voice }`; `voice` = `{ appId, token, expiresAt, uid: "654321", channel, rtmUid: "654321", agentUid: "123456", conversationId, caseId }` for voice cases (the agent uid is returned, not recomputed in the browser) (RTC+RTM token via `buildTokenWithRtm`, 1 h), else `null`. Idempotent.
+- `POST /api/cases/:id/accept` `{ agentName }` → `{ case, conversation, voice }`; for voice cases `voice` = `{ appId, token, uid: "654321", channel, agentUid: "123456" }` (RTC+RTM token via `buildTokenWithRtm`, 1 h), else `null`. Idempotent. The agent's uid is returned rather than recomputed in the browser, and the App ID comes from the server for the same reason as the token route.
+
+Timestamp units: every timestamp an API route returns (including `expiresAt`) is Unix **milliseconds**. `RtcTokenBuilder` is the only place Agora's seconds unit is used, and it never crosses the wire.
 - `POST /api/cases/:id/takeover` `{ humanUid? }` → `{ ok, aiStopped, announcement: "spoken"|"skipped"|"failed", conversation }`. AI speaks the handover line (`agents.speak`, INTERRUPT), waits ~4.5 s, then `stopAgent`; conversation → `HUMAN_HANDLING`, `agentState: "left"`.
 - `POST /api/cases/:id/resolve` `{ note?, humanLeft? }` → `{ case, conversation }` (`RESOLVED`).
 - `GET /api/dashboard` → `{ now, liveCalls, activeChats, waitingCases, handlingCases, recentResolved, recentEvents }` (no-store).
@@ -124,7 +127,7 @@ Optional: `AGORA_AREA` (`US`|`EU`|`AP`|`CN`; unknown values warn and fall back t
 
 From `types/conversation.ts` (high-use):
 
-- `AgoraTokenData`: token bootstrap payload consumed by `VoiceAgentCall` (includes `appId`, `token`, `uid`, `channel`, `expiresAt`, `agentId`, `conversationId`). `appId` and `expiresAt` come from the server — the client must not decide the App ID from build-time env, and renewal is scheduled from `expiresAt`.
+- `AgoraTokenData`: token bootstrap payload consumed by `VoiceAgentCall` (includes `appId`, `token`, `uid`, `channel`, `expiresAt`, `agentId`, `conversationId`). `appId` comes from the server — the client must not decide the App ID from a build-time env var — and `expiresAt` is the server's view of when the token dies (milliseconds), reported rather than scheduled against.
 - `lib/agora.ts`: browser-safe constants (`AGENT_UID = '123456'`, `HUMAN_UID = '654321'`), `resolveAppId()`, and the missing-App-ID message used by both voice surfaces.
 - `lib/support/snapshot.ts`: `StoreSnapshot` (`version: 1`) — the only shape the durable mirror carries; every persisted field is listed there.
 - `lib/support/types.ts`: `Conversation`, `ConversationMessage`, `SupportCase`, `HandoffSummary`, `ConversationEvent` shared by API routes, dashboard and chat.

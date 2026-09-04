@@ -52,6 +52,15 @@ async function verifyGenerateAgoraTokenRoute() {
       body.channel === 'test-channel',
       'GET /api/generate-agora-token should preserve the requested channel',
     );
+    // Unit guard: Agora's token builder wants Unix *seconds*, but a client comparing an
+    // expiry against Date.now() needs milliseconds. Returning the builder's raw value
+    // reads as an expiry in 1970 and silently breaks anything that schedules on it.
+    assert(
+      typeof body.expiresAt === 'number' &&
+        body.expiresAt > Date.now() &&
+        body.expiresAt < Date.now() + 3_700_000,
+      `expiresAt must be Unix milliseconds about an hour out, got ${body.expiresAt}`,
+    );
 
     assert(
       Array.isArray(tokenBuilderArgs),
