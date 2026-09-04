@@ -13,7 +13,7 @@ Why: provider schemas, SDK builder fields, token behavior, and RTM event details
 | Need | Read First | Deep Detail | Source Reference |
 | --- | --- | --- | --- |
 | Project setup, commands, env vars | [../01_setup.md](../01_setup.md) | [../05_workflows.md](../05_workflows.md) | `package.json`, `env.local.example` |
-| End-to-end architecture and data flow | [../02_architecture.md](../02_architecture.md) | [conversation_lifecycle.md](conversation_lifecycle.md) | `components/LandingPage.tsx`, `components/ConversationComponent.tsx` |
+| End-to-end architecture and data flow | [../02_architecture.md](../02_architecture.md) | [conversation_lifecycle.md](conversation_lifecycle.md) | `components/VoiceAgentCall.tsx`, `components/ConversationComponent.tsx` |
 | File/module responsibilities | [../03_code_map.md](../03_code_map.md) | none | `app/api`, `components`, `lib`, `types` |
 | API payloads and response shapes | [../06_interfaces.md](../06_interfaces.md) | [token_model.md](token_model.md), [invite_agent_config.md](invite_agent_config.md) | `app/api/*/route.ts`, `types/conversation.ts` |
 | Agora SDK lifecycle rules | [../04_conventions.md](../04_conventions.md) | [strict_mode_lifecycle.md](strict_mode_lifecycle.md) | `components/ConversationComponent.tsx` |
@@ -31,7 +31,7 @@ Implement these pieces in order:
 4. Implement `POST /api/invite-agent` with `AgoraClient`, `Agent`, managed `DeepgramSTT`, `OpenAI`, `MiniMaxTTS`, RTM enabled, metrics enabled, and `{ requester_id, channel_name }` input.
 5. Implement `POST /api/stop-conversation` with idempotent already-stopping/not-found handling.
 6. Implement optional `POST /api/chat/completions` only when exposing a custom LLM SSE proxy.
-7. Implement `LandingPage` to fetch token, start the agent, log into RTM, subscribe to the channel, mount the conversation, renew tokens, and log out RTM on end.
+7. Implement the session owner (`VoiceAgentCall`) to fetch token, start the agent, log into RTM, subscribe to the channel, mount the conversation, renew tokens, and log out RTM on end.
 8. Implement `ConversationComponent` with StrictMode-safe `isReady`, `useJoin`, `useLocalMicrophoneTrack`, `usePublish`, `AgoraVoiceAI.init`, event subscriptions, token renewal, and hook-owned teardown.
 9. Implement transcript helpers that remap `uid="0"` to the local RTC UID, normalize spacing/timestamps, keep `INTERRUPTED`, and render `IN_PROGRESS` separately.
 10. Add API contract verification for token, invite, stop, and optional custom LLM behavior.
@@ -40,7 +40,7 @@ Implement these pieces in order:
 
 - Token generation uses `RtcTokenBuilder.buildTokenWithRtm`, not an RTC-only builder.
 - The browser never receives `NEXT_AGORA_APP_CERTIFICATE`.
-- `LandingPage` creates/logs in/subscribes/logs out the RTM client.
+- The session owner (`VoiceAgentCall`) creates/logs in/subscribes/logs out the RTM client.
 - `ConversationComponent` waits for `isReady && joinSuccess` before `AgoraVoiceAI.init`.
 - `useJoin`, `useLocalMicrophoneTrack`, and `usePublish` own leave, track close, and publish cleanup.
 - Transcript normalization remaps toolkit `uid="0"` before rendering.

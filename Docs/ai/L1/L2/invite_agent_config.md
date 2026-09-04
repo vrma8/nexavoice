@@ -4,7 +4,7 @@
 
 ## Where It Lives
 
-All of the managed agent configuration is built in `app/api/invite-agent/route.ts`. The route receives `{ requester_id, channel_name }` from `LandingPage`, constructs an `Agent` from `agora-agents`, and starts a session bound to the requester's RTC channel.
+All of the managed agent configuration is built in `app/api/invite-agent/route.ts`. The route receives `{ requester_id, channel_name }` from `VoiceAgentCall`, constructs an `Agent` from `agora-agents`, and starts a session bound to the requester's RTC channel.
 
 ## Top-Level Constants
 
@@ -119,7 +119,7 @@ On success the route returns `AgentResponse`:
 }
 ```
 
-`agent_id` is what `LandingPage` later passes to `/api/stop-conversation`.
+`agent_id` is what `VoiceAgentCall` later passes to `/api/stop-conversation`.
 
 ## Verification
 

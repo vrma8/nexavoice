@@ -48,7 +48,7 @@ Do not recreate Agora ConvoAI integration from memory. Provider schemas, SDK bui
 - `api.routes`: add browser-facing routes under `app/api`, with shared request/response types in `types/conversation.ts` when the client consumes them.
 - `prompts.system`: edit `ADA_PROMPT` and `GREETING` in `app/api/invite-agent/route.ts`.
 - `pipeline.providers`: adjust the `DeepgramSTT`, `OpenAI`, and `MiniMaxTTS` builder chain, or enable the commented BYOK blocks.
-- `ui.conversation`: customize `QuickstartPreCallCard`, `QuickstartConversationLayout`, `QuickstartTranscriptPanel`, and `QuickstartPipelineMetrics`.
+- `ui.conversation`: customize `VoiceAgentCall` (pre-call bootstrap), `QuickstartConversationLayout`, `QuickstartTranscriptPanel`, and `QuickstartPipelineMetrics`.
 
 ## Invariants
 
@@ -64,7 +64,7 @@ Do not recreate Agora ConvoAI integration from memory. Provider schemas, SDK bui
 - `POST /api/invite-agent` accepts `{ requester_id, channel_name }` and returns the agent id/state payload.
 - `POST /api/stop-conversation` accepts `{ agent_id }` and treats already-stopping sessions as success.
 - Required env vars are `NEXT_PUBLIC_AGORA_APP_ID` and `NEXT_AGORA_APP_CERTIFICATE`.
-- `components/LandingPage.tsx` owns pre-call bootstrap and RTM client lifecycle.
+- `components/VoiceAgentCall.tsx` owns pre-call bootstrap and RTM client lifecycle; `/client/voice` is the voice entry point (`components/LandingPage.tsx` from the upstream quickstart was removed as a dead duplicate bootstrap).
 - `components/ConversationComponent.tsx` owns joined-session RTC/toolkit lifecycle.
 - `lib/conversation.ts` owns transcript normalization helpers.
 

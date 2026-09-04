@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { appendMessage, getCase, getConversation } from '@/lib/support/store';
 import { runChatTurn } from '@/lib/chat-agent';
+import { withStore } from '@/lib/support/route-store';
+
+/** Runs an AI turn (possibly an upstream LLM with tool calls) before responding. */
+export const maxDuration = 60;
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -14,7 +18,7 @@ type Params = { params: Promise<{ id: string }> };
  *   answers from the dashboard.
  * - role "human_agent" → message from the dashboard to the customer.
  */
-export async function POST(request: NextRequest, { params }: Params) {
+async function handlePost(request: NextRequest, { params }: Params) {
   const { id } = await params;
   const conversation = getConversation(id);
   if (!conversation) {
@@ -62,3 +66,7 @@ export async function POST(request: NextRequest, { params }: Params) {
     degraded: reply.degraded,
   });
 }
+
+// Bracketed by withStore so the durable store mirror is read before the
+// handler runs and written back before the response is flushed (serverless).
+export const POST = withStore(handlePost);

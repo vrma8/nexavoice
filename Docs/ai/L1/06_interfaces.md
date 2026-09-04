@@ -9,15 +9,27 @@
 Query params:
 
 - `uid` optional; invalid/zero resolves to random RTM-safe UID.
-- `channel` optional; defaults to generated `ai-conversation-<ts>-<rand>`.
+- `channel` optional; defaults to `quickstart-<uid>` when the client already holds a
+  conversation id, so a token refresh reuses the channel the agent is in instead of
+  minting a new one (`nv-<id>`, `ai-conversation-<ts>-<rand>` for a fresh request).
 
 Success response:
 
 ```json
-{ "token": "...", "uid": "1234", "channel": "ai-conversation-..." }
+{ "appId": "…", "token": "...", "uid": "1234", "channel": "ai-conversation-...", "expiresAt": 1730000000000 }
 ```
 
-Failure response: `{ "error": string, "details"?: string }` with `500`.
+`appId` is resolved server-side (`NEXT_PUBLIC_AGORA_APP_ID` → `AGORA_APP_ID` →
+`VITE_`/`REACT_APP_` aliases) by `resolveAppId()` in `lib/agora.ts` and is the App ID the
+client must join with — the same value signs the token, so the pair cannot drift. It is
+what lets the app work when `NEXT_PUBLIC_AGORA_APP_ID` is configured for Runtime only: a
+`NEXT_PUBLIC_*` var is inlined into the bundle at build time. `expiresAt` is
+`issuedAt + 3600s` and drives token/RTM renewal.
+
+Failure response: `{ "error": string, "details"?: string }` — `503` while
+`NEXT_AGORA_APP_CERTIFICATE` is missing (the `details` name the variable and the Vercel
+environment that must be ticked) instead of a token signed with `undefined`, `500`
+otherwise.
 
 ### `POST /api/invite-agent`
 
@@ -51,7 +63,8 @@ OpenAI-compatible SSE proxy used as the Agora **custom LLM** when `NEXT_LLM_URL`
 
 ### `POST /api/agent-tools/[tool]?conversation_id=…` (engine → backend)
 
-Headers: `x-nexavoice-tool-token: <AGENT_TOOLS_SECRET>` (401 otherwise). Body: tool args (+ optional `tool_call_id`, echoed back). Tools: `verify_customer`, `get_order_status`, `list_recent_orders`, `cancel_order`, `update_shipping_address`, `request_return`, `create_ticket`, `escalate_to_human` (404 for anything else). Response: `{ ok, tool, tool_call_id?, ...result }`; guardrail errors come back as `ok: false` with `error` ∈ `CUSTOMER_NOT_VERIFIED | CONFIRMATION_REQUIRED | HANDED_OFF | INVALID_ARGS` (never HTTP 4xx, so the LLM can recover).
+Headers: `x-nexavoice-tool-token: <tool secret>` (401 otherwise) — `AGENT_TOOLS_SECRET`,
+or a value derived from `NEXT_AGORA_APP_CERTIFICATE` when that variable is unset. Body: tool args (+ optional `tool_call_id`, echoed back). Tools: `verify_customer`, `get_order_status`, `list_recent_orders`, `cancel_order`, `update_shipping_address`, `request_return`, `create_ticket`, `escalate_to_human` (404 for anything else). Response: `{ ok, tool, tool_call_id?, ...result }`; guardrail errors come back as `ok: false` with `error` ∈ `CUSTOMER_NOT_VERIFIED | CONFIRMATION_REQUIRED | HANDED_OFF | INVALID_ARGS` (never HTTP 4xx, so the LLM can recover).
 
 ### Conversations
 
@@ -66,11 +79,17 @@ Headers: `x-nexavoice-tool-token: <AGENT_TOOLS_SECRET>` (401 otherwise). Body: t
 
 - `GET /api/cases?status=A,B` → `{ cases }` (newest first).
 - `GET /api/cases/:id` → `{ case, conversation, messages, now }`.
-- `POST /api/cases/:id/accept` `{ agentName }` → `{ case, conversation, voice }`; `voice` = `{ token, uid: "654321", channel, agentUid: "123456" }` for voice cases (RTC+RTM token via `buildTokenWithRtm`, 1 h), else `null`. Idempotent.
+- `POST /api/cases/:id/accept` `{ agentName }` → `{ case, conversation, voice }`; `voice` = `{ appId, token, expiresAt, uid: "654321", channel, rtmUid: "654321", agentUid: "123456", conversationId, caseId }` for voice cases (the agent uid is returned, not recomputed in the browser) (RTC+RTM token via `buildTokenWithRtm`, 1 h), else `null`. Idempotent.
 - `POST /api/cases/:id/takeover` `{ humanUid? }` → `{ ok, aiStopped, announcement: "spoken"|"skipped"|"failed", conversation }`. AI speaks the handover line (`agents.speak`, INTERRUPT), waits ~4.5 s, then `stopAgent`; conversation → `HUMAN_HANDLING`, `agentState: "left"`.
 - `POST /api/cases/:id/resolve` `{ note?, humanLeft? }` → `{ case, conversation }` (`RESOLVED`).
 - `GET /api/dashboard` → `{ now, liveCalls, activeChats, waitingCases, handlingCases, recentResolved, recentEvents }` (no-store).
-- `GET /api/dashboard/events` → SSE: `ready { now, backlog }`, `conversation <ConversationEvent>`, `ping` every 20 s.
+- `GET /api/dashboard/events` → SSE: `ready { now, backlog }`, `conversation <ConversationEvent>`, `ping` every 20 s, auto-close after 5 min (`SSE_MAX_LIFE_MS`) with client reconnect — a never-ending stream is incompatible with serverless function limits, hence `export const dynamic = 'force-dynamic'`.
+- `GET /api/health` → always HTTP 200 with `{ status: "ok" | "degraded" | "error", agora, agent, store, checkedAt }`:
+  - `agora`: `{ appIdConfigured, appId (masked: first 6 + last 4 chars), appCertificateConfigured, publicAppIdInlined, area, error }` — `publicAppIdInlined: false` means the browser bundle was built without the App ID.
+  - `agent`: `{ llm: "custom" | "agora-managed", tools: { enabled, baseUrl, secretSource: "AGENT_TOOLS_SECRET" | "derived-from-app-certificate" | null }, interactionLanguage, sttLanguage, ttsVoice }`.
+  - `store`: `getStoreSyncStatus()` (`backend`, `revision`, `remoteRev`, `lastSyncAt`, `lastError`, …) plus `conversations` and a `note` naming the fix when `backend: "none"`.
+
+  Public and safe to open in a browser: booleans, masked ids and non-secret config only — never a certificate, token, or secret value.
 - `GET /api/shop/customers[?phone=]`, `GET /api/shop/orders/:id`, `GET /api/shop/tickets?customer_id=` → read-only demo data.
 
 ### Handoff summary (`SupportCase.handoff`, v1.md §24)
@@ -104,7 +123,9 @@ Optional: `AGORA_AREA` (`US`|`EU`|`AP`), `AGENT_LANGUAGE` (`en-IN` default; `hi-
 
 From `types/conversation.ts` (high-use):
 
-- `AgoraTokenData`: token bootstrap payload consumed by `VoiceAgentCall` (includes `agentId`, `conversationId`).
+- `AgoraTokenData`: token bootstrap payload consumed by `VoiceAgentCall` (includes `appId`, `token`, `uid`, `channel`, `expiresAt`, `agentId`, `conversationId`). `appId` and `expiresAt` come from the server — the client must not decide the App ID from build-time env, and renewal is scheduled from `expiresAt`.
+- `lib/agora.ts`: browser-safe constants (`AGENT_UID = '123456'`, `HUMAN_UID = '654321'`), `resolveAppId()`, and the missing-App-ID message used by both voice surfaces.
+- `lib/support/snapshot.ts`: `StoreSnapshot` (`version: 1`) — the only shape the durable mirror carries; every persisted field is listed there.
 - `lib/support/types.ts`: `Conversation`, `ConversationMessage`, `SupportCase`, `HandoffSummary`, `ConversationEvent` shared by API routes, dashboard and chat.
 - `AgoraRenewalTokens`: renewal callback result (`rtcToken`, `rtmToken`).
 - `ConversationComponentProps`: runtime dependencies for in-call component.

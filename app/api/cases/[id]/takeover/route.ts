@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { speakAsAgent, stopAgent } from '@/lib/agora-server';
 import { DEFAULT_AGENT_UID } from '@/lib/agora';
 import { getCase, getConversation, recordEvent, updateConversation } from '@/lib/support/store';
+import { withStore } from '@/lib/support/route-store';
+
+/** The handover line is spoken before the AI leaves (a deliberate 4.5s pause), then two Agora calls follow. */
+export const maxDuration = 60;
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -15,7 +19,7 @@ const HANDOVER_LINE =
  * the AI announces the handover, then leaves the channel so only the human and
  * the customer remain (v1.md §19 "AI stops/mutes").
  */
-export async function POST(request: NextRequest, { params }: Params) {
+async function handlePost(request: NextRequest, { params }: Params) {
   const { id } = await params;
   const supportCase = getCase(id);
   if (!supportCase) {
@@ -72,3 +76,7 @@ export async function POST(request: NextRequest, { params }: Params) {
     conversation: getConversation(conversation.id),
   });
 }
+
+// Bracketed by withStore so the durable store mirror is read before the
+// handler runs and written back before the response is flushed (serverless).
+export const POST = withStore(handlePost);

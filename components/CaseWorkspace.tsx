@@ -258,6 +258,7 @@ export default function CaseWorkspace({ caseId }: { caseId: string }) {
                   token={voice.token}
                   uid={voice.uid}
                   agentUid={voice.agentUid}
+                  appId={voice.appId}
                   customerUid={conversation?.customerUid}
                   onJoined={() => void handleJoined()}
                   onLeave={handleLeaveCall}

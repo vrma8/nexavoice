@@ -10,7 +10,10 @@
 
 ## Secret Handling Rules
 
-- Keep `NEXT_AGORA_APP_CERTIFICATE` server-side only.
+- Keep `NEXT_AGORA_APP_CERTIFICATE` server-side only. It also signs the derived
+  `AGENT_TOOLS_SECRET` fallback (`lib/agent-tools.ts`): the derived value is sent to the
+  Agora engine on `/join` and required back on every `POST /api/agent-tools/[tool]`, and
+  is never returned to the browser or printed by `/api/health`.
 - Do not expose BYOK provider API keys to client bundles.
 - Store secrets in `.env.local` for dev and deployment secret store in Vercel.
 - `env.local.example` documents expected keys without real values.
@@ -25,7 +28,13 @@
 ## Input Validation and Failure Handling
 
 - Route handlers validate required fields and env availability.
-- Errors return structured JSON with bounded detail.
+- Errors return structured JSON with bounded detail. Setup errors (`503` from
+  `/api/generate-agora-token`, the `hint` from `/api/invite-agent`) name the missing
+  variable on purpose: the app is a sample and the variable names are not secret.
+- Voice tools are wired to the origin the invite arrived on; `localhost`, `127.0.0.1`
+  and `0.0.0.0` are rejected so the cloud engine is never handed an unreachable or
+  attacker-controlled callback target. Set `AGENT_TOOLS_BASE_URL` explicitly when the
+  app is reached through another hostname.
 - Stop route treats already-stopping/not-found agent as idempotent success.
 
 ## Agent Behavior Safety

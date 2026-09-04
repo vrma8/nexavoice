@@ -8,6 +8,7 @@ import {
   updateConversation,
 } from '@/lib/support/store';
 import type { MessageRole } from '@/lib/support/types';
+import { withStore } from '@/lib/support/route-store';
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -16,7 +17,7 @@ type Params = { params: Promise<{ id: string }> };
  * Conversation + messages (+ case when escalated). Polled by the chat UI and
  * by the dashboard case view.
  */
-export async function GET(request: NextRequest, { params }: Params) {
+async function handleGet(request: NextRequest, { params }: Params) {
   const { id } = await params;
   const conversation = getConversation(id);
   if (!conversation) {
@@ -37,7 +38,7 @@ export async function GET(request: NextRequest, { params }: Params) {
  * Voice client mirrors live transcript + agent state here so the dashboard can
  * show the call in real time and escalation summaries have context.
  */
-export async function PATCH(request: NextRequest, { params }: Params) {
+async function handlePatch(request: NextRequest, { params }: Params) {
   const { id } = await params;
   const conversation = getConversation(id);
   if (!conversation) {
@@ -70,3 +71,8 @@ export async function PATCH(request: NextRequest, { params }: Params) {
   }
   return NextResponse.json({ conversation: getConversation(id) });
 }
+
+// Bracketed by withStore so the durable store mirror is read before the
+// handler runs and written back before the response is flushed (serverless).
+export const GET = withStore(handleGet);
+export const PATCH = withStore(handlePatch);

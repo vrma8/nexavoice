@@ -2,6 +2,10 @@ import { timingSafeEqual } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { getToolSecret, TOOL_TOKEN_HEADER } from '@/lib/agent-tools';
 import { executeTool, getToolDefinition, TOOL_DEFINITIONS } from '@/lib/support/tools';
+import { withStore } from '@/lib/support/route-store';
+
+/** The engine waits on this; its own client timeout is 15s. */
+export const maxDuration = 30;
 
 /**
  * POST /api/agent-tools/<tool>?conversation_id=<id>
@@ -15,7 +19,7 @@ import { executeTool, getToolDefinition, TOOL_DEFINITIONS } from '@/lib/support/
  * Responses are always 200 with a JSON payload the LLM can read — including
  * business errors — so the model can explain problems instead of failing.
  */
-export async function POST(request: NextRequest, context: { params: Promise<{ tool: string }> }) {
+async function handlePost(request: NextRequest, context: { params: Promise<{ tool: string }> }) {
   const { tool } = await context.params;
 
   if (!isAuthorized(request)) {
@@ -58,7 +62,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ to
 }
 
 /** GET lists the tool catalogue (handy for debugging the deployment). */
-export async function GET(request: NextRequest) {
+async function handleGet(request: NextRequest) {
   if (!isAuthorized(request)) {
     return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 });
   }
@@ -89,3 +93,8 @@ function stripUnrenderedPlaceholders(args: Record<string, unknown>): Record<stri
   }
   return clean;
 }
+
+// Bracketed by withStore so the durable store mirror is read before the
+// handler runs and written back before the response is flushed (serverless).
+export const GET = withStore(handleGet);
+export const POST = withStore(handlePost);

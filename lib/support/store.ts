@@ -1,10 +1,28 @@
 /**
- * In-memory conversation / case store shared by chat, voice, tools and the
- * human dashboard. Backend-owned state (v1.md §21). Lives on `globalThis` so
- * it survives dev hot reloads; swap for a database by re-implementing this
- * module's exported functions.
+ * Conversation / case store shared by chat, voice, tools and the human dashboard.
+ * Backend-owned state (v1.md §21). Lives on `globalThis` so it survives dev hot
+ * reloads, and is mirrored to a durable backend (`persist.ts`) so every serverless
+ * invocation — on every instance — sees the same conversations.
+ *
+ * Reads and writes here stay synchronous; routes bracket their work with
+ * `hydrateStore()` / `flushStore()` (see `withStore` in `route-store.ts`), which
+ * pull and push that mirror. Swap for a database by re-implementing this module's
+ * exported functions.
  */
 import { randomUUID } from 'crypto';
+import {
+  message as describeError,
+  resolvePersistence,
+  type PersistenceBackend,
+} from './persist';
+import {
+  emptySnapshot,
+  mergeSnapshots,
+  parseSnapshot,
+  pruneSnapshot,
+  serializeSnapshot,
+  type StoreSnapshot,
+} from './snapshot';
 import type {
   CasePriority,
   Conversation,
@@ -25,6 +43,14 @@ interface SupportDb {
   events: ConversationEvent[];
   counters: { case: number };
   listeners: Set<(event: ConversationEvent) => void>;
+  /** Bumped by every local mutation, so we know when the durable mirror is behind. */
+  revision: number;
+  /** Revision last pushed to (or pulled from) the durable mirror. */
+  syncedRevision: number;
+  lastSyncAt: number;
+  lastError: string | null;
+  /** `rev` of the snapshot we last merged — for logs and /api/health only. */
+  remoteRev: number;
 }
 
 declare global {
@@ -40,13 +66,161 @@ function db(): SupportDb {
       events: [],
       counters: { case: 1023 },
       listeners: new Set(),
+      revision: 0,
+      syncedRevision: 0,
+      lastSyncAt: 0,
+      lastError: null,
+      remoteRev: 0,
     };
   }
   return globalThis.__nexavoiceSupportDb;
 }
 
+/** Records that memory is now ahead of the durable mirror. */
+function markDirty(): void {
+  db().revision += 1;
+}
+
 export function resetSupportDb(): void {
   globalThis.__nexavoiceSupportDb = undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Durable mirror (serverless support)
+// ---------------------------------------------------------------------------
+
+export interface StoreSyncStatus {
+  backend: string;
+  target: string;
+  revision: number;
+  syncedRevision: number;
+  remoteRev: number;
+  lastSyncAt: number;
+  lastError: string | null;
+}
+
+/** Reported by /api/health — the quickest way to tell if state is shared. */
+export function getStoreSyncStatus(): StoreSyncStatus {
+  const store = db();
+  const active = activeBackend();
+  return {
+    backend: active.kind,
+    target: active.target,
+    revision: store.revision,
+    syncedRevision: store.syncedRevision,
+    remoteRev: store.remoteRev,
+    lastSyncAt: store.lastSyncAt,
+    lastError: store.lastError,
+  };
+}
+
+let backend: PersistenceBackend | null = null;
+
+function activeBackend(): PersistenceBackend {
+  if (!backend) backend = resolvePersistence();
+  return backend;
+}
+
+/** Tests re-point NEXAVOICE_STORE between cases. */
+export function resetPersistenceClient(): void {
+  backend = null;
+}
+
+function toSnapshot(store: SupportDb): StoreSnapshot {
+  const snapshot = emptySnapshot();
+  snapshot.savedAt = Date.now();
+  snapshot.rev = store.revision;
+  snapshot.caseCounter = store.counters.case;
+  snapshot.events = [...store.events];
+  snapshot.conversations = [...store.conversations.values()];
+  snapshot.messages = Object.fromEntries(store.messages);
+  snapshot.cases = [...store.cases.values()];
+  return pruneSnapshot(snapshot);
+}
+
+/**
+ * Folds a remote snapshot into this instance's memory. Conversations and cases
+ * merge newest-first, so another customer's session never vanishes because this
+ * instance happened to hold an older copy of the document.
+ */
+function applySnapshot(store: SupportDb, remote: StoreSnapshot): void {
+  const merged = mergeSnapshots(toSnapshot(store), remote);
+  store.counters.case = Math.max(store.counters.case, merged.caseCounter);
+  store.conversations = new Map(
+    merged.conversations.map((conversation) => [conversation.id, conversation]),
+  );
+  store.messages = new Map(Object.entries(merged.messages));
+  store.cases = new Map(merged.cases.map((supportCase) => [supportCase.id, supportCase]));
+  store.events = merged.events;
+}
+
+/**
+ * Pulls the durable snapshot into memory before a handler reads or writes state.
+ *
+ * There is deliberately no "read recently enough, skip it" cache here: on Vercel
+ * consecutive requests from one browser land on different instances, so a TTL made
+ * the next request answer from a copy that was up to a TTL old — a customer would
+ * be asked for their phone number again on the very next turn. Every request reads
+ * the shared document instead, and concurrent requests on one instance coalesce
+ * into the in-flight read (`queueSync`) so a burst of polls costs one round trip.
+ */
+export async function hydrateStore(): Promise<void> {
+  const store = db();
+  const active = activeBackend();
+  if (active.kind === 'none') return;
+  await queueSync(async () => {
+    try {
+      const remote = parseSnapshot(await active.read());
+      if (remote) {
+        applySnapshot(store, remote);
+        store.remoteRev = remote.rev;
+      }
+      store.lastSyncAt = Date.now();
+      // Hydrating is not a local change: keep the marker level with reality so a
+      // read-only request does not write the document straight back.
+      store.syncedRevision = store.revision;
+      store.lastError = null;
+    } catch (error) {
+      store.lastError = describeError(error);
+      console.error('[store] durable hydration failed, continuing with local state:', store.lastError);
+    }
+  });
+}
+
+/** Pushes local changes to the durable mirror, re-merging remote state first. */
+export async function flushStore(): Promise<void> {
+  const store = db();
+  const active = activeBackend();
+  if (active.kind === 'none') return;
+  if (store.syncedRevision === store.revision) return;
+  await queueSync(async () => {
+    if (store.syncedRevision === store.revision) return;
+    try {
+      const remote = parseSnapshot(await active.read());
+      if (remote) applySnapshot(store, remote);
+      await active.write(serializeSnapshot(toSnapshot(store)));
+      store.syncedRevision = store.revision;
+      store.remoteRev += 1;
+      store.lastSyncAt = Date.now();
+      store.lastError = null;
+    } catch (error) {
+      store.lastError = describeError(error);
+      console.error('[store] durable flush failed (state kept in memory):', store.lastError);
+    }
+  });
+}
+
+let syncChain: Promise<void> = Promise.resolve();
+
+/**
+ * Serialises durable reads/writes per instance. Two concurrent requests sharing a
+ * warm instance would otherwise interleave `read → merge → write` and the slower
+ * one could publish a document that misses the faster one's write.
+ */
+function queueSync(task: () => Promise<void>): Promise<void> {
+  const run = syncChain.then(task, task);
+  syncChain = run.catch(() => {});
+  return run;
 }
 
 const MAX_EVENTS = 500;
@@ -54,6 +228,7 @@ const MAX_EVENTS = 500;
 function emit(event: Omit<ConversationEvent, 'id' | 'at'>): ConversationEvent {
   const full: ConversationEvent = { id: randomUUID(), at: Date.now(), ...event };
   const store = db();
+  markDirty();
   store.events.push(full);
   if (store.events.length > MAX_EVENTS) store.events.splice(0, store.events.length - MAX_EVENTS);
   for (const listener of store.listeners) {
@@ -137,6 +312,7 @@ export function updateConversation(
   Object.assign(conversation, rest);
   if (context) Object.assign(conversation.context, context);
   conversation.updatedAt = Date.now();
+  markDirty();
   return conversation;
 }
 
@@ -145,6 +321,7 @@ export function touchConversation(id: string): void {
   if (conversation) {
     conversation.lastActivityAt = Date.now();
     conversation.updatedAt = conversation.lastActivityAt;
+    markDirty();
   }
 }
 
@@ -154,6 +331,7 @@ export function setConversationState(id: string, state: ConversationState): Conv
   conversation.state = state;
   conversation.updatedAt = Date.now();
   if (state === 'CLOSED' || state === 'RESOLVED') conversation.endedAt = conversation.updatedAt;
+  markDirty();
   return conversation;
 }
 

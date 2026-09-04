@@ -102,15 +102,20 @@ export default function ClientChat() {
       setConversation(result.conversation);
       setSupportCase(result.case);
     } catch (err) {
-      console.error("Error sending message", err);
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error("Error sending message", detail);
+      // The cause matters: "Conversation not found" means the backend lost the
+      // session (state is not shared across serverless instances), which no
+      // amount of retrying fixes.
       setMessages((prev) => [
         ...prev,
         {
           id: `err-${Date.now()}`,
           role: "ai",
-          content: "Kuch technical problem aa gayi. Thodi der baad dobara try karein.",
+          content: `Technical problem: ${detail}. Dobara try karein — ya page refresh karke naye sire se shuru karein.`,
         },
       ]);
+      setError(detail);
     } finally {
       setIsLoading(false);
     }

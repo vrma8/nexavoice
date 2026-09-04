@@ -8,6 +8,7 @@ import {
   usePublish,
   useRemoteUsers,
 } from 'agora-rtc-react';
+import { MISSING_APP_ID_MESSAGE, resolveAppId } from '@/lib/agora';
 import { Button } from '@/components/ui/button';
 import { Loader2, Mic, MicOff, PhoneOff } from 'lucide-react';
 
@@ -17,6 +18,8 @@ export type HumanVoiceBridgeProps = {
   uid: string;
   agentUid: string;
   customerUid?: string;
+  /** App ID served by the API route; falls back to the inlined NEXT_PUBLIC_ value. */
+  appId?: string | null;
   /** Called once when the RTC join succeeds — the page then triggers the AI takeover. */
   onJoined: () => void;
   onLeave: () => void;
@@ -35,6 +38,7 @@ export default function HumanVoiceBridge({
   uid,
   agentUid,
   customerUid,
+  appId: appIdFromServer,
   onJoined,
   onLeave,
 }: HumanVoiceBridgeProps) {
@@ -52,15 +56,24 @@ export default function HumanVoiceBridge({
     };
   }, []);
 
-  const { isConnected } = useJoin(
+  const appId = resolveAppId(appIdFromServer);
+  const { isConnected, error: joinError } = useJoin(
     {
-      appid: process.env.NEXT_PUBLIC_AGORA_APP_ID!,
+      appid: appId ?? '',
       channel,
       token,
       uid: parseInt(uid, 10),
     },
-    isReady,
+    isReady && Boolean(appId),
   );
+
+  // A failed join used to leave the panel spinning on "Joining the call…" forever,
+  // which is indistinguishable from a slow network when a takeover is needed fast.
+  const joinFailure = !appId
+    ? MISSING_APP_ID_MESSAGE
+    : joinError
+      ? (joinError.message ?? 'The RTC join failed. Check the App ID, token and channel.')
+      : null;
   const { localMicrophoneTrack } = useLocalMicrophoneTrack(isReady);
   usePublish([localMicrophoneTrack]);
   const remoteUsers = useRemoteUsers();
@@ -98,10 +111,19 @@ export default function HumanVoiceBridge({
           <Loader2 className="h-3.5 w-3.5 animate-spin text-purple-300" />
         )}
         <span className="font-medium text-purple-100">
-          {isConnected ? 'You are live in the customer call' : 'Joining the call…'}
+          {isConnected
+            ? 'You are live in the customer call'
+            : joinFailure
+              ? 'Could not join the call'
+              : 'Joining the call…'}
         </span>
         <span className="ml-auto font-mono text-[10px] text-purple-300/70">{channel}</span>
       </div>
+      {joinFailure && (
+        <p className="mt-2 rounded bg-red-950/60 px-2 py-1.5 text-[11px] text-red-200">
+          {joinFailure}
+        </p>
+      )}
       <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-purple-200/80">
         <span className="rounded bg-purple-900/50 px-1.5 py-0.5">
           Customer: {customerInChannel ? 'connected' : 'not detected'}

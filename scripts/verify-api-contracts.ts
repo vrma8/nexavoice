@@ -14,6 +14,9 @@ function getJson(response: Response) {
 
 process.env.NEXT_PUBLIC_AGORA_APP_ID = '0123456789abcdef0123456789abcdef';
 process.env.NEXT_AGORA_APP_CERTIFICATE = 'fedcba9876543210fedcba9876543210';
+// Keep the durable mirror off unless a test turns it on: contract checks must not
+// touch a developer's real Vercel Blob store just because it is in the env file.
+process.env.NEXAVOICE_STORE = 'memory';
 
 async function verifyGenerateAgoraTokenRoute() {
   const { GET: generateAgoraToken } =
@@ -721,6 +724,245 @@ async function verifyChatEscalationFlow() {
   assert(r6.reply === null, 'AI must stay silent once a human handles the chat');
 }
 
+// ---------------------------------------------------------------------------
+// Serverless hardening: public origin for tools, derived tool secret,
+// enable_tools only with tools, durable store mirror, health report.
+// ---------------------------------------------------------------------------
+
+async function verifyToolsUrlAndSecret() {
+  const { getToolSecret, resolveToolAccess, resolveToolsBaseUrl } =
+    await import('../lib/agent-tools');
+  const originalBase = process.env.AGENT_TOOLS_BASE_URL;
+  const originalSecret = process.env.AGENT_TOOLS_SECRET;
+  delete process.env.AGENT_TOOLS_BASE_URL;
+  delete process.env.AGENT_TOOLS_SECRET;
+
+  try {
+    // The origin the browser used is enough — no AGENT_TOOLS_BASE_URL to configure.
+    assert(
+      resolveToolsBaseUrl('https://nexavoice-agora.vercel.app') ===
+        'https://nexavoice-agora.vercel.app',
+      'tools base URL should fall back to the request origin',
+    );
+    assert(
+      resolveToolsBaseUrl('https://example.com/app/') === 'https://example.com',
+      'tools base URL should normalise to an origin',
+    );
+    assert(
+      resolveToolsBaseUrl('http://localhost:3000') === null,
+      'localhost must never be handed to Agora as a callback URL',
+    );
+    process.env.AGENT_TOOLS_BASE_URL = 'https://tunnel.example';
+    assert(
+      resolveToolsBaseUrl('https://vercel.app') === 'https://tunnel.example',
+      'AGENT_TOOLS_BASE_URL should win over the request origin',
+    );
+    delete process.env.AGENT_TOOLS_BASE_URL;
+
+    // Without AGENT_TOOLS_SECRET the secret is derived from the App Certificate, so
+    // tools work on a fresh Vercel deployment with no extra variable to set.
+    const derived = getToolSecret();
+    assert(
+      derived !== null && derived.length >= 32,
+      'a derived tool secret should be available without AGENT_TOOLS_SECRET',
+    );
+    assert(
+      derived === getToolSecret(),
+      'the derived tool secret must be stable across calls (all instances derive the same one)',
+    );
+    assert(
+      !derived.includes(process.env.NEXT_AGORA_APP_CERTIFICATE as string),
+      'the derived tool secret must not embed the App Certificate',
+    );
+
+    process.env.AGENT_TOOLS_SECRET = 'short';
+    assert(
+      getToolSecret() === derived,
+      'an AGENT_TOOLS_SECRET shorter than 8 chars should be ignored in favour of the derived one',
+    );
+    process.env.AGENT_TOOLS_SECRET = 'a-long-enough-shared-secret';
+    assert(
+      getToolSecret() === 'a-long-enough-shared-secret',
+      'an explicit AGENT_TOOLS_SECRET should win',
+    );
+
+    const access = resolveToolAccess('https://nexavoice-agora.vercel.app');
+    assert(
+      access?.baseUrl === 'https://nexavoice-agora.vercel.app' && !!access.secret,
+      'resolveToolAccess should pair the public origin with a usable secret',
+    );
+  } finally {
+    if (originalBase === undefined) delete process.env.AGENT_TOOLS_BASE_URL;
+    else process.env.AGENT_TOOLS_BASE_URL = originalBase;
+    if (originalSecret === undefined) delete process.env.AGENT_TOOLS_SECRET;
+    else process.env.AGENT_TOOLS_SECRET = originalSecret;
+  }
+}
+
+async function verifyEnableToolsFollowsTools() {
+  const { AgoraClient, Area } = await import('agora-agents');
+  const { buildNexaVoiceAgent } = await import('../lib/agent-config');
+  const client = new AgoraClient({
+    area: Area.US,
+    appId: process.env.NEXT_PUBLIC_AGORA_APP_ID!,
+    appCertificate: process.env.NEXT_AGORA_APP_CERTIFICATE!,
+  });
+  const common = {
+    client,
+    conversationId: 'conv_test',
+    toolToken: 'secret-token',
+  } as const;
+  const tokenOpts = {
+    channel: 'ch',
+    agentUid: '123456',
+    remoteUids: ['1'],
+    appId: process.env.NEXT_PUBLIC_AGORA_APP_ID!,
+    appCertificate: process.env.NEXT_AGORA_APP_CERTIFICATE!,
+  };
+
+  const withoutTools = buildNexaVoiceAgent({ ...common, toolToken: null });
+  const plainProps = withoutTools.agent.toProperties(tokenOpts) as unknown as {
+    advanced_features?: { enable_tools?: boolean };
+  };
+  assert(
+    plainProps.advanced_features?.enable_tools !== true,
+    'a session with no tools must not advertise enable_tools to the engine',
+  );
+
+  const unreachable = buildNexaVoiceAgent({
+    ...common,
+    toolsBaseUrl: null,
+  });
+  const unreachableProps = unreachable.agent.toProperties(tokenOpts) as unknown as {
+    advanced_features?: { enable_tools?: boolean };
+    llm?: { tools?: unknown[] };
+  };
+  assert(
+    unreachableProps.advanced_features?.enable_tools !== true &&
+      !unreachableProps.llm?.tools?.length,
+    'no reachable tool endpoint should mean no tools and no enable_tools flag',
+  );
+}
+
+/**
+ * The Vercel regression this guards: two route invocations must observe the same
+ * conversations even though each runs with a fresh in-memory store.
+ */
+async function verifyDurableStoreMirror() {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { resetSupportDb, resetPersistenceClient, getStoreSyncStatus } =
+    await import('../lib/support/store');
+
+  const dir = await mkdtemp(path.join(tmpdir(), 'nexavoice-store-'));
+  const file = path.join(dir, 'state.json');
+  const previous = process.env.NEXAVOICE_STORE;
+  const previousFile = process.env.NEXAVOICE_STORE_FILE;
+  process.env.NEXAVOICE_STORE = 'file';
+  process.env.NEXAVOICE_STORE_FILE = file;
+  resetPersistenceClient();
+  resetSupportDb();
+
+  try {
+    const { POST: createConversationRoute } = await import('../app/api/conversations/route');
+    const created = await getJson(
+      await createConversationRoute(
+        new NextRequest('http://localhost:3000/api/conversations', {
+          method: 'POST',
+          body: JSON.stringify({ mode: 'CHAT' }),
+        }),
+      ),
+    );
+    const conversationId = (created.conversation as { id: string }).id;
+    assert(typeof conversationId === 'string', 'conversation should be created');
+    assert(
+      getStoreSyncStatus().backend === 'file',
+      'the file backend should be active for this check',
+    );
+
+    // A second instance: same code, empty memory, no shared process state.
+    resetSupportDb();
+    const { GET: getConversationRoute } = await import('../app/api/conversations/[id]/route');
+    const reread = await getConversationRoute(
+      new NextRequest(`http://localhost:3000/api/conversations/${conversationId}`),
+      { params: Promise.resolve({ id: conversationId }) },
+    );
+    assert(
+      reread.status === 200,
+      'a cold instance must still find the conversation via the durable mirror',
+    );
+
+    // And writes made on the cold instance must be visible again after a restart.
+    const { POST: sendRoute } = await import('../app/api/conversations/[id]/messages/route');
+    const sent = await sendRoute(
+      new NextRequest(`http://localhost:3000/api/conversations/${conversationId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({ content: 'hello', role: 'human_agent' }),
+      }),
+      { params: Promise.resolve({ id: conversationId }) },
+    );
+    assert(sent.status === 200, 'human reply should be accepted');
+    resetSupportDb();
+    const again = await getConversationRoute(
+      new NextRequest(`http://localhost:3000/api/conversations/${conversationId}`),
+      { params: Promise.resolve({ id: conversationId }) },
+    );
+    const body = await getJson(again);
+    const messages = body.messages as Array<{ role: string; content: string }>;
+    assert(
+      messages?.some((m) => m.role === 'human_agent' && m.content === 'hello'),
+      'mirrored messages must survive an instance restart',
+    );
+  } finally {
+    if (previous === undefined) delete process.env.NEXAVOICE_STORE;
+    else process.env.NEXAVOICE_STORE = previous;
+    if (previousFile === undefined) delete process.env.NEXAVOICE_STORE_FILE;
+    else process.env.NEXAVOICE_STORE_FILE = previousFile;
+    resetPersistenceClient();
+    resetSupportDb();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function verifyHealthRoute() {
+  const { GET: health } = await import('../app/api/health/route');
+  const response = await health();
+  const text = await response.text();
+  const body = JSON.parse(text) as {
+    status: string;
+    agora: { appIdConfigured: boolean; appId: string | null };
+    agent: { tools?: { enabled?: boolean; baseUrl?: string | null } };
+    store: { backend: string; note?: string };
+  };
+
+  assert(response.status === 200, 'GET /api/health should return 200');
+  assert(body.agora?.appIdConfigured === true, 'health should report the App ID as configured');
+  assert(
+    typeof body.store?.backend === 'string',
+    'health should report which store backend shares state',
+  );
+  assert(
+    typeof body.agent.tools?.enabled === 'boolean',
+    'health should report whether voice tools are reachable',
+  );
+  assert(
+    !/fedcba9876543210/.test(body.agora.appId ?? ''),
+    'health should only expose a masked App ID',
+  );
+  assert(
+    !text.includes(process.env.NEXT_AGORA_APP_CERTIFICATE as string),
+    'health must never leak the App Certificate',
+  );
+  // Env-var *names* may appear in guidance text; values must never.
+  for (const key of ['BLOB_READ_WRITE_TOKEN', 'AGENT_TOOLS_SECRET', 'NEXT_LLM_API_KEY']) {
+    const value = process.env[key]?.trim();
+    if (value) {
+      assert(!text.includes(value), `health must not leak the value of ${key}`);
+    }
+  }
+}
+
 async function main() {
   await verifyGenerateAgoraTokenRoute();
   await verifyGenerateAgoraTokenReplacesZeroUid();
@@ -735,6 +977,10 @@ async function main() {
   await verifyAgentToolsEndpoint();
   await verifyAgentConfigDeclaresRestTools();
   await verifyChatEscalationFlow();
+  await verifyToolsUrlAndSecret();
+  await verifyEnableToolsFollowsTools();
+  await verifyDurableStoreMirror();
+  await verifyHealthRoute();
 
   console.log('API contract checks passed');
 }

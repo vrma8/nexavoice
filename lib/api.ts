@@ -130,7 +130,7 @@ export async function getCase(id: string): Promise<CaseDetail> {
 export interface AcceptCaseResult {
   case: SupportCase;
   conversation: Conversation | null;
-  voice: { token: string; uid: string; channel: string; agentUid: string } | null;
+  voice: { token: string; uid: string; channel: string; agentUid: string; appId?: string } | null;
 }
 
 export async function acceptCase(id: string, agentName: string): Promise<AcceptCaseResult> {

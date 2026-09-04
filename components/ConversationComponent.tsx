@@ -23,7 +23,7 @@ import {
 } from 'agora-agent-client-toolkit';
 import { AgentVisualizer } from 'agora-agent-uikit';
 import { MicButtonWithVisualizer } from 'agora-agent-uikit/rtc';
-import { DEFAULT_AGENT_UID } from '@/lib/agora';
+import { DEFAULT_AGENT_UID, MISSING_APP_ID_MESSAGE, resolveAppId } from '@/lib/agora';
 import {
   getCurrentInProgressMessage,
   getMessageList,
@@ -160,15 +160,79 @@ export default function ConversationComponent({
     };
   }, []);
 
-  const { isConnected: joinSuccess } = useJoin(
+  // App ID comes from /api/generate-agora-token when available: a build-time
+  // NEXT_PUBLIC_ value can be missing from the bundle even though the server routes
+  // are configured, which otherwise shows up as a call that never connects.
+  const appId = resolveAppId(agoraData.appId);
+
+  const {
+    isConnected: joinSuccess,
+    isLoading: isJoining,
+    error: joinError,
+  } = useJoin(
     {
-      appid: process.env.NEXT_PUBLIC_AGORA_APP_ID!,
+      appid: appId ?? '',
       channel: agoraData.channel,
       token: agoraData.token,
       uid: parseInt(agoraData.uid, 10),
     },
-    isReady,
+    isReady && Boolean(appId),
   );
+
+  // Surface RTC join failures in the status panel — useJoin swallows them into its
+  // return value, and without this a bad token or App ID looks like silence.
+  useEffect(() => {
+    if (!joinError) return;
+    addConnectionIssue({
+      id: `${Date.now()}-rtc-join`,
+      source: 'rtc',
+      agentUserId: String(client?.uid ?? agoraData.uid),
+      code: 'RTC_JOIN_FAILED',
+      message: joinError.message ?? String(joinError),
+      timestamp: Date.now(),
+    });
+  }, [joinError, addConnectionIssue, client, agoraData.uid]);
+
+  useEffect(() => {
+    if (!appId) {
+      addConnectionIssue({
+        id: 'missing-app-id',
+        source: 'session',
+        agentUserId: agentUID,
+        code: 'MISSING_APP_ID',
+        message: MISSING_APP_ID_MESSAGE,
+        timestamp: Date.now(),
+      });
+    }
+  }, [appId, addConnectionIssue, agentUID]);
+
+  // The agent joins shortly after the customer. No peer with its uid after this
+  // window means /api/invite-agent failed (feature not enabled, quota, bad area),
+  // so say so instead of leaving a spinner up.
+  useEffect(() => {
+    if (!isReady || !joinSuccess || isAgentConnected) return;
+    const timer = setTimeout(() => {
+      addConnectionIssue({
+        id: 'agent-not-joined',
+        source: 'session',
+        agentUserId: agentUID,
+        code: 'AGENT_NOT_JOINED',
+        message:
+          `No Conversational AI agent (uid ${agentUID}) joined channel "${agoraData.channel}" within 20s. ` +
+          `If /api/invite-agent returned an error, fix that first; otherwise run \`agora project doctor --deep\` ` +
+          `and confirm Conversational AI is enabled for this App ID in Agora Console.`,
+        timestamp: Date.now(),
+      });
+    }, 20000);
+    return () => clearTimeout(timer);
+  }, [
+    isReady,
+    joinSuccess,
+    isAgentConnected,
+    addConnectionIssue,
+    agentUID,
+    agoraData.channel,
+  ]);
 
   // Create mic track only after the StrictMode fake-unmount cycle completes (isReady).
   // Passing `true` here creates two tracks in StrictMode — the first publishes, then
@@ -439,17 +503,22 @@ export default function ConversationComponent({
     setConnectionState(curState);
   });
 
+  // `connection-state-change` only fires once the join settles, so while `useJoin`
+  // is still working the panel would otherwise claim "connected" or stay stale.
+  const effectiveConnectionState =
+    isJoining && !joinSuccess ? 'CONNECTING' : connectionState;
+
   const connectionSeverity = useMemo<'normal' | 'warning' | 'error'>(() => {
     // RTC transport problems take precedence; otherwise derive severity from captured issues.
     if (
-      connectionState === 'DISCONNECTED' ||
-      connectionState === 'DISCONNECTING'
+      effectiveConnectionState === 'DISCONNECTED' ||
+      effectiveConnectionState === 'DISCONNECTING'
     ) {
       return 'error';
     }
     if (
-      connectionState === 'CONNECTING' ||
-      connectionState === 'RECONNECTING'
+      effectiveConnectionState === 'CONNECTING' ||
+      effectiveConnectionState === 'RECONNECTING'
     ) {
       return 'warning';
     }
@@ -461,12 +530,16 @@ export default function ConversationComponent({
     )
       ? 'error'
       : 'warning';
-  }, [connectionState, connectionIssues]);
+  }, [effectiveConnectionState, connectionIssues]);
 
   const visualizerState = useMemo(
     () =>
-      mapAgentVisualizerState(agentState, isAgentConnected, connectionState),
-    [agentState, isAgentConnected, connectionState],
+      mapAgentVisualizerState(
+        agentState,
+        isAgentConnected,
+        effectiveConnectionState,
+      ),
+    [agentState, isAgentConnected, effectiveConnectionState],
   );
 
   /**
@@ -523,7 +596,7 @@ export default function ConversationComponent({
       }
       statusPanel={
         <ConnectionStatusPanel
-          connectionState={connectionState}
+          connectionState={effectiveConnectionState}
           connectionSeverity={connectionSeverity}
           connectionIssues={connectionIssues}
           isOpen={isConnectionDetailsOpen}
