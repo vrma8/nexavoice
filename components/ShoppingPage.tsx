@@ -118,6 +118,11 @@ export default function ShoppingPage() {
     setOrders(list);
   }, []);
 
+  const refreshCart = useCallback(async (clientId: string) => {
+    const currentCart = await getCart(clientId);
+    setCart(currentCart);
+  }, []);
+
   useEffect(() => {
     if (!client) return;
     let cancelled = false;
@@ -146,15 +151,19 @@ export default function ShoppingPage() {
 
   // Orders change status on their own — poll, and tick a local clock so the
   // "next update in …" countdown moves every second.
+  // The cart is polled so AI agent updates appear live.
   useEffect(() => {
     if (!client) return;
-    const poll = setInterval(() => void refreshOrders(client.id).catch(() => {}), ORDER_POLL_MS);
+    const poll = setInterval(() => {
+      void refreshOrders(client.id).catch(() => {});
+      void refreshCart(client.id).catch(() => {});
+    }, ORDER_POLL_MS);
     const clock = setInterval(() => setTick(Date.now()), 1000);
     return () => {
       clearInterval(poll);
       clearInterval(clock);
     };
-  }, [client, refreshOrders]);
+  }, [client, refreshOrders, refreshCart]);
 
   const categories = useMemo(
     () => ["All", ...Array.from(new Set(products.map((p) => p.category))).sort()],
@@ -316,8 +325,12 @@ export default function ShoppingPage() {
                   key={product.id}
                   className="flex flex-col rounded-xl border border-zinc-800 bg-zinc-900 p-3 transition-colors hover:border-zinc-700"
                 >
-                  <div className="mb-2 flex h-20 items-center justify-center rounded-lg bg-zinc-950 text-4xl">
-                    {product.emoji}
+                  <div className="mb-2 flex h-32 items-center justify-center rounded-lg bg-zinc-950 text-4xl overflow-hidden relative">
+                    {product.imageUrl ? (
+                      <img src={product.imageUrl} alt={product.title} className="absolute inset-0 h-full w-full object-cover" />
+                    ) : (
+                      product.emoji
+                    )}
                   </div>
                   <p className="text-[10px] uppercase tracking-wide text-zinc-600">{product.category}</p>
                   <h3 className="mt-0.5 line-clamp-2 text-sm font-medium leading-snug">{product.title}</h3>
@@ -352,6 +365,7 @@ export default function ShoppingPage() {
 
           <CartCard
             cart={cart}
+            products={products}
             address={address}
             payment={payment}
             placing={placing}
@@ -453,6 +467,7 @@ function ProfileCard({ client }: { client: ClientSession }) {
 
 function CartCard({
   cart,
+  products,
   address,
   payment,
   placing,
@@ -463,6 +478,7 @@ function CartCard({
   onPlace,
 }: {
   cart: CartView;
+  products: ProductView[];
   address: string;
   payment: string;
   placing: boolean;
@@ -492,7 +508,14 @@ function CartCard({
           <ul className="max-h-56 divide-y divide-zinc-800 overflow-y-auto">
             {cart.lines.map((line) => (
               <li key={line.productId} className="flex items-center gap-2 p-2.5">
-                <span className="text-xl">{line.emoji}</span>
+                <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-md bg-zinc-800 text-xl flex items-center justify-center">
+                  {cart.lines.find(l => l.productId === line.productId) ? (
+                    (() => {
+                      const p = products.find(p => p.id === line.productId);
+                      return p?.imageUrl ? <img src={p.imageUrl} alt={line.title} className="absolute inset-0 h-full w-full object-cover" /> : line.emoji;
+                    })()
+                  ) : line.emoji}
+                </div>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm">{line.title}</p>
                   <p className="text-[11px] text-zinc-500">{inr(line.priceInr)} each</p>
@@ -729,6 +752,12 @@ function OrderCard({
       <ul className="mt-2 space-y-1">
         {order.items.map((item) => (
           <li key={item.productId} className="flex items-center gap-2 text-xs text-zinc-400">
+            <div className="h-6 w-6 shrink-0 overflow-hidden rounded bg-zinc-800 text-[10px] flex items-center justify-center">
+              {(() => {
+                const p = products.find(p => p.id === item.productId);
+                return p?.imageUrl ? <img src={p.imageUrl} alt={item.title} className="h-full w-full object-cover" /> : (p?.emoji || "📦");
+              })()}
+            </div>
             <span className="flex-1 truncate">
               {item.qty} × {item.title}
             </span>
@@ -806,7 +835,9 @@ function OrderCard({
                   }}
                   className="flex w-full items-center gap-2 rounded px-1.5 py-1 text-left text-xs text-zinc-300 hover:bg-zinc-800"
                 >
-                  <span>{p.emoji}</span>
+                  <div className="h-6 w-6 shrink-0 overflow-hidden rounded bg-zinc-800 text-xs flex items-center justify-center">
+                    {p.imageUrl ? <img src={p.imageUrl} alt={p.title} className="h-full w-full object-cover" /> : p.emoji}
+                  </div>
                   <span className="flex-1 truncate">{p.title}</span>
                   <span className="text-zinc-500">{inr(p.priceInr)}</span>
                   <ArrowRight className="h-3 w-3 text-zinc-600" />

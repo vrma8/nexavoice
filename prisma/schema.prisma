@@ -62,6 +62,7 @@ model Product {
   description String   @default("")
   priceInr    Int
   emoji       String   @default("🛍️")
+  imageUrl    String?
   rating      Float    @default(4.2)
   active      Boolean  @default(true)
   createdAt   DateTime @default(now())

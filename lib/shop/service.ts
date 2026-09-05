@@ -57,6 +57,7 @@ export interface ProductView {
   description: string;
   priceInr: number;
   emoji: string;
+  imageUrl?: string;
   rating: number;
 }
 

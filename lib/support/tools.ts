@@ -35,6 +35,9 @@ export const TOOL_NAMES = [
   'search_products',
   'list_recent_orders',
   'get_order_status',
+  'get_cart_status',
+  'add_item_to_cart',
+  'remove_item_from_cart',
   'add_item_to_order',
   'remove_item_from_order',
   'cancel_order',
@@ -76,6 +79,40 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       'Call this first if you need the customer name, delivery address or order numbers.',
     parameters: { type: 'object', properties: {} },
     write: false,
+  },
+  {
+    name: 'get_cart_status',
+    description: 'Get the current items and total of the signed-in customer\'s shopping cart.',
+    parameters: { type: 'object', properties: {} },
+    write: false,
+  },
+  {
+    name: 'add_item_to_cart',
+    description: 'Add a catalogue product to the customer\'s shopping cart.',
+    parameters: {
+      type: 'object',
+      properties: {
+        product: { type: 'string', description: 'Product SKU or title from search_products.' },
+        quantity: { type: 'number', description: 'How many to add (default 1).' },
+        confirmed: CONFIRMED_PROP,
+      },
+      required: ['product'],
+    },
+    write: true,
+  },
+  {
+    name: 'remove_item_from_cart',
+    description: 'Remove a product from the customer\'s shopping cart.',
+    parameters: {
+      type: 'object',
+      properties: {
+        product: { type: 'string', description: 'Product SKU or title.' },
+        quantity: { type: 'number', description: 'How many units to remove. Omit to remove the whole line.' },
+        confirmed: CONFIRMED_PROP,
+      },
+      required: ['product'],
+    },
+    write: true,
   },
   {
     name: 'search_products',
@@ -414,6 +451,103 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
         ok: true,
         result: { order: shop.summarizeOrderForAgent(found.data) },
         summary: `Status of ${found.data.code}: ${found.data.status}`,
+      };
+    }
+
+    case 'get_cart_status': {
+      if (!clientId) return noCustomer();
+      const cart = await shop.getCart(clientId);
+      return {
+        ok: true,
+        result: {
+          cart: cart.lines.map((l) => ({ product: l.title, sku: l.sku, qty: l.qty, total_inr: l.lineTotalInr })),
+          total_inr: cart.totalInr,
+          item_count: cart.itemCount,
+        },
+        summary: `Cart has ${cart.itemCount} items`,
+      };
+    }
+
+    case 'add_item_to_cart': {
+      if (!clientId) return noCustomer();
+      const productRef = str(args, 'product');
+      const qty = Math.max(1, Math.floor(num(args, 'quantity') ?? 1));
+      const product = await shop.findProduct(productRef);
+      if (!product) {
+        return {
+          ok: false,
+          result: {
+            error: 'PRODUCT_NOT_FOUND',
+            message: `"${productRef}" is not in the NexaMart catalogue. Use search_products and offer the closest match.`,
+          },
+          summary: `Product "${productRef}" not in catalogue`,
+        };
+      }
+      if (!bool(args, 'confirmed')) {
+        const cart = await shop.getCart(clientId);
+        return needsConfirmation('add the item to the cart', {
+          product: product.title,
+          sku: product.sku,
+          unit_price_inr: product.priceInr,
+          quantity: qty,
+          added_amount_inr: product.priceInr * qty,
+          new_total_inr: cart.totalInr + product.priceInr * qty,
+        });
+      }
+      const cart = await shop.addToCart(clientId, product.id, qty);
+      return {
+        ok: true,
+        result: {
+          cart: cart.lines.map((l) => ({ product: l.title, sku: l.sku, qty: l.qty, total_inr: l.lineTotalInr })),
+          total_inr: cart.totalInr,
+          message: `Added ${qty} x ${product.title} to the cart.`,
+        },
+        summary: `Added ${qty} x ${product.title} to cart`,
+      };
+    }
+
+    case 'remove_item_from_cart': {
+      if (!clientId) return noCustomer();
+      const productRef = str(args, 'product');
+      let qty = num(args, 'quantity');
+      const product = await shop.findProduct(productRef);
+      if (!product) {
+        return {
+          ok: false,
+          result: { error: 'PRODUCT_NOT_FOUND', message: `Could not find "${productRef}" in the catalogue.` },
+          summary: `Product "${productRef}" not in catalogue`,
+        };
+      }
+      const currentCart = await shop.getCart(clientId);
+      const line = currentCart.lines.find((l) => l.productId === product.id);
+      if (!line) {
+        return {
+          ok: false,
+          result: { error: 'NOT_IN_CART', message: `${product.title} is not in the cart.` },
+          summary: `${product.title} not in cart`,
+        };
+      }
+      qty = qty !== undefined ? Math.max(1, Math.floor(qty)) : line.qty;
+      const newQty = Math.max(0, line.qty - qty);
+
+      if (!bool(args, 'confirmed')) {
+        return needsConfirmation(`remove ${qty} x ${product.title} from the cart`, {
+          product: product.title,
+          sku: product.sku,
+          removing_qty: qty,
+          remaining_qty: newQty,
+          new_total_inr: currentCart.totalInr - product.priceInr * (line.qty - newQty),
+        });
+      }
+      const cart = await shop.setCartQty(clientId, product.id, newQty);
+      return {
+        ok: true,
+        result: {
+          cart: cart.lines.map((l) => ({ product: l.title, sku: l.sku, qty: l.qty, total_inr: l.lineTotalInr })),
+          total_inr: cart.totalInr,
+          message: newQty === 0 ? `Removed ${product.title} from the cart.` : `Reduced ${product.title} to ${newQty}.`,
+        },
+        summary: `Removed ${qty} x ${product.title} from cart`,
       };
     }
 
