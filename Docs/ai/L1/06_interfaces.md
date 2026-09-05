@@ -88,7 +88,7 @@ Timestamp units: every timestamp an API route returns (including `expiresAt`) is
 - `GET /api/dashboard` → `{ now, liveCalls, activeChats, waitingCases, handlingCases, recentResolved, recentEvents }` (no-store).
 - `GET /api/dashboard/events` → SSE: `ready { now, backlog }`, `conversation <ConversationEvent>`, `ping` every 20 s, auto-close after 5 min (`SSE_MAX_LIFE_MS`) with client reconnect — a never-ending stream is incompatible with serverless function limits, hence `export const dynamic = 'force-dynamic'`.
 - `GET /api/health` → always HTTP 200 with `{ status: "ok" | "degraded" | "error", agora, agent, store, checkedAt }`:
-  - `agora`: `{ appIdConfigured, appId (masked: first 6 + last 4 chars), appCertificateConfigured, publicAppIdInlined, area, error }` — `publicAppIdInlined: false` means the browser bundle was built without the App ID.
+  - `agora`: `{ appIdConfigured, appId (masked: first 6 + last 4 chars), appCertificateConfigured, credentialSources, publicAppIdInlined, area, error, convoai }` — `publicAppIdInlined: false` means the browser bundle was built without the App ID. `credentialSources: { appId, appCertificate, inertVarsSet }` names the env vars that actually provided each credential and lists set-but-never-read Agora CLI variables (`AGORA_PROJECT_ID`, `AGORA_FEATURE_*`, `AGORA_ENABLED_FEATURES`). `convoai` is the result of one read-only live `GET /v2/projects/{appid}/agents` round trip (`{ ok, area, latencyMs?, agents? { running, starting, total }, error?, hint?, statusCode? }`) unless skipped with `?deep=0`; a failed probe also flips `status` to `"degraded"`.
   - `agent`: `{ llm: "custom" | "agora-managed", tools: { enabled, baseUrl, secretSource: "AGENT_TOOLS_SECRET" | "derived-from-app-certificate" | null }, interactionLanguage, sttLanguage, ttsVoice }`.
   - `seed`: `{ requested, created, skipped, reason?, error? }` — what the opt-in `NEXAVOICE_SEED=demo` fixture did on this instance.
   - `store`: `getStoreSyncStatus()` (`backend`, `revision`, `remoteRev`, `lastSyncAt`, `lastError`, …) plus `conversations` and a `note` naming the fix when `backend: "none"`.
@@ -115,9 +115,11 @@ Required:
 - `NEXT_PUBLIC_AGORA_APP_ID`
 - `NEXT_AGORA_APP_CERTIFICATE`
 
+Aliases accepted in their place (server-side only; resolved in `lib/agora-server.ts`, never read `process.env` for these in routes): `AGORA_APP_ID`, `AGORA_APP_CERTIFICATE`. Never read at all: `AGORA_PROJECT_ID`, `AGORA_PROJECT_NAME`, `AGORA_ENABLED_FEATURES`, `AGORA_FEATURE_RTC/RTM/CONVOAI`.
+
 Voice tools (both required for the engine to call the backend): `AGENT_TOOLS_BASE_URL` (public https origin; falls back to `VERCEL_URL`), `AGENT_TOOLS_SECRET` (≥ 8 chars).
 
-Optional: `AGORA_AREA` (`US`|`EU`|`AP`|`CN`; unknown values warn and fall back to `US`), `AGENT_LANGUAGE` (`en-IN` default; `hi-IN`, `bn-IN`, `ta-IN`, `te-IN`, `gu-IN`, `kn-IN`, `en-US`), `AGENT_STT_LANGUAGE` (`multi`), `AGENT_TTS_VOICE_ID`, `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` (+ `NEXT_LLM_MODEL`) for BYOK LLM (chat agent + custom-LLM voice path).
+Optional: `AGORA_AREA` (`US`|`EU`|`AP`|`CN`; unknown values warn and fall back to `US`; when unset, `AGORA_REGION` is honoured with `global` → `US`), `AGENT_LANGUAGE` (`en-IN` default; `hi-IN`, `bn-IN`, `ta-IN`, `te-IN`, `gu-IN`, `kn-IN`, `en-US`), `AGENT_STT_LANGUAGE` (`multi`), `AGENT_TTS_VOICE_ID`, `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` (+ `NEXT_LLM_MODEL`) for BYOK LLM (chat agent + custom-LLM voice path).
 
 ## Test Coverage for Interfaces
 

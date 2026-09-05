@@ -49,6 +49,12 @@
 ## Agent Startup Pitfalls
 
 - Missing `NEXT_PUBLIC_AGORA_APP_ID`/`NEXT_AGORA_APP_CERTIFICATE` yields hard 500s on token/invite/stop routes.
+- **CLI env names look authoritative but are inert.** `agora project env write` and other
+  templates drop `AGORA_PROJECT_ID`, `AGORA_REGION`, `AGORA_ENABLED_FEATURES`,
+  `AGORA_FEATURE_*` into env files; only the App ID / App Certificate names (or their
+  `AGORA_APP_ID`/`AGORA_APP_CERTIFICATE` aliases) do anything here. `AGORA_REGION=global`
+  is treated as `US` for gateway routing. `/api/health` → `agora.credentialSources` shows
+  which names are actually in effect, and `agora.convoai.ok` is the live end-to-end proof.
 - Changing the agent UID outside `lib/agora.ts` can desynchronize the browser and invite route.
 - RTM subscription failures may only surface through SAL status or raw signaling fallback events.
 

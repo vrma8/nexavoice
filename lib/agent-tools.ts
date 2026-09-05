@@ -17,6 +17,7 @@
  */
 import { createHmac } from 'node:crypto';
 import type { Agora } from 'agora-agents';
+import { getAgoraCredentialsOrNull } from '@/lib/agora-server';
 import { TOOL_DEFINITIONS, type ToolDefinition } from '@/lib/support/tools';
 
 type LlmTool = Agora.LlmTool;
@@ -125,11 +126,10 @@ export function getToolSecret(): string | null {
 
 /** Derived from the App Certificate, which every deployment already has. */
 function deriveToolSecret(): string | null {
-  const certificate = process.env.NEXT_AGORA_APP_CERTIFICATE?.trim();
-  const appId = process.env.NEXT_PUBLIC_AGORA_APP_ID?.trim();
-  if (!certificate || !appId) return null;
-  const digest = createHmac('sha256', certificate)
-    .update(`nexavoice-agent-tools:${appId}`)
+  const credentials = getAgoraCredentialsOrNull();
+  if (!credentials) return null;
+  const digest = createHmac('sha256', credentials.appCertificate)
+    .update(`nexavoice-agent-tools:${credentials.appId}`)
     .digest('hex');
   return digest.slice(0, 48);
 }

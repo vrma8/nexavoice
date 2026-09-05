@@ -134,9 +134,15 @@ variable anyway so both sources agree.
 
 Then check `https://<your-deployment>/api/health` (safe to open in a browser — it
 reports booleans and a masked App ID, never a secret). It says whether the Agora
-credentials loaded, whether the client bundle was built with the App ID
-(`agora.publicAppIdInlined`), whether voice tools are wired up, which LLM the agent is
-using, and whether state is shared across instances (`store.backend`):
+credentials loaded and *which env names provided them* (`agora.credentialSources`,
+including any inert CLI variables that are set), whether the client bundle was built
+with the App ID (`agora.publicAppIdInlined`), whether voice tools are wired up, which
+LLM the agent is using, and whether state is shared across instances (`store.backend`).
+Unless you pass `?deep=0`, it also performs one read-only live round trip to the
+Conversational AI control plane and reports it under `agora.convoai` — `ok: true` with
+latency and live agent counts is definitive proof the deployment is connected to Agora;
+a `401/403` points at the certificate or the Conversational AI feature, `429` at quota,
+and a network error at the gateway area:
 
 ```bash
 curl -s https://<your-deployment>/api/health | jq '{status, agora, tools: .agent.tools, store}'
@@ -148,8 +154,8 @@ Defined in [`env.local.example`](env.local.example).
 
 | Variable                     | Required | Notes                                                                                                                                                                   |
 | ---------------------------- | :------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXT_PUBLIC_AGORA_APP_ID`   |    ✅    | Agora Console → Project → App ID. Type **Config**, targeted at **Production + Preview**, then **redeploy** — a `NEXT_PUBLIC_*` value is inlined at build time, so an existing deployment keeps the old one. |
-| `NEXT_AGORA_APP_CERTIFICATE` |    ✅    | Agora Console → Project → App Certificate. **Server-side only.**                                                                                                        |
+| `NEXT_PUBLIC_AGORA_APP_ID`   |    ✅    | Agora Console → Project → App ID. Type **Config**, targeted at **Production + Preview**, then **redeploy** — a `NEXT_PUBLIC_*` value is inlined at build time, so an existing deployment keeps the old one. Alias: `AGORA_APP_ID` (server-side only — the browser then gets the App ID at runtime from `/api/generate-agora-token`). |
+| `NEXT_AGORA_APP_CERTIFICATE` |    ✅    | Agora Console → Project → App Certificate. **Server-side only.** Alias: `AGORA_APP_CERTIFICATE`.                                                                         |
 | `BLOB_READ_WRITE_TOKEN`      | serverless state | Set automatically by a Vercel Blob store. Without it conversation state lives per instance (fine for `pnpm dev`, broken on Vercel). |
 | `NEXAVOICE_STORE`            |    –     | `memory` \| `file` \| `blob`. Auto-detected: `blob` when `BLOB_READ_WRITE_TOKEN` exists, otherwise `memory`. |
 | `NEXAVOICE_BLOB_ACCESS`      |    –     | `public` (default) or `private`, matching how the Blob store was created. |
@@ -157,11 +163,19 @@ Defined in [`env.local.example`](env.local.example).
 | `AGENT_TOOLS_BASE_URL`       |    –     | Override the public **https** URL the Agora engine calls back into (`${URL}/api/agent-tools/*`). Defaults to the request origin, then `VERCEL_URL`. |
 | `AGENT_TOOLS_SECRET`         |    –     | Shared secret (≥ 8 chars) the engine sends as `x-nexavoice-tool-token`. Unset → derived from the App Certificate, so tools still work on a fresh deployment. |
 | `AGORA_AREA`                 |    –     | Agora REST gateway region: `US` (default), `EU`, `AP` or `CN`. Must match the project's service area (India and other Asia-Pacific projects use `AP`) or the agent starts slowly or not at all. An unrecognised value logs a warning and falls back to `US`. |
+| `AGORA_REGION`               |    –     | Fallback for `AGORA_AREA`, using the name the Agora CLI writes: `US`/`EU`/`AP`/`CN` map directly, `global` routes through the US gateway. Takes effect only when `AGORA_AREA` is unset. |
 | `AGENT_LANGUAGE`             |    –     | Turn-detection / interaction locale: `en-IN` (default), `hi-IN`, `bn-IN`, `ta-IN`, `te-IN`, `gu-IN`, `kn-IN`, `en-US`.                                                   |
 | `AGENT_STT_LANGUAGE`         |    –     | Deepgram language, default `multi` (Hindi/English code-switching).                                                                                                      |
 | `AGENT_TTS_VOICE_ID`         |    –     | MiniMax voice id, default `English_captivating_female1`.                                                                                                                |
 | `NEXT_LLM_URL` / `NEXT_LLM_API_KEY` | – | OpenAI-compatible LLM. Enables the LLM chat agent and routes the voice agent through `/api/chat/completions` (custom LLM with server-side tools). Without them the chat uses a built-in rule-based agent and the voice agent uses Agora-managed OpenAI. |
 | `NEXT_LLM_MODEL`             |    –     | Model for the BYOK LLM (default `gpt-4o-mini`).                                                                                                                         |
+
+Not read by this app (Agora CLI / template metadata — setting them changes nothing here):
+`AGORA_PROJECT_ID`, `AGORA_PROJECT_NAME`, `AGORA_ENABLED_FEATURES`, `AGORA_FEATURE_RTC`,
+`AGORA_FEATURE_RTM`, `AGORA_FEATURE_CONVOAI`. Enabling Conversational AI is a console
+action, not an env var (`agora project doctor --deep` verifies it). `/api/health` lists
+any of these it finds set under `agora.credentialSources.inertVarsSet`, next to the names
+that actually provided the working credentials.
 
 The agent pipeline in [`lib/agent-config.ts`](lib/agent-config.ts) uses Agora-managed Deepgram STT, OpenAI LLM and MiniMax TTS, so no vendor keys are required. The Conversational AI feature and Agora-managed vendors must be enabled on the Agora project (`agora project doctor --deep`). Without `NEXT_LLM_*`, chat is answered by the deterministic rule-based agent in [`lib/chat-agent.ts`](lib/chat-agent.ts) — it covers the demo flows (verify → orders → cancel/return/address → ticket → escalation) with fixed copy, so free-form questions get a "what can I do" reply rather than an LLM answer.
 
@@ -198,6 +212,8 @@ Remove the flag afterwards if you don't want a store reset to repopulate the dem
 | Voice call starts, then nothing; "The AI agent could not join this call" | `invite-agent` error, now surfaced in the banner | Read the message + `/api/health`; run `agora project doctor --deep` |
 | Agent never speaks but an `agent_id` came back | Conversational AI not enabled for the App ID | Agora Console → project → All features → **Conversational AI** |
 | Call never connects, no error at all | App ID missing from the client bundle (var added or changed after the last build, or targeted only at Development) | Redeploy with `NEXT_PUBLIC_AGORA_APP_ID` targeted at Production/Preview — or rely on the `appId` the token route now serves |
+| "Agora doesn't seem connected", but CLI vars (`AGORA_PROJECT_ID`, `AGORA_FEATURE_*`, …) are set in Vercel | Those are CLI/template metadata this app never reads | Set the two names from the table above; check `agora.credentialSources` in `/api/health` to see which names are actually in effect |
+| `/api/health` shows `agora.convoai.ok: false` | Live control-plane check failed — the error + hint say which leg (auth / feature / quota / gateway area) | Follow the `hint`; typically fix the certificate, enable Conversational AI, or set `AGORA_AREA` |
 | Chat says "Conversation not found" / forgets the phone number between turns | No shared state backend | Create a Vercel Blob store |
 | Agent cancels an order, then says it is still placed (or the dashboard disagrees) | The shop copy on the other instance was never updated | Blob store present — `shop` is part of the mirrored snapshot |
 | Agent talks but never looks up orders | Engine cannot reach `/api/agent-tools/*` | Check `agent.tools` in `/api/health`; needs a public https URL (Vercel URL, ngrok, cloudflared) |
