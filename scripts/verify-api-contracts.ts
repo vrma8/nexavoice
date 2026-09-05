@@ -40,6 +40,47 @@ async function postgresAvailable(): Promise<boolean> {
   }
 }
 
+/**
+ * Creates a throw-away client with one freshly placed order, so the tool and
+ * chat checks below run against the real PostgreSQL shop instead of fixtures.
+ * Returns a `cleanup()` that removes everything it created.
+ */
+async function makeShopFixture(label: string) {
+  const { prisma } = await import('../lib/db');
+  const shop = await import('../lib/shop/service');
+  await shop.ensureCatalog();
+  const phone = String(9000000000 + (Date.now() % 999999999)).slice(0, 10);
+  const client = await prisma.client.create({
+    data: {
+      name: `Contract ${label}`,
+      email: `${label}@contract.example`,
+      phone,
+      city: 'Delhi',
+      address: 'B-42, Lajpat Nagar II, New Delhi 110024',
+      preferredLanguage: 'english',
+    },
+  });
+  const products = await shop.listProducts();
+  const headphones = products.find((p) => /headphones/i.test(p.title)) ?? products[0];
+  await shop.addToCart(client.id, headphones.id, 1);
+  const placed = await shop.placeOrder(client.id, {
+    shippingAddress: 'B-42, Lajpat Nagar II, New Delhi 110024',
+    paymentMethod: 'COD',
+  });
+  assert(placed.ok, 'fixture order should be placed');
+  return {
+    client,
+    order: placed.ok ? placed.data : null!,
+    product: headphones,
+    products,
+    async cleanup() {
+      await prisma.order.deleteMany({ where: { clientId: client.id } });
+      await prisma.cartItem.deleteMany({ where: { clientId: client.id } });
+      await prisma.client.delete({ where: { id: client.id } }).catch(() => {});
+    },
+  };
+}
+
 /** Deletes a Postgres-backed store document, used to clean up isolated test state. */
 async function deleteStoreDocument(key: string): Promise<void> {
   try {
@@ -492,119 +533,141 @@ async function verifyStopConversationSuccess() {
 // ---------------------------------------------------------------------------
 
 async function verifyToolLayerGuardrails() {
+  if (!(await postgresAvailable())) {
+    console.log('tool guardrails: skipped (no PostgreSQL reachable)');
+    return;
+  }
   const { resetSupportDb, createConversation, getConversation, getCase } =
     await import('../lib/support/store');
-  const { resetShopDb } = await import('../lib/shop/data');
   const { executeTool } = await import('../lib/support/tools');
+  const shop = await import('../lib/shop/service');
   resetSupportDb();
-  resetShopDb();
 
-  const conversation = createConversation({ mode: 'CHAT' });
+  const fixture = await makeShopFixture('guardrails');
+  try {
+    // 1. Without a signed-in client no order data is reachable at all.
+    const anonymous = createConversation({ mode: 'CHAT' });
+    const blocked = await executeTool(anonymous.id, 'list_recent_orders', {});
+    assert(
+      !blocked.ok && blocked.result.error === 'NO_SIGNED_IN_CUSTOMER',
+      'order tools must be blocked when the conversation has no signed-in client',
+    );
 
-  // 1. Order tools are blocked until the customer is verified.
-  const blocked = await executeTool(conversation.id, 'get_order_status', { order_id: 'NM-10023' });
-  assert(
-    !blocked.ok && blocked.result.error === 'CUSTOMER_NOT_VERIFIED',
-    'get_order_status must be blocked before verify_customer',
-  );
+    const conversation = createConversation({
+      mode: 'CHAT',
+      customerName: fixture.client.name,
+      customer: {
+        id: fixture.client.id,
+        name: fixture.client.name,
+        phone: fixture.client.phone,
+        email: fixture.client.email,
+        tier: fixture.client.tier,
+        city: fixture.client.city,
+        address: fixture.client.address,
+      },
+    });
 
-  // 2. Verification by phone (accepts +91 / spaces).
-  const verified = await executeTool(conversation.id, 'verify_customer', { phone: '+91 98765 43210' });
-  assert(verified.ok, 'verify_customer should find the seeded customer');
-  assert(
-    (verified.result.customer as { name: string }).name === 'Rahul Sharma',
-    'verify_customer should return the customer name',
-  );
-  assert(
-    getConversation(conversation.id)?.context.customer?.id === 'cust_rahul',
-    'verify_customer should attach the customer to the conversation',
-  );
+    // 2. Context and orders come from the database.
+    const context = await executeTool(conversation.id, 'get_customer_context', {});
+    assert(
+      context.ok && (context.result.orders as unknown[]).length === 1,
+      'get_customer_context should return the client orders from PostgreSQL',
+    );
 
-  // 3. Cross-customer access is denied.
-  const foreign = await executeTool(conversation.id, 'get_order_status', { order_id: '10030' });
-  assert(!foreign.ok && foreign.result.code === 'ORDER_NOT_FOUND', 'orders of other customers must not be visible');
+    // 3. Only catalogue products can be added.
+    const bogus = await executeTool(conversation.id, 'add_item_to_order', {
+      order_id: fixture.order.code,
+      product: 'diamond helicopter',
+      confirmed: true,
+    });
+    assert(
+      !bogus.ok && bogus.result.error === 'PRODUCT_NOT_FOUND',
+      'products outside the catalogue must be refused',
+    );
 
-  // 4. Writes require explicit confirmation.
-  const unconfirmed = await executeTool(conversation.id, 'cancel_order', {
-    order_id: '10023',
-    reason: 'changed mind',
-    confirmed: false,
-  });
-  assert(
-    !unconfirmed.ok && unconfirmed.result.error === 'CONFIRMATION_REQUIRED',
-    'cancel_order without confirmed=true must not mutate',
-  );
-  const status = await executeTool(conversation.id, 'get_order_status', { order_id: 'NM-10023' });
-  assert(
-    status.ok && (status.result.order as { status: string }).status === 'PLACED',
-    'unconfirmed cancel must leave the order untouched',
-  );
+    // 4. Writes require explicit confirmation.
+    const socks = fixture.products.find((p) => /socks/i.test(p.title))!;
+    const unconfirmed = await executeTool(conversation.id, 'add_item_to_order', {
+      order_id: fixture.order.code,
+      product: socks.sku,
+    });
+    assert(
+      !unconfirmed.ok && unconfirmed.result.error === 'CONFIRMATION_REQUIRED',
+      'add_item_to_order without confirmed=true must not mutate',
+    );
+    const untouched = await shop.getOrderForClient(fixture.client.id, fixture.order.code);
+    assert(untouched.ok && untouched.data.items.length === 1, 'unconfirmed add must leave the order untouched');
 
-  const confirmed = await executeTool(conversation.id, 'cancel_order', {
-    order_id: 'NM-10023',
-    reason: 'changed mind',
-    confirmed: 'true',
-  });
-  assert(
-    confirmed.ok && (confirmed.result.order as { status: string }).status === 'CANCELLED',
-    'confirmed cancel should cancel the order',
-  );
+    const confirmed = await executeTool(conversation.id, 'add_item_to_order', {
+      order_id: fixture.order.code,
+      product: socks.sku,
+      quantity: 2,
+      confirmed: 'true',
+    });
+    assert(confirmed.ok, 'confirmed add should change the order');
+    const afterAdd = await shop.getOrderForClient(fixture.client.id, fixture.order.code);
+    assert(
+      afterAdd.ok && afterAdd.data.items.length === 2 && afterAdd.data.totalInr === fixture.order.totalInr + socks.priceInr * 2,
+      'the order total must include the added items',
+    );
 
-  // 5. Business rules: shipped orders cannot be cancelled.
-  const shipped = await executeTool(conversation.id, 'cancel_order', {
-    order_id: 'NM-10021',
-    reason: 'x',
-    confirmed: true,
-  });
-  assert(!shipped.ok && shipped.result.code === 'NOT_CANCELLABLE', 'shipped orders must not be cancellable');
+    // 5. Another client's order is invisible.
+    const other = await makeShopFixture('guardrails-other');
+    try {
+      const foreign = await executeTool(conversation.id, 'get_order_status', { order_id: other.order.code });
+      assert(!foreign.ok && foreign.result.code === 'ORDER_NOT_FOUND', "another client's order must not be readable");
+    } finally {
+      await other.cleanup();
+    }
 
-  // 6. Escalation creates a case with a §24 handoff summary and blocks further actions.
-  const escalated = await executeTool(conversation.id, 'escalate_to_human', {
-    reason: 'Customer asked for a human',
-    intent: 'cancellation',
-    summary: 'Customer cancelled NM-10023 and wants to talk about a refund.',
-    language: 'hinglish',
-    confidence: 0.7,
-  });
-  assert(escalated.ok && typeof escalated.result.case_id === 'string', 'escalate_to_human should create a case');
-  const supportCase = getCase(String(escalated.result.case_id));
-  assert(supportCase?.status === 'WAITING_FOR_HUMAN', 'new case should be WAITING_FOR_HUMAN');
-  assert(
-    supportCase?.handoff.conversation_id === conversation.id &&
-      supportCase.handoff.client_name === 'Rahul Sharma' &&
-      supportCase.handoff.actions_taken.some((a) => a.includes('Cancelled NM-10023')),
-    'handoff summary should include client name and actions taken',
-  );
-  assert(
-    getConversation(conversation.id)?.state === 'WAITING_FOR_HUMAN',
-    'conversation should move to WAITING_FOR_HUMAN',
-  );
-  const afterHandoff = await executeTool(conversation.id, 'list_recent_orders', {});
-  assert(
-    !afterHandoff.ok && afterHandoff.result.error === 'HANDED_OFF',
-    'tools must be blocked once the conversation is handed off',
-  );
-  assert(
-    (getConversation(conversation.id)?.toolAudit.length ?? 0) >= 7,
-    'every tool call should be recorded in the audit trail',
-  );
+    // 6. Escalation builds a handoff carrying profile, orders and transcript.
+    const escalated = await executeTool(conversation.id, 'escalate_to_human', {
+      reason: 'Customer asked for a human',
+      intent: 'order_edit',
+      summary: 'Customer added socks and wants to discuss delivery.',
+      language: 'english',
+      confidence: 0.7,
+    });
+    assert(escalated.ok && typeof escalated.result.case_id === 'string', 'escalate_to_human should create a case');
+    const supportCase = getCase(String(escalated.result.case_id));
+    assert(supportCase?.status === 'WAITING_FOR_HUMAN', 'new case should be WAITING_FOR_HUMAN');
+    assert(
+      supportCase?.handoff.customer_profile?.id === fixture.client.id &&
+        (supportCase?.handoff.orders?.length ?? 0) === 1 &&
+        supportCase!.handoff.actions_taken.some((a) => a.includes('Added')),
+      'the handoff must carry the client profile, their orders and what the AI already did',
+    );
+    assert(
+      getConversation(conversation.id)?.state === 'WAITING_FOR_HUMAN',
+      'conversation should move to WAITING_FOR_HUMAN',
+    );
+    const afterHandoff = await executeTool(conversation.id, 'list_recent_orders', {});
+    assert(
+      !afterHandoff.ok && afterHandoff.result.error === 'HANDED_OFF',
+      'tools must be blocked once the conversation is handed off',
+    );
+    assert(
+      (getConversation(conversation.id)?.toolAudit.length ?? 0) >= 6,
+      'every tool call should be recorded in the audit trail',
+    );
+  } finally {
+    await fixture.cleanup();
+  }
 }
 
 async function verifyAgentToolsEndpoint() {
   const { resetSupportDb, createConversation } = await import('../lib/support/store');
-  const { resetShopDb } = await import('../lib/shop/data');
   const { POST: agentTool } = await import('../app/api/agent-tools/[tool]/route');
   resetSupportDb();
-  resetShopDb();
   const originalSecret = process.env.AGENT_TOOLS_SECRET;
   process.env.AGENT_TOOLS_SECRET = 'test-secret-123';
   try {
     const conversation = createConversation({ mode: 'VOICE', channel: 'ch-1', customerUid: '42' });
-    const url = `http://localhost:3000/api/agent-tools/verify_customer?conversation_id=${conversation.id}`;
-    const params = Promise.resolve({ tool: 'verify_customer' });
+    const url = `http://localhost:3000/api/agent-tools/get_customer_context?conversation_id=${conversation.id}`;
+    const params = Promise.resolve({ tool: 'get_customer_context' });
 
     const unauthorized = await agentTool(
-      new NextRequest(url, { method: 'POST', body: JSON.stringify({ phone: '9876543210' }) }),
+      new NextRequest(url, { method: 'POST', body: '{}' }),
       { params },
     );
     assert(unauthorized.status === 401, 'agent tool endpoint must reject calls without the tool token');
@@ -613,13 +676,16 @@ async function verifyAgentToolsEndpoint() {
       new NextRequest(url, {
         method: 'POST',
         headers: { 'x-nexavoice-tool-token': 'test-secret-123', 'content-type': 'application/json' },
-        body: JSON.stringify({ tool_call_id: 'call_1', phone: '9876543210' }),
+        body: JSON.stringify({ tool_call_id: 'call_1' }),
       }),
       { params },
     );
     const body = await getJson(ok);
-    assert(ok.status === 200 && body.ok === true, 'agent tool endpoint should execute the tool');
+    // No signed-in client on this conversation: the engine still gets a 200 with a
+    // message the model can speak, never a transport error.
+    assert(ok.status === 200 && body.ok === false, 'agent tool endpoint should execute the tool and answer 200');
     assert(body.tool_call_id === 'call_1', 'agent tool endpoint should echo tool_call_id');
+    assert(body.error === 'NO_SIGNED_IN_CUSTOMER', 'an unbound conversation must not reach order data');
 
     const unknown = await agentTool(
       new NextRequest(`http://localhost:3000/api/agent-tools/drop_db?conversation_id=${conversation.id}`, {
@@ -704,66 +770,187 @@ async function verifyAgentConfigDeclaresRestTools() {
 }
 
 async function verifyChatEscalationFlow() {
+  if (!(await postgresAvailable())) {
+    console.log('chat escalation flow: skipped (no PostgreSQL reachable)');
+    return;
+  }
   const { resetSupportDb } = await import('../lib/support/store');
-  const { resetShopDb } = await import('../lib/shop/data');
   const { POST: createConversationRoute } = await import('../app/api/conversations/route');
   const { POST: postMessage } = await import('../app/api/conversations/[id]/messages/route');
   const { POST: acceptCase } = await import('../app/api/cases/[id]/accept/route');
   const { GET: dashboard } = await import('../app/api/dashboard/route');
   resetSupportDb();
-  resetShopDb();
   delete process.env.NEXT_LLM_URL;
   delete process.env.NEXT_LLM_API_KEY;
 
-  const created = await createConversationRoute(
-    new NextRequest('http://localhost:3000/api/conversations', { method: 'POST', body: JSON.stringify({ mode: 'CHAT' }) }),
-  );
-  const conversationId = ((await getJson(created)).conversation as { id: string }).id;
-  const send = async (content: string) => {
-    const res = await postMessage(
-      new NextRequest(`http://localhost:3000/api/conversations/${conversationId}/messages`, {
+  const fixture = await makeShopFixture('chatflow');
+  try {
+    const created = await createConversationRoute(
+      new NextRequest('http://localhost:3000/api/conversations', {
         method: 'POST',
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ mode: 'CHAT', clientId: fixture.client.id }),
       }),
-      { params: Promise.resolve({ id: conversationId }) },
     );
-    return getJson(res);
-  };
+    const conversation = (await getJson(created)).conversation as {
+      id: string;
+      context: { customer?: { id: string } };
+    };
+    assert(
+      conversation.context.customer?.id === fixture.client.id,
+      'a conversation must be bound to the signed-in client record',
+    );
+    const conversationId = conversation.id;
 
-  const r1 = await send('mera order kahan hai');
-  assert(
-    typeof (r1.reply as { content: string }).content === 'string' && /mobile/i.test((r1.reply as { content: string }).content),
-    'chat agent should ask for the mobile number first',
-  );
-  const r2 = await send('9876543210');
-  assert(/Rahul/.test((r2.reply as { content: string }).content), 'chat agent should verify the customer');
-  const r3 = await send('NM-10021');
-  assert(/BlueDart|Shipped/i.test((r3.reply as { content: string }).content), 'chat agent should report the order status');
-  const r4 = await send('cancel kar do 10021');
-  assert(/can't be cancelled|cancel nahi ho sakta|नहीं/i.test((r4.reply as { content: string }).content), 'shipped order must not be offered for cancellation');
-  const r5 = await send('kisi insaan se baat karao');
-  assert((r5.case as { status: string } | null)?.status === 'WAITING_FOR_HUMAN', 'human request should create a waiting case');
-  const caseId = (r5.case as { id: string }).id;
+    const send = async (content: string) => {
+      const res = await postMessage(
+        new NextRequest(`http://localhost:3000/api/conversations/${conversationId}/messages`, {
+          method: 'POST',
+          body: JSON.stringify({ content }),
+        }),
+        { params: Promise.resolve({ id: conversationId }) },
+      );
+      return getJson(res);
+    };
+    const reply = (r: Record<string, unknown>) => (r.reply as { content: string }).content;
 
-  const snapshot = await getJson(await dashboard());
-  assert(
-    (snapshot.waitingCases as Array<{ id: string }>).some((c) => c.id === caseId),
-    'dashboard snapshot should list the waiting case',
-  );
+    const r1 = await send('mera order kahan hai');
+    assert(
+      reply(r1).includes(fixture.order.code),
+      'the chat agent should answer with the order it found in the database, without asking to verify',
+    );
 
-  const accepted = await getJson(
-    await acceptCase(
-      new NextRequest(`http://localhost:3000/api/cases/${caseId}/accept`, { method: 'POST', body: JSON.stringify({ agentName: 'Asha' }) }),
-      { params: Promise.resolve({ id: caseId }) },
-    ),
-  );
+    const r2 = await send(`add cotton socks to ${fixture.order.code}`);
+    assert(/socks/i.test(reply(r2)) && /(haan|yes|nahi|no)/i.test(reply(r2)), 'adding an item must ask for confirmation first');
+
+    const r3 = await send('haan');
+    assert(/added|add kar/i.test(reply(r3)), 'confirming should perform the add');
+    const shop = await import('../lib/shop/service');
+    const updated = await shop.getOrderForClient(fixture.client.id, fixture.order.code);
+    assert(updated.ok && updated.data.items.length === 2, 'the confirmed add must reach the database');
+
+    const r4 = await send('kisi insaan se baat karao');
+    assert((r4.case as { status: string } | null)?.status === 'WAITING_FOR_HUMAN', 'human request should create a waiting case');
+    const caseId = (r4.case as { id: string }).id;
+
+    const snapshot = await getJson(await dashboard());
+    assert(
+      (snapshot.waitingCases as Array<{ id: string }>).some((c) => c.id === caseId),
+      'dashboard snapshot should list the waiting case',
+    );
+
+    const accepted = await getJson(
+      await acceptCase(
+        new NextRequest(`http://localhost:3000/api/cases/${caseId}/accept`, {
+          method: 'POST',
+          body: JSON.stringify({ agentName: 'Asha' }),
+        }),
+        { params: Promise.resolve({ id: caseId }) },
+      ),
+    );
+    assert(
+      (accepted.case as { status: string; assignedTo: string }).status === 'HUMAN_HANDLING' &&
+        (accepted.case as { assignedTo: string }).assignedTo === 'Asha',
+      'accepting a case should move it to HUMAN_HANDLING',
+    );
+    const r5 = await send('hello?');
+    assert(r5.reply === null, 'AI must stay silent once a human handles the chat');
+  } finally {
+    await fixture.cleanup();
+  }
+}
+
+/**
+ * The shopping contract the whole feature rests on: an order is editable while it
+ * is PLACED, moves on by itself, and is frozen afterwards — for the customer's own
+ * clicks and for the AI agent alike, because both go through this service.
+ */
+async function verifyOrderLifecycle() {
+  if (!(await postgresAvailable())) {
+    console.log('order lifecycle: skipped (no PostgreSQL reachable)');
+    return;
+  }
+  const previousPlaced = process.env.ORDER_PLACED_SECONDS;
+  const previousTransit = process.env.ORDER_TRANSIT_SECONDS;
+  // Two seconds per stage keeps the check fast; production defaults are minutes.
+  process.env.ORDER_PLACED_SECONDS = '2';
+  process.env.ORDER_TRANSIT_SECONDS = '2';
+
+  const shop = await import('../lib/shop/service');
+  const fixture = await makeShopFixture('lifecycle');
+  try {
+    const socks = fixture.products.find((p) => /socks/i.test(p.title))!;
+    assert(fixture.order.status === 'PLACED' && fixture.order.editable, 'a new order starts PLACED and editable');
+
+    const added = await shop.addItemToOrder(fixture.client.id, fixture.order.code, socks.sku, 2);
+    assert(added.ok && added.data.items.length === 2, 'items can be added while PLACED');
+    const removed = await shop.removeItemFromOrder(fixture.client.id, fixture.order.code, socks.sku);
+    assert(removed.ok && removed.data.items.length === 1, 'items can be removed while PLACED');
+    const lastItem = await shop.removeItemFromOrder(fixture.client.id, fixture.order.code, fixture.product.sku);
+    assert(!lastItem.ok && lastItem.error.code === 'LAST_ITEM', 'the final item cannot be removed — cancel instead');
+
+    // Status advances on its own.
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    const onTheWay = await shop.getOrderForClient(fixture.client.id, fixture.order.code);
+    assert(onTheWay.ok && onTheWay.data.status === 'ON_THE_WAY', 'a PLACED order becomes ON_THE_WAY on its own');
+    assert(!onTheWay.data.editable, 'an order on the way is not editable');
+
+    const lateAdd = await shop.addItemToOrder(fixture.client.id, fixture.order.code, socks.sku, 1);
+    assert(!lateAdd.ok && lateAdd.error.code === 'ORDER_LOCKED', 'items must not change after the PLACED stage');
+    const lateCancel = await shop.cancelOrder(fixture.client.id, fixture.order.code, 'too late');
+    assert(!lateCancel.ok && lateCancel.error.code === 'NOT_CANCELLABLE', 'an order on the way cannot be cancelled');
+
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    const delivered = await shop.getOrderForClient(fixture.client.id, fixture.order.code);
+    assert(delivered.ok && delivered.data.status === 'DELIVERED', 'an ON_THE_WAY order becomes DELIVERED on its own');
+    assert(
+      delivered.ok && delivered.data.history.some((h) => /Delivered/.test(h.event)),
+      'the timeline should record every status change',
+    );
+    console.log('order lifecycle: PLACED → ON_THE_WAY → DELIVERED, edits only while PLACED');
+  } finally {
+    await fixture.cleanup();
+    if (previousPlaced === undefined) delete process.env.ORDER_PLACED_SECONDS;
+    else process.env.ORDER_PLACED_SECONDS = previousPlaced;
+    if (previousTransit === undefined) delete process.env.ORDER_TRANSIT_SECONDS;
+    else process.env.ORDER_TRANSIT_SECONDS = previousTransit;
+  }
+}
+
+/**
+ * The agent dashboard may only show conversations whose customer is still there.
+ * A browser that stops sending heartbeats (tab closed, signed out, network gone)
+ * must have its conversation terminated by the sweep.
+ */
+async function verifyStaleConversationsAreTerminated() {
+  const {
+    resetSupportDb,
+    createConversation,
+    heartbeatConversation,
+    sweepStaleConversations,
+    getConversation,
+    getDashboardSnapshot,
+    STALE_AFTER_MS,
+  } = await import('../lib/support/store');
+  resetSupportDb();
+
+  const live = createConversation({ mode: 'CHAT' });
+  const gone = createConversation({ mode: 'VOICE', channel: 'ch-stale' });
+
+  heartbeatConversation(live.id);
+  // Pretend the second browser last checked in well over the stale window ago.
+  const staleConversation = getConversation(gone.id)!;
+  staleConversation.lastSeenAt = Date.now() - STALE_AFTER_MS - 5_000;
+
+  const swept = sweepStaleConversations();
+  assert(swept.closed.includes(gone.id), 'a conversation without heartbeats must be closed');
+  assert(getConversation(live.id)?.state === 'AI_HANDLING', 'a conversation that is still pinging must stay open');
+
+  const snapshot = getDashboardSnapshot();
   assert(
-    (accepted.case as { status: string; assignedTo: string }).status === 'HUMAN_HANDLING' &&
-      (accepted.case as { assignedTo: string }).assignedTo === 'Asha',
-    'accepting a case should move it to HUMAN_HANDLING',
+    snapshot.liveCalls.every((c) => c.id !== gone.id) && snapshot.activeChats.some((c) => c.id === live.id),
+    'the dashboard must list live conversations only',
   );
-  const r6 = await send('hello?');
-  assert(r6.reply === null, 'AI must stay silent once a human handles the chat');
+  console.log('conversation lifecycle: stale sessions terminated, dashboard shows live only');
 }
 
 // ---------------------------------------------------------------------------
@@ -970,241 +1157,6 @@ async function verifyDurableStoreMirror() {
 }
 
 /**
- * `NEXAVOICE_SEED=demo` demo data: opt-in, idempotent, and — the part that actually
- * needs a test — safe when two cold instances seed at the same moment. Records carry
- * fixed ids so the snapshot merge collapses the two sets into one instead of doubling
- * the transcript in the dashboard.
- */
-async function verifyDemoSeedFixture() {
-  const {
-    resetSupportDb,
-    resetPersistenceClient,
-    flushStore,
-    listConversations,
-    listMessages,
-    getConversation,
-    getCase,
-    createConversation,
-  } = await import('../lib/support/store');
-  const { seedDemoData, seedEnabled, maybeSeedDemoData, resetSeedState } = await import('../lib/support/seed');
-  const { getShopDb } = await import('../lib/shop/data');
-
-  const previousStore = process.env.NEXAVOICE_STORE;
-  const previousKey = process.env.NEXAVOICE_STATE_KEY;
-  const previousSeed = process.env.NEXAVOICE_SEED;
-  // In-memory backend is enough for the opt-in / idempotency assertions; the
-  // race-safe merge below re-points the mirror at an isolated Postgres row.
-  process.env.NEXAVOICE_STORE = 'memory';
-  resetPersistenceClient();
-  resetSupportDb();
-
-  try {
-    // Off unless asked for.
-    delete process.env.NEXAVOICE_SEED;
-    assert(!seedEnabled(), 'seeding must be opt-in via NEXAVOICE_SEED');
-    resetSeedState();
-    await maybeSeedDemoData();
-    assert(listConversations().length === 0, 'no demo data without the flag');
-
-    // On: the fixture appears, and only on an empty store.
-    process.env.NEXAVOICE_SEED = 'demo';
-    assert(seedEnabled(), 'NEXAVOICE_SEED=demo should enable seeding');
-    resetSeedState();
-    await maybeSeedDemoData();
-    const conversations = listConversations();
-    assert(conversations.length === 3, `expected 3 demo conversations, got ${conversations.length}`);
-
-    const waiting = getConversation('conv_demo_waiting_case');
-    assert(waiting?.state === 'WAITING_FOR_HUMAN', 'the escalated demo chat should wait for a human');
-    assert(Boolean(waiting?.caseId), 'the escalated demo chat should own a case');
-    const waitingCase = waiting?.caseId ? getCase(waiting.caseId) : null;
-    assert(waitingCase?.priority === 'HIGH', 'a refund request should be seeded as HIGH');
-    assert(
-      (waitingCase?.handoff.missing_information.length ?? 0) > 0,
-      'the handoff summary should carry what the customer still owes',
-    );
-    const resolvedVoice = getConversation('conv_demo_voice_resolved');
-    assert(resolvedVoice?.state === 'RESOLVED', 'the demo voice case should read as resolved');
-    const resolvedCase = resolvedVoice?.caseId ? getCase(resolvedVoice.caseId) : null;
-    assert(resolvedCase?.status === 'RESOLVED' && Boolean(resolvedCase.resolutionNote), 'resolved case needs a note');
-    assert(
-      listMessages('conv_demo_active_chat').length === 2,
-      'the active demo chat should have exactly two turns',
-    );
-    assert(
-      listMessages('conv_demo_voice_resolved').some((m) => m.role === 'human_agent'),
-      'the demo voice transcript should include the human turn',
-    );
-
-    // Demo data has to be consistent with the shop, or a human agent clicking through
-    // a seeded case lands on an order that does not exist.
-    const shop = getShopDb();
-    for (const conversation of listConversations()) {
-      for (const orderId of conversation.context.orderIds) {
-        assert(shop.orders.has(orderId), `seeded order ${orderId} must exist in the shop data`);
-      }
-      if (conversation.context.customer) {
-        assert(shop.customers.has(conversation.context.customer.id), 'seeded customer must exist in the shop data');
-      }
-      assert(conversation.createdAt < Date.now() - 60_000, 'demo records should be back-dated, not "just now"');
-    }
-
-    // Second call changes nothing, and never on a store that already has data.
-    const second = seedDemoData({ onlyIfEmpty: true });
-    assert(second.skipped && second.created.length === 0, 'a non-empty store must not be re-seeded');
-    const third = seedDemoData();
-    assert(third.created.length === 0 && third.skipped, 'existing demo records must not be replaced');
-    assert(listConversations().length === 3, 'the store must still hold exactly the demo set');
-
-    // A conversation added by a real customer is untouched by seeding.
-    const live = createConversation({ mode: 'CHAT' });
-    const seeded = seedDemoData();
-    assert(seeded.created.length === 0, 'seeding must not add records that already exist');
-    assert(Boolean(getConversation(live.id)), 'live conversations must survive seeding');
-
-    // The race: a cold instance that seeded without ever seeing the first one's write
-    // must merge to the same document, not a doubled one. Needs the durable mirror.
-    if (await postgresAvailable()) {
-      const { prisma } = await import('../lib/db');
-      const key = `contract-seed-${process.pid}-${Date.now()}`;
-      const readDoc = async () => {
-        const row = await prisma.storeState.findUnique({ where: { id: key } });
-        assert(Boolean(row), 'the mirror row should exist after a flush');
-        return row?.snapshot as {
-          conversations: unknown[];
-          messages: Record<string, unknown[]>;
-          events: unknown[];
-        };
-      };
-      process.env.NEXAVOICE_STORE = 'postgres';
-      process.env.NEXAVOICE_STATE_KEY = key;
-      resetPersistenceClient();
-      await flushStore();
-      const first = await readDoc();
-      const firstMessages = Object.values(first.messages).flat().length;
-      resetSupportDb();
-      assert(listConversations().length === 0, 'the simulated instance starts empty');
-      seedDemoData();
-      await flushStore();
-      const merged = await readDoc();
-      assert(
-        merged.conversations.length === first.conversations.length,
-        `conversations must not double after a racing seed (${first.conversations.length} → ${merged.conversations.length})`,
-      );
-      const mergedMessages = Object.values(merged.messages as Record<string, { id: string }[]>).flat();
-      assert(
-        mergedMessages.length === firstMessages,
-        `transcript must not double after a racing seed (${firstMessages} → ${mergedMessages.length})`,
-      );
-      assert(
-        new Set(mergedMessages.map((m) => m.id)).size === mergedMessages.length,
-        'seeded message ids must be stable so the merge dedupes them',
-      );
-      assert(
-        merged.events.length === first.events.length,
-        `activity feed must not double after a racing seed (${first.events.length} → ${merged.events.length})`,
-      );
-      await deleteStoreDocument(key);
-    }
-    console.log('demo seed fixture: opt-in, idempotent, race-safe');
-  } finally {
-    if (previousStore === undefined) delete process.env.NEXAVOICE_STORE;
-    else process.env.NEXAVOICE_STORE = previousStore;
-    if (previousKey === undefined) delete process.env.NEXAVOICE_STATE_KEY;
-    else process.env.NEXAVOICE_STATE_KEY = previousKey;
-    if (previousSeed === undefined) delete process.env.NEXAVOICE_SEED;
-    else process.env.NEXAVOICE_SEED = previousSeed;
-    resetSeedState();
-    resetSupportDb();
-    resetPersistenceClient();
-  }
-}
-
-/**
- * The demo shop is process-local global state, so a cancellation made on one serverless
- * instance used to be invisible to the next — the customer was told "cancelled" and the
- * following turn (or the human dashboard) still read the order as PLACED. It now rides in
- * the same mirror as conversations, with one rule that needs pinning: a record this
- * instance actually wrote wins a tie, so a freshly seeded copy cannot clobber a real
- * cancellation back to pristine fixture data.
- */
-async function verifyShopWritesAreMirrored() {
-  if (!(await postgresAvailable())) {
-    console.log('shop writes mirror: skipped (no PostgreSQL reachable)');
-    return;
-  }
-  const { resetSupportDb, resetPersistenceClient, hydrateStore, flushStore, appendMessage, createConversation } =
-    await import('../lib/support/store');
-  const { cancelOrder, getOrder } = await import('../lib/shop/service');
-  const { getShopDb, resetShopDb } = await import('../lib/shop/data');
-  const { prisma } = await import('../lib/db');
-
-  const previousStore = process.env.NEXAVOICE_STORE;
-  const previousKey = process.env.NEXAVOICE_STATE_KEY;
-  const key = `contract-shop-${process.pid}-${Date.now()}`;
-  process.env.NEXAVOICE_STORE = 'postgres';
-  process.env.NEXAVOICE_STATE_KEY = key;
-  resetPersistenceClient();
-  resetSupportDb();
-  resetShopDb();
-
-  const doc = async () => {
-    const row = await prisma.storeState.findUnique({ where: { id: key } });
-    assert(Boolean(row), 'the mirror row should exist after a flush');
-    return row?.snapshot as {
-      shop: { orders: { id: string; status: string; cancellationReason?: string }[] };
-    };
-  };
-  const statusOf = async (id: string) =>
-    (await doc()).shop.orders.find((order) => order.id === id)?.status;
-
-  try {
-    // Instance A cancels and flushes.
-    createConversation({ id: 'conv_shop_check', mode: 'CHAT' });
-    assert(cancelOrder('cust_rahul', 'NM-10023', 'faulty item').ok, 'NM-10023 should be cancellable');
-    await flushStore();
-    assert((await statusOf('NM-10023')) === 'CANCELLED', 'a cancellation must reach the shared document');
-
-    // Instance B is cold: freshly seeded, no memory of A.
-    resetSupportDb();
-    resetShopDb();
-    assert(getOrder('NM-10023')?.status === 'PLACED', 'a fresh seed starts un-cancelled');
-    await hydrateStore();
-    assert(getOrder('NM-10023')?.status === 'CANCELLED', 'a cold instance must see the other instance\'s cancellation');
-    assert(getOrder('NM-10021')?.status === 'SHIPPED', 'unrelated orders survive the merge');
-    assert(getShopDb().customers.size >= 3, 'customers should still be present after a merge');
-
-    // B writes its own change: both cancellations must end up in the document, and a
-    // record B merely read must not be reverted to B's pristine seed.
-    assert(cancelOrder('cust_amit', 'NM-10035', 'ordered the wrong size').ok, 'NM-10035 should be cancellable');
-    appendMessage('conv_shop_check', 'ai', 'Noted — that order is cancelled too.');
-    await flushStore();
-    assert((await statusOf('NM-10023')) === 'CANCELLED', 'A\'s write must not be clobbered by B');
-    assert((await statusOf('NM-10035')) === 'CANCELLED', 'B\'s own write must be published');
-
-    // A third cold instance sees both.
-    resetSupportDb();
-    resetShopDb();
-    await hydrateStore();
-    assert(
-      getOrder('NM-10023')?.status === 'CANCELLED' && getOrder('NM-10035')?.status === 'CANCELLED',
-      'every instance should converge on the same shop state',
-    );
-    console.log('shop state: mirrored across instances, local writes win ties');
-  } finally {
-    await deleteStoreDocument(key);
-    resetShopDb();
-    if (previousStore === undefined) delete process.env.NEXAVOICE_STORE;
-    else process.env.NEXAVOICE_STORE = previousStore;
-    if (previousKey === undefined) delete process.env.NEXAVOICE_STATE_KEY;
-    else process.env.NEXAVOICE_STATE_KEY = previousKey;
-    resetSupportDb();
-    resetPersistenceClient();
-  }
-}
-
-
-/**
  * Route-bracketing invariant. The durable mirror only works if a handler reads the shared
  * document before touching state and writes it back before responding, and that is exactly
  * the kind of requirement a new route quietly forgets (the demo shop read routes did —
@@ -1228,9 +1180,11 @@ async function verifyStatefulRoutesAreBracketed() {
     }
   };
   await walk(root);
-  assert(routes.length >= 15, `expected the whole api surface, found ${routes.length} routes`);
+  assert(routes.length >= 14, `expected the whole api surface, found ${routes.length} routes`);
 
-  const stateful = /from '[^']*(lib\/shop|lib\/support)[^']*'/;
+  // Only the support store lives in the mirrored document; the shop routes talk to
+  // PostgreSQL directly and need no bracketing.
+  const stateful = /from '[^']*lib\/support\/(store|tools)[^']*'/;
   let checked = 0;
   for (const file of routes) {
     const source = await fs.readFile(file, 'utf8');
@@ -1247,7 +1201,7 @@ async function verifyStatefulRoutesAreBracketed() {
       `${file} uses withStore() and calls flushStore() directly — the wrapper already flushes, and a manual flush can publish an unmerged document`,
     );
   }
-  assert(checked >= 15, `expected at least 15 stateful routes to be checked, got ${checked}`);
+  assert(checked >= 10, `expected at least 10 stateful routes to be checked, got ${checked}`);
 
   // And a handler must not be able to skip the bracket by exporting the raw function.
   const conversationRoute = await fs.readFile('app/api/conversations/[id]/messages/route.ts', 'utf8');
@@ -1311,8 +1265,8 @@ async function main() {
   await verifyEnableToolsFollowsTools();
   await verifyDurableStoreMirror();
   await verifyStatefulRoutesAreBracketed();
-  await verifyDemoSeedFixture();
-  await verifyShopWritesAreMirrored();
+  await verifyOrderLifecycle();
+  await verifyStaleConversationsAreTerminated();
   await verifyHealthRoute();
 
   console.log('API contract checks passed');

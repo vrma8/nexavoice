@@ -4,6 +4,7 @@ import {
   closeConversation,
   getCase,
   getConversation,
+  heartbeatConversation,
   listMessages,
   updateConversation,
 } from '@/lib/support/store';
@@ -34,9 +35,13 @@ async function handleGet(request: NextRequest, { params }: Params) {
 
 /**
  * PATCH /api/conversations/:id
- * Body: { agentState?, transcript?: [{ role, content, turnId? }], close?: boolean }
- * Voice client mirrors live transcript + agent state here so the dashboard can
- * show the call in real time and escalation summaries have context.
+ * Body: { agentState?, transcript?: [...], heartbeat?: boolean, close?: boolean }
+ *
+ * The customer's page mirrors live transcript + agent state here so the
+ * dashboard can watch the call in real time, and pings `heartbeat: true` every
+ * few seconds. A conversation that stops being pinged is terminated by
+ * `sweepStaleConversations()`, which is what keeps the agent dashboard free of
+ * conversations whose customer has closed the page.
  */
 async function handlePatch(request: NextRequest, { params }: Params) {
   const { id } = await params;
@@ -47,6 +52,7 @@ async function handlePatch(request: NextRequest, { params }: Params) {
   let body: {
     agentState?: string;
     transcript?: Array<{ role: MessageRole; content: string; turnId?: number }>;
+    heartbeat?: boolean;
     close?: boolean;
     humanUid?: string;
   };
@@ -56,6 +62,9 @@ async function handlePatch(request: NextRequest, { params }: Params) {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
+  if (body.heartbeat) {
+    heartbeatConversation(id);
+  }
   if (typeof body.agentState === 'string') {
     updateConversation(id, { agentState: body.agentState });
   }

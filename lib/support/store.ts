@@ -10,7 +10,6 @@
  * exported functions.
  */
 import { randomUUID } from 'crypto';
-import { mergeShopSnapshot, snapshotShopDb } from '../shop/data';
 import {
   message as describeError,
   resolvePersistence,
@@ -137,7 +136,6 @@ function toSnapshot(store: SupportDb): StoreSnapshot {
   snapshot.conversations = [...store.conversations.values()];
   snapshot.messages = Object.fromEntries(store.messages);
   snapshot.cases = [...store.cases.values()];
-  snapshot.shop = snapshotShopDb();
   return pruneSnapshot(snapshot);
 }
 
@@ -147,9 +145,6 @@ function toSnapshot(store: SupportDb): StoreSnapshot {
  * instance happened to hold an older copy of the document.
  */
 function applySnapshot(store: SupportDb, remote: StoreSnapshot): void {
-  // Shop records are process-local globals rather than `store` fields, so they merge
-  // here directly; `toSnapshot` re-reads them on the way out.
-  mergeShopSnapshot(remote.shop);
   const merged = mergeSnapshots(toSnapshot(store), remote);
   store.counters.case = Math.max(store.counters.case, merged.caseCounter);
   store.conversations = new Map(
@@ -185,6 +180,10 @@ export async function hydrateStore(): Promise<void> {
       // Hydrating is not a local change: keep the marker level with reality so a
       // read-only request does not write the document straight back.
       store.syncedRevision = store.revision;
+      // A conversation whose browser went away (possibly on another instance)
+      // is terminated here, after the merge and after the synced marker — the
+      // closes it performs are local changes that must reach the mirror.
+      sweepStaleConversations();
       store.lastError = null;
     } catch (error) {
       store.lastError = describeError(error);
@@ -284,11 +283,13 @@ export function createConversation(input: CreateConversationInput): Conversation
       orderIds: [],
       missingInformation: [],
       confirmedInformation: [],
+      notes: [],
       customerName: input.customerName,
       customer: input.customer,
     },
     toolAudit: [],
     lastActivityAt: now,
+    lastSeenAt: now,
   };
   db().conversations.set(conversation.id, conversation);
   db().messages.set(conversation.id, []);
@@ -338,6 +339,59 @@ export function touchConversation(id: string): void {
     conversation.updatedAt = conversation.lastActivityAt;
     markDirty();
   }
+}
+
+/**
+ * The customer's browser is still on the page.
+ *
+ * The dashboard must only ever show conversations that are *really* running, so
+ * every open chat/call pings this every few seconds. `sweepStaleConversations()`
+ * closes anything that stops pinging (tab closed, network gone, laptop shut) —
+ * that is the only mechanism that decides a conversation is over besides an
+ * explicit close.
+ */
+export function heartbeatConversation(id: string): Conversation | null {
+  const conversation = db().conversations.get(id);
+  if (!conversation) return null;
+  if (conversation.state === 'CLOSED' || conversation.state === 'RESOLVED') return conversation;
+  const now = Date.now();
+  conversation.lastSeenAt = now;
+  conversation.lastActivityAt = now;
+  conversation.updatedAt = now;
+  markDirty();
+  return conversation;
+}
+
+/**
+ * A conversation whose customer stopped sending heartbeats for this long is
+ * treated as gone. Two missed 8s heartbeats plus slack — long enough to survive
+ * a slow network, short enough that the dashboard never shows a ghost chat.
+ */
+export const STALE_AFTER_MS = 30_000;
+
+export interface SweepResult {
+  closed: string[];
+}
+
+/**
+ * Terminates conversations the customer has left (logged out, closed the tab,
+ * lost the network). Runs before every dashboard read and on every store
+ * hydration, so "live" on the agent dashboard means live.
+ *
+ * A conversation a human agent is already handling is closed too — the case
+ * stays in the queue and is flagged `customerLeftAt`, so the agent sees
+ * "customer left" instead of talking to an empty channel.
+ */
+export function sweepStaleConversations(now = Date.now()): SweepResult {
+  const closed: string[] = [];
+  for (const conversation of [...db().conversations.values()]) {
+    if (conversation.state === 'CLOSED' || conversation.state === 'RESOLVED') continue;
+    const lastSeen = conversation.lastSeenAt ?? conversation.lastActivityAt;
+    if (now - lastSeen <= STALE_AFTER_MS) continue;
+    closeConversation(conversation.id, 'customer disconnected (no heartbeat)');
+    closed.push(conversation.id);
+  }
+  return { closed };
 }
 
 export function setConversationState(id: string, state: ConversationState): Conversation | null {
@@ -502,15 +556,12 @@ export function resolveCase(id: string, note?: string): SupportCase | null {
   supportCase.updatedAt = supportCase.resolvedAt;
   supportCase.resolutionNote = note;
   const conversation = store.conversations.get(supportCase.conversationId);
-  let finalConversationSnapshot = conversation;
   if (conversation) {
     conversation.state = 'RESOLVED';
     conversation.endedAt = Date.now();
     conversation.updatedAt = conversation.endedAt;
-    // Snapshot the final state before deleting
-    finalConversationSnapshot = { ...conversation };
-    
-    // Garbage collection: case is resolved, so we can delete the conversation data
+    // Garbage collection: the case keeps everything the agent needs, so the
+    // conversation and its transcript can go.
     deleteConversation(conversation.id);
   }
   emit({ conversationId: supportCase.conversationId, type: 'case.resolved', detail: note });
@@ -556,6 +607,9 @@ export function closeConversation(id: string, detail?: string): Conversation | n
 
 /** Dashboard snapshot: everything the human UI needs in one round trip. */
 export function getDashboardSnapshot() {
+  // Ghost busting first: only conversations whose customer is still connected
+  // may appear as live activity (see sweepStaleConversations).
+  sweepStaleConversations();
   const conversations = listConversations();
   const cases = listCases();
   return {

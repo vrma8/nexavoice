@@ -14,10 +14,12 @@
     "start": "next start",
     "lint": "eslint .",
     "verify:api": "node --env-file-if-exists=.env.local --import tsx scripts/verify-api-contracts.ts",
-    "seed": "node --env-file-if-exists=.env.local --import tsx scripts/seed-demo-store.ts",
+    "seed": "node --env-file-if-exists=.env.local --import tsx scripts/seed-catalog.ts",
     "typecheck": "tsc --noEmit",
     "postinstall": "prisma generate",
+    "dev:db": "node scripts/dev-db.mjs",
     "db:push": "node scripts/db-push.mjs",
+    "db:reset": "node scripts/db-push.mjs --force",
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
     "verify": "pnpm run doctor && pnpm run lint && pnpm run typecheck && pnpm run verify:api && pnpm run build"
@@ -49,6 +51,8 @@
     "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-socket": "^0.2.11",
     "@prisma/driver-adapter-utils": "7.10.0",
     "@prisma/prisma-schema-wasm": "7.10.0-4.0edf323efd1d98336f3f0a68684b56f689b900d3",
     "@prisma/schema-engine-wasm": "7.10.0-4.0edf323efd1d98336f3f0a68684b56f689b900d3",

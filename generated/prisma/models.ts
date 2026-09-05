@@ -10,5 +10,10 @@
  */
 export type * from './models/Client'
 export type * from './models/Agent'
+export type * from './models/Product'
+export type * from './models/CartItem'
+export type * from './models/Order'
+export type * from './models/OrderItem'
+export type * from './models/OrderCounter'
 export type * from './models/StoreState'
 export type * from './commonInputTypes'

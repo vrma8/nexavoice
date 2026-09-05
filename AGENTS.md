@@ -30,9 +30,9 @@ The sections below (Start Here, Patterns, Anti-Patterns, etc.) remain the canoni
 - Toolkit core: `agora-agent-client-toolkit` for `AgoraVoiceAI`, transcript helpers, and turn status
 - UI components: `agora-agent-uikit` for visualizer, transcript, and mic controls
 - Server SDK: `agora-agents` for managed agent session startup, `stopAgent`, and `agents.speak` (handover line)
-- API routes in `app/api`: token, invite/stop agent, REST tool endpoint for the engine, custom-LLM proxy, conversations/messages (chat), escalation, cases (accept/takeover/resolve), dashboard (+SSE), demo shop, health (deployment self-check)
-- Optional demo fixture in `lib/support/seed.ts` (`NEXAVOICE_SEED=demo`), applied through `withStore()`; `pnpm run seed` (`scripts/seed-demo-store.ts`) is the terminal path
-- Support domain in `lib/support` (conversation/case store, guarded `executeTool`, handoff summary) and demo shop in `lib/shop` (data + business rules). The store is an in-memory cache on `globalThis`, mirrored to a durable backend (Vercel Blob, or a file for a single container) so state survives across serverless instances — `lib/support/persist.ts` + `snapshot.ts` own that layer.
+- API routes in `app/api`: token, invite/stop agent, REST tool endpoint for the engine, custom-LLM proxy, conversations/messages (chat) + heartbeat/close, escalation, cases (accept/takeover/resolve), dashboard (+SSE), shop (catalogue/cart/orders), auth, health (deployment self-check)
+- **PostgreSQL via Prisma is required** (`DATABASE_URL`, `prisma/schema.prisma`): `Client`, `Product`, `CartItem`, `Order`/`OrderItem` and the mirrored `StoreState` row. `pnpm dev:db` runs a zero-install PostgreSQL (PGlite over TCP) for local work, `pnpm db:push` creates the tables, `pnpm seed` (`scripts/seed-catalog.ts`) upserts the fixed 50-product catalogue from `lib/shop/catalog-data.ts`.
+- Shop domain in `lib/shop` (`catalog-data.ts` the fixed catalogue, `service.ts` all Prisma reads/writes + the order status machine, `http.ts` the `x-nexavoice-client-id` identity helper). Support domain in `lib/support` (conversation/case store, guarded `executeTool`, handoff summary). The support store is an in-memory cache on `globalThis` mirrored into one JSONB row so state survives across serverless instances — `lib/support/persist.ts` + `snapshot.ts` own that layer.
 - Default agent config (`lib/agent-config.ts`): Agora-managed Deepgram STT (`multi`), OpenAI `gpt-4o-mini`, MiniMax TTS; NexaMart system prompt in `lib/agent-prompt.ts`; inline REST tools from `lib/agent-tools.ts`. `/api/health` reports the deployment self-check. `.env.local` needs only Agora credentials — `AGENT_TOOLS_BASE_URL`/`AGENT_TOOLS_SECRET` are optional now (tool origin comes from the request URL, the secret is derived from the App Certificate).
 - Chat: `lib/chat-agent.ts` — LLM (`ai` + `@ai-sdk/openai`) when `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` are set, otherwise a rule-based EN/HI/Hinglish agent over the same tools.
 - Human dashboard: `components/SupportDashboard.tsx` (SSE + 3s poll of `/api/dashboard`), `components/CaseWorkspace.tsx` (+ `HumanVoiceBridge.tsx` joins the customer's RTC channel as uid `654321`, then `POST /api/cases/:id/takeover` makes the AI hand over and leave).
@@ -51,13 +51,13 @@ The sections below (Start Here, Patterns, Anti-Patterns, etc.) remain the canoni
 - Set `NEXT_PUBLIC_AGORA_APP_ID` and `NEXT_AGORA_APP_CERTIFICATE` in the deployment target; keep `NEXT_AGORA_APP_CERTIFICATE` server-side only.
 - `NEXT_PUBLIC_AGORA_APP_ID` must be type **Config** and targeted at **Production + Preview**, and the project must be **redeployed** after adding it: a `NEXT_PUBLIC_*` value is inlined at build time, so a variable created afterwards (or targeted only at Development, which is local `vercel env pull`) never reaches the existing bundle. Vercel documents this directly — env changes do not apply to previous deployments.
 - The app no longer *fails* on that: `resolveAppId()` prefers the `appId` served by `/api/generate-agora-token`, which the server reads at runtime. Keep both so the fallback and the signed token can never disagree.
-- Create a **Vercel Blob store** (Project → Storage → Create Database → Blob) so `BLOB_READ_WRITE_TOKEN` exists and conversation/case state is shared between function instances. Without it, the second chat request lands on an instance that never saw the conversation and answers "Conversation not found".
+- Create a **PostgreSQL database** (Project → Storage → Create Database → Postgres) so `DATABASE_URL` exists: the shop needs it outright, and conversation/case state is shared between function instances through it. Without it the second chat request lands on an instance that never saw the conversation and answers "Conversation not found". Run `pnpm db:push && pnpm seed` against that URL once.
 - Voice tools need the Agora engine to reach `/api/agent-tools/*`; the deployment origin is used automatically and `AGENT_TOOLS_BASE_URL` / `AGENT_TOOLS_SECRET` only override it. A custom `asr.llmTools` object in the `POST /api/invite-agent` body must carry the same `toolsUrl`/`toolsSecret`, because those values are generated server-side.
 - Each Vercel function needs a `maxDuration` (exported per route) that fits the plan: without Fluid compute the default is 10s, which cuts `invite-agent` and a streamed LLM turn off mid-flight.
-- Check a deployment with `curl https://<deployment>/api/health` — credential state, tool wiring, LLM provider, store backend and what `NEXAVOICE_SEED` did, without leaking secrets. By default it also runs one read-only live round trip to the Conversational AI control plane (`agora.convoai`, skip with `?deep=0`): `ok: true` proves credentials + feature + gateway area + quota in a single shot. `agora.credentialSources` names the env vars that actually provided the credentials and lists inert Agora CLI variables (`AGORA_PROJECT_ID`, `AGORA_FEATURE_*`, `AGORA_ENABLED_FEATURES`) that are set but never read.
+- Check a deployment with `curl https://<deployment>/api/health` — credential state, tool wiring, LLM provider, store backend and database reachability, without leaking secrets. By default it also runs one read-only live round trip to the Conversational AI control plane (`agora.convoai`, skip with `?deep=0`): `ok: true` proves credentials + feature + gateway area + quota in a single shot. `agora.credentialSources` names the env vars that actually provided the credentials and lists inert Agora CLI variables (`AGORA_PROJECT_ID`, `AGORA_FEATURE_*`, `AGORA_ENABLED_FEATURES`) that are set but never read.
 - Credential env names: canonical `NEXT_PUBLIC_AGORA_APP_ID` / `NEXT_AGORA_APP_CERTIFICATE`, with `AGORA_APP_ID` / `AGORA_APP_CERTIFICATE` accepted as aliases (server-side; the browser still gets the App ID from the token route). Read them only through `getAgoraCredentials()` / `getAgoraCredentialsOrNull()` in `lib/agora-server.ts`, never `process.env` directly, so the aliases keep working everywhere.
 - Set `AGORA_AREA` to the project's service area: `US` (default) | `EU` | `AP` | `CN`. Agora has no separate India gateway — Asia-Pacific, including India, is `AP`. An unrecognised value warns once and falls back to `US` (`lib/agora-server.ts`), because a wrong region otherwise surfaces as an agent that never starts. When `AGORA_AREA` is unset, `AGORA_REGION` (the Agora CLI's name, e.g. `global` from `.agora/project.json`) is honoured: `US`/`EU`/`AP`/`CN` map directly and `global` routes through the US gateway.
-- `NEXAVOICE_SEED=demo` is the opt-in demo fixture; see the Demo Data pattern above before changing it.
+- `ORDER_PLACED_SECONDS` / `ORDER_TRANSIT_SECONDS` tune how fast an order walks `placed → on the way → delivered`; the *placed* window is also the edit window.
 
 ## Routing / Ownership
 
@@ -65,7 +65,8 @@ The sections below (Start Here, Patterns, Anti-Patterns, etc.) remain the canoni
 - Browser-facing API routes live in `app/api`.
 - Shared constants and transcript normalization live in `lib`.
 - Conversation/case **state is owned by the backend store** (`lib/support/store.ts`); the browser only mirrors voice transcript/agent state via `PATCH /api/conversations/:id` and polls for escalation/takeover.
-- Every backend mutation by the AI goes through `executeTool` in `lib/support/tools.ts` (verification gate, `confirmed: true` for writes, `HANDED_OFF` after escalation, audit trail). Never let the LLM touch `lib/shop/service.ts` directly.
+- Every backend mutation by the AI goes through `executeTool` in `lib/support/tools.ts` (only the conversation's signed-in client, `confirmed: true` for writes, `HANDED_OFF` once a human owns the conversation, audit trail). Never let the LLM touch `lib/shop/service.ts` directly.
+- The customer's own buttons and the agent's tools must share one implementation: both go through `lib/shop/service.ts`, which is the only place that decides an order is still editable (`status === 'PLACED'`). Never re-implement that rule in a route or a component.
 - If a workflow, request contract, or ownership boundary changes, update `README.md`, `AGENTS.md`, and the relevant `docs/ai/` files in the same change.
 
 ## Key Files
@@ -152,30 +153,37 @@ Anything new in the store must round-trip through `toSnapshot()`/`applySnapshot(
 `lib/support/snapshot.ts` — that list is the contract; unlisted fields work locally
 and vanish on Vercel.
 
-**Read-only routes count too.** `/api/shop/*` only reads, but it reads process-local
-globals, so an unbracketed GET answers from a stale copy on a warm instance (this was a
-real bug: a cancellation made on one instance did not show on another). The bracketing
-check in `scripts/verify-api-contracts.ts` walks `app/api/**/route.ts` and fails any
-route that imports `lib/shop` or `lib/support` without `withStore()` or an explicit
-`hydrateStore()`; keep that list honest when adding routes.
+The bracketing check in `scripts/verify-api-contracts.ts` walks `app/api/**/route.ts`
+and fails any route that imports `lib/support/{store,tools}` without `withStore()` or an
+explicit `hydrateStore()`; keep that list honest when adding routes. `app/api/shop/*` is
+deliberately *not* bracketed: it holds no process-local state — every read and write goes
+straight to PostgreSQL through Prisma, which is already shared between instances.
 
-The demo shop is part of the mirror (`snapshot.shop`), with one rule that is easy to get
-wrong: `lib/shop/data.ts` tracks the records this process mutated (`markShopTouched`),
-and only those win a merge tie — a freshly seeded copy must never overwrite another
-instance's cancellation. Any new shop mutation has to call `markShopTouched`.
+### Conversation Liveness
 
-### Demo Data (`NEXAVOICE_SEED=demo`)
+The dashboard must show real, ongoing conversations only. Two halves make that true and
+both have to stay wired:
 
-`lib/support/seed.ts` writes a three-record fixture (active chat, escalated HIGH case,
-resolved voice call) into the active durable backend so a fresh deployment has a
-populated dashboard. It runs from `withStore()` — after hydration, so it sees what other
-instances already wrote — once per process, only when the store has **no** conversations,
-and never replacing a record that exists. Seeded conversations, messages and events carry
-**fixed ids** because two cold instances can seed simultaneously and `mergeSnapshots`
-dedupes by id; anything added to the fixture must keep that property or the transcript
-doubles. `pnpm run seed` is the explicit terminal path (it reads `.env.local` for
-`BLOB_READ_WRITE_TOKEN`). Failures are recorded for `/api/health` and never thrown: demo
-data must not be able to break a real conversation.
+- the browser beats `PATCH /api/conversations/:id { heartbeat: true }` every 8s while a
+  chat or call is open, and posts `/api/conversations/:id/close` (via `navigator.sendBeacon`,
+  which is why that route accepts an empty body and is idempotent) on unmount, sign-out
+  and `pagehide`;
+- the server sweeps: `sweepStaleConversations()` closes anything whose
+  `lastSeenAt ?? lastActivityAt` is older than `STALE_AFTER_MS` (30s), and it runs from
+  `getDashboardSnapshot()` and `hydrateStore()` — never from a timer, because a serverless
+  instance is frozen between requests.
+
+A new customer-facing surface that opens a conversation must send the heartbeat and the
+close beacon, or it will haunt the dashboard for 30 seconds after the customer leaves.
+
+### Order Lifecycle (`lib/shop/service.ts`)
+
+`PLACED → ON_THE_WAY → DELIVERED` (plus `CANCELLED`) is computed lazily from
+`placedAt` by `syncOrderStatuses()` on every read — no cron, no timers, identical on
+serverless. Items, quantities and the address may only change while the order is
+`PLACED` (`ORDER_LOCKED` otherwise), an order can never be emptied (`LAST_ITEM` —
+cancel instead), and every transition or edit appends to `Order.history`, which is what
+the customer's timeline and the agent's handoff show.
 
 ### Client App ID (`resolveAppId`)
 
@@ -208,7 +216,7 @@ says what failed instead of hanging on "Connecting…".
 - Do not require third-party vendor API keys unless the code actually introduces a BYOK provider path.
 - Keep README, AGENTS, and `docs/ai/` aligned with implementation changes.
 - Never invent Agora REST endpoints or fields: use the `agora-agents` SDK or the documented `/v2/projects/{appid}/{join|agents/:id/leave|speak|update}` routes only.
-- Writes to demo data require explicit customer confirmation (`confirmed: true` in the tool call); keep that check in `lib/support/tools.ts`, not in the prompt only.
+- Writes to a customer's order require explicit confirmation (`confirmed: true` in the tool call); keep that check in `lib/support/tools.ts`, not in the prompt only.
 - Never expose `NEXT_AGORA_APP_CERTIFICATE` or `AGENT_TOOLS_SECRET` to the browser; the tool secret only travels engine → server via template variables.
 
 ## Commands
@@ -218,9 +226,15 @@ From the repo root:
 ```bash
 pnpm install
 pnpm run doctor
+pnpm dev:db      # optional: PostgreSQL with nothing to install (127.0.0.1:5433)
+pnpm db:push     # tables; pnpm db:reset drops and recreates them
+pnpm seed        # the 50-product catalogue
 pnpm run dev
 pnpm run verify
 ```
+
+`pnpm run verify:api` skips its database-backed checks when `DATABASE_URL` is unreachable,
+so run `pnpm dev:db` first if you want the shop, tool and escalation contracts covered.
 
 Useful narrower checks:
 
@@ -238,7 +252,7 @@ pnpm run build
   - `pnpm run typecheck`
   - `pnpm run verify:api` (also covers tool guardrails, the REST tool endpoint, agent `toProperties()` wire shape, and the chat → escalation → accept flow)
   - `pnpm run build`
-- The full chat/dashboard flow can be exercised locally without Agora (`pnpm run dev`, then `/client/chat` and `/support-agent`). Live voice + tool calls + human takeover need real Agora credentials and a public `AGENT_TOOLS_BASE_URL`.
+- The full shopping + chat/dashboard flow can be exercised locally without Agora (`pnpm dev:db`, `pnpm db:push`, `pnpm seed`, `pnpm run dev`, then `/client` and `/support-agent`). Live voice + tool calls + human takeover need real Agora credentials and a public `AGENT_TOOLS_BASE_URL`.
 - Requires local env setup but not a live Agora session:
   - `pnpm run doctor`
   - `pnpm run verify`

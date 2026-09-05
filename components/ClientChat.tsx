@@ -5,8 +5,10 @@ import { Button } from "@/components/ui/button";
 import { Send, UserIcon, Loader2, Bot, Headset } from "lucide-react";
 import {
   createConversation,
+  endConversation,
   getConversation,
   requestEscalation,
+  sendHeartbeat,
   sendMessage,
 } from "@/lib/api";
 import type { Conversation, ConversationMessage, SupportCase } from "@/lib/support/types";
@@ -23,7 +25,19 @@ const GREETING: Message = { id: "greeting", role: "ai", content: CHAT_GREETING }
 
 const POLL_MS = 2500;
 
-export default function ClientChat() {
+/**
+ * Chat with the AI agent (and, after a handoff, with a human agent).
+ *
+ * The conversation is bound to the signed-in client record, so the agent knows
+ * who it is talking to without asking, and it is *terminated* when this
+ * component unmounts or the tab goes away — that is what keeps the support
+ * dashboard showing live chats only.
+ */
+export default function ClientChat({
+  onOrdersMayHaveChanged,
+}: {
+  onOrdersMayHaveChanged?: () => void;
+} = {}) {
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [supportCase, setSupportCase] = useState<SupportCase | null>(null);
   const [messages, setMessages] = useState<Message[]>([GREETING]);
@@ -34,13 +48,13 @@ export default function ClientChat() {
   const seenIds = useRef<Set<string>>(new Set());
   const lastSyncRef = useRef(0);
 
-  // Create the backend conversation once, attaching the signed-in client's details.
+  // Create the backend conversation once, bound to the signed-in client record.
   useEffect(() => {
     let cancelled = false;
     const session = getClientSession();
     createConversation("CHAT", {
+      clientId: session?.id,
       customerName: session?.name,
-      customerPhone: session?.phone,
     })
       .then((c) => {
         if (!cancelled) setConversation(c);
@@ -57,6 +71,22 @@ export default function ClientChat() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
+
+  // Heartbeat while the chat is open; close it when the panel unmounts (customer
+  // closed the chat / signed out) or the browser tab goes away.
+  const conversationId = conversation?.id;
+  useEffect(() => {
+    if (!conversationId) return;
+    void sendHeartbeat(conversationId);
+    const beat = setInterval(() => void sendHeartbeat(conversationId), 8000);
+    const leave = () => endConversation(conversationId, true);
+    window.addEventListener("pagehide", leave);
+    return () => {
+      clearInterval(beat);
+      window.removeEventListener("pagehide", leave);
+      endConversation(conversationId);
+    };
+  }, [conversationId]);
 
   const mergeMessages = useCallback((incoming: ConversationMessage[]) => {
     const fresh = incoming.filter((m) => !seenIds.current.has(m.id));
@@ -106,6 +136,8 @@ export default function ClientChat() {
       }
       setConversation(result.conversation);
       setSupportCase(result.case);
+      // A turn may have added/removed an item or cancelled an order.
+      onOrdersMayHaveChanged?.();
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       console.error("Error sending message", detail);
@@ -294,7 +326,7 @@ export default function ClientChat() {
           </Button>
         </div>
         <p className="mt-2 text-center text-[11px] text-zinc-600">
-          Demo account: mobile 9876543210 (Rahul) · 9123456780 (Priya) · 9988776655 (Amit)
+          Nexa can add or remove products on an order that is still “Placed”.
         </p>
       </div>
     </div>

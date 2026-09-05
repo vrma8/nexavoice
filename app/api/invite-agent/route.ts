@@ -12,7 +12,8 @@ import {
   updateConversation,
 } from '@/lib/support/store';
 import { withStore } from '@/lib/support/route-store';
-import * as shop from '@/lib/shop/service';
+import { prisma, hasDatabaseUrl } from '@/lib/db';
+import type { CustomerSnapshot } from '@/lib/support/types';
 
 // agentUid identifies the AI in the RTC channel and shares its default with the client.
 const agentUid = String(DEFAULT_AGENT_UID);
@@ -50,14 +51,13 @@ async function handlePost(request: NextRequest) {
     const existing = findConversationByChannel(channel_name);
     let conversation = existing;
     if (!conversation) {
-      const customerPhone = body.customer_phone?.trim();
-      const shopCustomer = customerPhone ? shop.findCustomerByPhone(customerPhone) : null;
+      const customer = await loadClient(body.client_id?.trim());
       conversation = createConversation({
         mode: 'VOICE',
         channel: channel_name,
         customerUid: requester_id,
-        customerName: shopCustomer ? shopCustomer.name : body.customer_name?.trim() || undefined,
-        customer: shopCustomer ? shop.toCustomerSnapshot(shopCustomer) : undefined,
+        customerName: customer?.name ?? body.customer_name?.trim() ?? undefined,
+        customer,
       });
     } else if (!conversation.context.customerName && body.customer_name?.trim()) {
       // A re-invite after an agent crash: keep the signed-in client's name if it was missing.
@@ -118,6 +118,28 @@ async function handlePost(request: NextRequest) {
       { error: detail.message, hint: detail.hint, status_code: detail.statusCode },
       { status: 502 },
     );
+  }
+}
+
+/** The voice call is bound to the signed-in client record, exactly like chat. */
+async function loadClient(clientId?: string): Promise<CustomerSnapshot | undefined> {
+  if (!clientId || !hasDatabaseUrl()) return undefined;
+  try {
+    const row = await prisma.client.findUnique({ where: { id: clientId } });
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      name: row.name,
+      phone: row.phone,
+      email: row.email,
+      tier: row.tier,
+      city: row.city,
+      address: row.address,
+      preferredLanguage: row.preferredLanguage,
+    };
+  } catch (error) {
+    console.warn('[invite-agent] could not load client:', error);
+    return undefined;
   }
 }
 

@@ -64,7 +64,7 @@ Do not recreate Agora ConvoAI integration from memory. Provider schemas, SDK bui
 - `POST /api/invite-agent` accepts `{ requester_id, channel_name }` and returns the agent id/state payload.
 - `POST /api/stop-conversation` accepts `{ agent_id }` and treats already-stopping sessions as success.
 - Required env vars are `NEXT_PUBLIC_AGORA_APP_ID` and `NEXT_AGORA_APP_CERTIFICATE`.
-- `components/VoiceAgentCall.tsx` owns pre-call bootstrap and RTM client lifecycle; `/client/voice` is the voice entry point (`components/LandingPage.tsx` from the upstream quickstart was removed as a dead duplicate bootstrap).
+- `components/VoiceAgentCall.tsx` owns pre-call bootstrap and RTM client lifecycle; the agent dock on `/client` is the voice entry point (`components/LandingPage.tsx` from the upstream quickstart was removed as a dead duplicate bootstrap).
 - `components/ConversationComponent.tsx` owns joined-session RTC/toolkit lifecycle.
 - `lib/conversation.ts` owns transcript normalization helpers.
 

@@ -24,9 +24,9 @@ async function json<T>(response: Response): Promise<T> {
 // ---------------------------------------------------------------------------
 
 export interface CreateConversationOptions {
-  /** Signed-in client details (from /login) attached to the conversation. */
+  /** Signed-in client record id (PostgreSQL) the conversation is bound to. */
+  clientId?: string;
   customerName?: string;
-  customerPhone?: string;
 }
 
 export async function createConversation(
@@ -81,6 +81,35 @@ export interface TranscriptMirrorItem {
 }
 
 /** Voice client mirrors transcript + agent state so the dashboard sees the live call. */
+/**
+ * "The customer is still here."
+ *
+ * Called every few seconds by an open chat panel or voice call. The backend
+ * closes any conversation that stops sending these, which is what guarantees the
+ * agent dashboard only lists conversations that are genuinely running.
+ */
+export async function sendHeartbeat(conversationId: string): Promise<void> {
+  await fetch(`/api/conversations/${conversationId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ heartbeat: true }),
+  }).catch(() => {});
+}
+
+/**
+ * Ends the conversation for good (panel closed, signed out, tab closing).
+ * Uses `sendBeacon` when the page is going away, because a normal fetch is
+ * cancelled while the tab unloads.
+ */
+export function endConversation(conversationId: string, beacon = false): void {
+  const url = `/api/conversations/${conversationId}/close`;
+  if (beacon && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+    navigator.sendBeacon(url, new Blob([JSON.stringify({})], { type: 'application/json' }));
+    return;
+  }
+  void fetch(url, { method: 'POST', keepalive: true }).catch(() => {});
+}
+
 export async function mirrorVoiceState(
   conversationId: string,
   patch: { agentState?: string; transcript?: TranscriptMirrorItem[]; close?: boolean },
@@ -177,27 +206,88 @@ export async function resolveCase(
 }
 
 // ---------------------------------------------------------------------------
-// Demo shop (read-only helpers for the dashboard)
+// Shopping (catalogue, cart, orders) — all scoped to the signed-in client
 // ---------------------------------------------------------------------------
 
-export interface DemoCustomer {
-  id: string;
-  name: string;
-  phone: string;
-  email: string;
-  tier: string;
-  city: string;
-  preferredLanguage: string;
-  orders: Array<{
-    order_id: string;
-    status: string;
-    items: string[];
-    total_inr: number;
-    expected_delivery: string;
-  }>;
+import type { CartView, OrderView, ProductView } from '@/lib/shop/service';
+
+export type { CartView, OrderView, ProductView };
+
+const CLIENT_ID_HEADER = 'x-nexavoice-client-id';
+
+function shopHeaders(clientId: string, body = false): HeadersInit {
+  return body
+    ? { 'Content-Type': 'application/json', [CLIENT_ID_HEADER]: clientId }
+    : { [CLIENT_ID_HEADER]: clientId };
 }
 
-export async function getDemoCustomers(): Promise<DemoCustomer[]> {
-  const res = await fetch('/api/shop/customers', { cache: 'no-store' });
-  return (await json<{ customers: DemoCustomer[] }>(res)).customers;
+export async function getProducts(): Promise<ProductView[]> {
+  const res = await fetch('/api/shop/products', { cache: 'no-store' });
+  return (await json<{ products: ProductView[] }>(res)).products;
+}
+
+export async function getCart(clientId: string): Promise<CartView> {
+  const res = await fetch('/api/shop/cart', { headers: shopHeaders(clientId), cache: 'no-store' });
+  return (await json<{ cart: CartView }>(res)).cart;
+}
+
+export async function addToCart(clientId: string, productId: string, qty = 1): Promise<CartView> {
+  const res = await fetch('/api/shop/cart', {
+    method: 'POST',
+    headers: shopHeaders(clientId, true),
+    body: JSON.stringify({ productId, qty }),
+  });
+  return (await json<{ cart: CartView }>(res)).cart;
+}
+
+export async function setCartQty(clientId: string, productId: string, qty: number): Promise<CartView> {
+  const res = await fetch('/api/shop/cart', {
+    method: 'PATCH',
+    headers: shopHeaders(clientId, true),
+    body: JSON.stringify({ productId, qty }),
+  });
+  return (await json<{ cart: CartView }>(res)).cart;
+}
+
+export async function clearCart(clientId: string): Promise<CartView> {
+  const res = await fetch('/api/shop/cart', { method: 'DELETE', headers: shopHeaders(clientId) });
+  return (await json<{ cart: CartView }>(res)).cart;
+}
+
+export async function getOrders(clientId: string): Promise<OrderView[]> {
+  const res = await fetch('/api/shop/orders', { headers: shopHeaders(clientId), cache: 'no-store' });
+  return (await json<{ orders: OrderView[] }>(res)).orders;
+}
+
+export async function placeOrder(
+  clientId: string,
+  input: { shippingAddress: string; paymentMethod: string },
+): Promise<{ order: OrderView; orders: OrderView[]; cart: CartView }> {
+  const res = await fetch('/api/shop/orders', {
+    method: 'POST',
+    headers: shopHeaders(clientId, true),
+    body: JSON.stringify(input),
+  });
+  return json(res);
+}
+
+export type OrderEdit =
+  | { action: 'add_item'; product: string; qty?: number }
+  | { action: 'remove_item'; product: string; qty?: number }
+  | { action: 'set_qty'; productId: string; qty: number }
+  | { action: 'cancel'; reason?: string }
+  | { action: 'address'; address: string };
+
+/** Customer-driven order changes — the same rules the AI agent's tools obey. */
+export async function editOrder(
+  clientId: string,
+  code: string,
+  edit: OrderEdit,
+): Promise<{ order: OrderView; orders: OrderView[] }> {
+  const res = await fetch(`/api/shop/orders/${encodeURIComponent(code)}`, {
+    method: 'PATCH',
+    headers: shopHeaders(clientId, true),
+    body: JSON.stringify(edit),
+  });
+  return json(res);
 }

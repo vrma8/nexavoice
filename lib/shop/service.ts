@@ -1,22 +1,22 @@
 /**
- * Demo shop service layer ("NexaMart").
+ * NexaMart shop service — PostgreSQL (Prisma) backed.
  *
- * Every read/write the AI agent, the chat path or the human dashboard performs
- * goes through these functions. They encode the business rules that make the
- * agent's write access *controlled*:
+ * Everything the shopping page, the API routes and the AI agent tools do with
+ * products, carts and orders goes through this module. It is the only place
+ * that talks to the `Product` / `CartItem` / `Order` / `OrderItem` tables, so the
+ * business rules below hold for a human clicking in the UI *and* for the AI
+ * agent calling a tool:
  *
- *  - order access is always scoped to a verified customer
- *  - only specific state transitions are allowed (e.g. cancel before shipping)
- *  - results are plain data, never raw storage handles
+ *   • a client can only buy the 50 catalogue products (`ensureCatalog`);
+ *   • orders are always scoped to the signed-in client id — no cross-client reads;
+ *   • an order's items may only change while it is still `PLACED`;
+ *   • status moves PLACED → ON_THE_WAY → DELIVERED on a timer (`syncOrderStatuses`),
+ *     which is applied lazily on every read, so the UI and the agent always agree.
  */
-import {
-  getShopDb,
-  markShopTouched,
-  type Customer,
-  type Order,
-  type OrderStatus,
-  type Ticket
-} from './data';
+import { prisma } from '@/lib/db';
+import { CATALOG } from './catalog-data';
+
+export type OrderStatus = 'PLACED' | 'ON_THE_WAY' | 'DELIVERED' | 'CANCELLED';
 
 export type ServiceResult<T> =
   | { ok: true; data: T }
@@ -26,241 +26,681 @@ function fail<T = never>(code: string, message: string): ServiceResult<T> {
   return { ok: false, error: { code, message } };
 }
 
-/** Normalises Indian phone numbers to 10 digits (drops +91 / 0 prefix, spaces, dashes). */
-export function normalizePhone(input: string): string | null {
-  const digits = String(input ?? '').replace(/\D/g, '');
-  if (digits.length === 10) return digits;
-  if (digits.length === 12 && digits.startsWith('91')) return digits.slice(2);
-  if (digits.length === 11 && digits.startsWith('0')) return digits.slice(1);
-  return null;
+// ---------------------------------------------------------------------------
+// Timing of the automatic status changes (short on purpose — this is a demo).
+// ---------------------------------------------------------------------------
+
+function seconds(name: string, fallback: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? raw * 1000 : fallback * 1000;
 }
 
-export function maskPhone(phone: string): string {
-  return phone.length >= 4 ? `******${phone.slice(-4)}` : '****';
+/** How long an order stays editable / cancellable in PLACED. */
+export function placedWindowMs(): number {
+  return seconds('ORDER_PLACED_SECONDS', 120);
 }
 
-export function normalizeOrderId(input: string): string {
+/** How long the order then stays ON_THE_WAY before it is DELIVERED. */
+export function transitWindowMs(): number {
+  return seconds('ORDER_TRANSIT_SECONDS', 180);
+}
+
+// ---------------------------------------------------------------------------
+// Views (plain JSON, safe to send to the browser and to the LLM)
+// ---------------------------------------------------------------------------
+
+export interface ProductView {
+  id: string;
+  sku: string;
+  title: string;
+  category: string;
+  description: string;
+  priceInr: number;
+  emoji: string;
+  rating: number;
+}
+
+export interface CartLineView {
+  productId: string;
+  sku: string;
+  title: string;
+  emoji: string;
+  qty: number;
+  priceInr: number;
+  lineTotalInr: number;
+}
+
+export interface CartView {
+  lines: CartLineView[];
+  itemCount: number;
+  totalInr: number;
+}
+
+export interface OrderItemView {
+  productId: string;
+  sku: string;
+  title: string;
+  qty: number;
+  priceInr: number;
+  lineTotalInr: number;
+}
+
+export interface OrderView {
+  id: string;
+  code: string;
+  status: OrderStatus;
+  statusText: string;
+  items: OrderItemView[];
+  totalInr: number;
+  placedAt: number;
+  statusUpdatedAt: number;
+  expectedDelivery: number;
+  deliveredAt?: number;
+  shippingAddress: string;
+  paymentMethod: string;
+  cancellationReason?: string;
+  /** Items can be added/removed and the order cancelled only while PLACED. */
+  editable: boolean;
+  /** ms until the next automatic status change (0 when final). */
+  nextChangeInMs: number;
+  history: Array<{ at: number; event: string }>;
+}
+
+export function statusText(status: OrderStatus): string {
+  switch (status) {
+    case 'PLACED':
+      return 'Order placed — being prepared';
+    case 'ON_THE_WAY':
+      return 'On the way';
+    case 'DELIVERED':
+      return 'Delivered';
+    case 'CANCELLED':
+      return 'Cancelled';
+  }
+}
+
+export function formatInr(value: number): string {
+  return `₹${value.toLocaleString('en-IN')}`;
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue
+// ---------------------------------------------------------------------------
+
+let catalogEnsured = false;
+
+/**
+ * Writes the 50 fixed products once. Idempotent (upsert by sku) so two cold
+ * serverless instances cannot double the catalogue, and safe to call on every
+ * request — after the first success it is a no-op for the process.
+ */
+export async function ensureCatalog(): Promise<void> {
+  if (catalogEnsured) return;
+  const count = await prisma.product.count();
+  if (count >= CATALOG.length) {
+    catalogEnsured = true;
+    return;
+  }
+  for (const product of CATALOG) {
+    await prisma.product.upsert({
+      where: { sku: product.sku },
+      create: { ...product },
+      update: { ...product },
+    });
+  }
+  catalogEnsured = true;
+}
+
+export async function listProducts(): Promise<ProductView[]> {
+  await ensureCatalog();
+  const rows = await prisma.product.findMany({
+    where: { active: true },
+    orderBy: [{ category: 'asc' }, { priceInr: 'asc' }],
+  });
+  return rows.map(toProductView);
+}
+
+function toProductView(row: {
+  id: string;
+  sku: string;
+  title: string;
+  category: string;
+  description: string;
+  priceInr: number;
+  emoji: string;
+  rating: number;
+}): ProductView {
+  return {
+    id: row.id,
+    sku: row.sku,
+    title: row.title,
+    category: row.category,
+    description: row.description,
+    priceInr: row.priceInr,
+    emoji: row.emoji,
+    rating: row.rating,
+  };
+}
+
+/**
+ * Finds one catalogue product from whatever the customer said: a SKU, an exact
+ * title, or a few words of it ("bluetooth headphones", "kettle").
+ */
+export async function findProduct(reference: string): Promise<ProductView | null> {
+  await ensureCatalog();
+  const needle = String(reference ?? '').trim();
+  if (!needle) return null;
+
+  const bySku = await prisma.product.findFirst({
+    where: { sku: { equals: needle.toUpperCase() } },
+  });
+  if (bySku) return toProductView(bySku);
+
+  const exact = await prisma.product.findFirst({
+    where: { title: { equals: needle, mode: 'insensitive' } },
+  });
+  if (exact) return toProductView(exact);
+
+  const matches = await searchProducts(needle, 5);
+  return matches[0] ?? null;
+}
+
+/** Keyword search over the catalogue (used by the UI filter and the AI tool). */
+export async function searchProducts(
+  query: string,
+  limit = 8,
+  opts: { maxPriceInr?: number; category?: string } = {},
+): Promise<ProductView[]> {
+  await ensureCatalog();
+  const words = String(query ?? '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .filter((w) => w.length > 2);
+
+  const rows = await prisma.product.findMany({
+    where: {
+      active: true,
+      ...(opts.maxPriceInr ? { priceInr: { lte: opts.maxPriceInr } } : {}),
+      ...(opts.category ? { category: { equals: opts.category, mode: 'insensitive' } } : {}),
+      ...(words.length
+        ? {
+            OR: words.flatMap((word) => [
+              { title: { contains: word, mode: 'insensitive' as const } },
+              { description: { contains: word, mode: 'insensitive' as const } },
+              { category: { contains: word, mode: 'insensitive' as const } },
+            ]),
+          }
+        : {}),
+    },
+    take: 60,
+  });
+
+  // Rank: how many query words the title matches, then price.
+  const scored = rows
+    .map((row) => {
+      const haystack = `${row.title} ${row.category} ${row.description}`.toLowerCase();
+      const score = words.reduce(
+        (acc, word) => acc + (row.title.toLowerCase().includes(word) ? 2 : haystack.includes(word) ? 1 : 0),
+        0,
+      );
+      return { row, score };
+    })
+    .sort((a, b) => b.score - a.score || a.row.priceInr - b.row.priceInr)
+    .slice(0, limit);
+
+  return scored.map((s) => toProductView(s.row));
+}
+
+// ---------------------------------------------------------------------------
+// Cart
+// ---------------------------------------------------------------------------
+
+export async function getCart(clientId: string): Promise<CartView> {
+  const rows = await prisma.cartItem.findMany({
+    where: { clientId },
+    include: { product: true },
+    orderBy: { addedAt: 'asc' },
+  });
+  const lines: CartLineView[] = rows.map((row) => ({
+    productId: row.productId,
+    sku: row.product.sku,
+    title: row.product.title,
+    emoji: row.product.emoji,
+    qty: row.qty,
+    priceInr: row.product.priceInr,
+    lineTotalInr: row.product.priceInr * row.qty,
+  }));
+  return {
+    lines,
+    itemCount: lines.reduce((n, l) => n + l.qty, 0),
+    totalInr: lines.reduce((n, l) => n + l.lineTotalInr, 0),
+  };
+}
+
+export async function addToCart(clientId: string, productId: string, qty = 1): Promise<CartView> {
+  const product = await prisma.product.findUnique({ where: { id: productId } });
+  if (!product) throw new Error('Product not found');
+  await prisma.cartItem.upsert({
+    where: { clientId_productId: { clientId, productId } },
+    create: { clientId, productId, qty: Math.max(1, qty) },
+    update: { qty: { increment: Math.max(1, qty) } },
+  });
+  return getCart(clientId);
+}
+
+export async function setCartQty(clientId: string, productId: string, qty: number): Promise<CartView> {
+  if (qty <= 0) {
+    await prisma.cartItem.deleteMany({ where: { clientId, productId } });
+  } else {
+    await prisma.cartItem.upsert({
+      where: { clientId_productId: { clientId, productId } },
+      create: { clientId, productId, qty },
+      update: { qty },
+    });
+  }
+  return getCart(clientId);
+}
+
+export async function clearCart(clientId: string): Promise<void> {
+  await prisma.cartItem.deleteMany({ where: { clientId } });
+}
+
+// ---------------------------------------------------------------------------
+// Orders
+// ---------------------------------------------------------------------------
+
+type OrderRow = {
+  id: string;
+  code: string;
+  clientId: string;
+  status: string;
+  totalInr: number;
+  shippingAddress: string;
+  paymentMethod: string;
+  placedAt: Date;
+  statusUpdatedAt: Date;
+  expectedDelivery: Date;
+  deliveredAt: Date | null;
+  cancellationReason: string | null;
+  history: unknown;
+  items: Array<{ productId: string; sku: string; title: string; qty: number; priceInr: number }>;
+};
+
+function historyOf(row: { history: unknown }): Array<{ at: number; event: string }> {
+  return Array.isArray(row.history)
+    ? (row.history as Array<{ at: number; event: string }>).filter((h) => h && typeof h.event === 'string')
+    : [];
+}
+
+export function toOrderView(row: OrderRow): OrderView {
+  const status = row.status as OrderStatus;
+  const now = Date.now();
+  const placedAt = row.placedAt.getTime();
+  const nextChangeAt =
+    status === 'PLACED'
+      ? placedAt + placedWindowMs()
+      : status === 'ON_THE_WAY'
+        ? placedAt + placedWindowMs() + transitWindowMs()
+        : 0;
+  return {
+    id: row.id,
+    code: row.code,
+    status,
+    statusText: statusText(status),
+    items: row.items.map((i) => ({
+      productId: i.productId,
+      sku: i.sku,
+      title: i.title,
+      qty: i.qty,
+      priceInr: i.priceInr,
+      lineTotalInr: i.priceInr * i.qty,
+    })),
+    totalInr: row.totalInr,
+    placedAt,
+    statusUpdatedAt: row.statusUpdatedAt.getTime(),
+    expectedDelivery: row.expectedDelivery.getTime(),
+    deliveredAt: row.deliveredAt?.getTime(),
+    shippingAddress: row.shippingAddress,
+    paymentMethod: row.paymentMethod,
+    cancellationReason: row.cancellationReason ?? undefined,
+    editable: status === 'PLACED',
+    nextChangeInMs: nextChangeAt ? Math.max(0, nextChangeAt - now) : 0,
+    history: historyOf(row),
+  };
+}
+
+const ORDER_INCLUDE = { items: { orderBy: { title: 'asc' as const } } };
+
+/**
+ * Applies the time-based status changes (PLACED → ON_THE_WAY → DELIVERED).
+ * Called before every order read, so the state the client sees, the state the
+ * dashboard sees and the state the AI tool sees can never drift apart.
+ */
+export async function syncOrderStatuses(clientId?: string): Promise<void> {
+  const now = Date.now();
+  const open = await prisma.order.findMany({
+    where: {
+      status: { in: ['PLACED', 'ON_THE_WAY'] },
+      ...(clientId ? { clientId } : {}),
+    },
+  });
+  for (const row of open) {
+    const placedAt = row.placedAt.getTime();
+    const shipAt = placedAt + placedWindowMs();
+    const deliverAt = shipAt + transitWindowMs();
+    const history = historyOf(row);
+
+    if (now >= deliverAt) {
+      if (row.status === 'PLACED') history.push({ at: shipAt, event: 'Picked up by courier — on the way' });
+      history.push({ at: deliverAt, event: 'Delivered' });
+      await prisma.order.update({
+        where: { id: row.id },
+        data: {
+          status: 'DELIVERED',
+          statusUpdatedAt: new Date(deliverAt),
+          deliveredAt: new Date(deliverAt),
+          history,
+        },
+      });
+    } else if (now >= shipAt && row.status === 'PLACED') {
+      history.push({ at: shipAt, event: 'Picked up by courier — on the way' });
+      await prisma.order.update({
+        where: { id: row.id },
+        data: { status: 'ON_THE_WAY', statusUpdatedAt: new Date(shipAt), history },
+      });
+    }
+  }
+}
+
+async function nextOrderCode(): Promise<string> {
+  const counter = await prisma.orderCounter.upsert({
+    where: { id: 'order' },
+    create: { id: 'order', value: 10001 },
+    update: { value: { increment: 1 } },
+  });
+  return `NM-${counter.value}`;
+}
+
+export function normalizeOrderCode(input: string): string {
   const raw = String(input ?? '').trim().toUpperCase().replace(/\s+/g, '');
   if (/^\d+$/.test(raw)) return `NM-${raw}`;
   return raw.replace(/^NM-?/, 'NM-');
 }
 
-export const CANCELLABLE_STATUSES: OrderStatus[] = ['PLACED', 'PACKED'];
-export const ADDRESS_EDITABLE_STATUSES: OrderStatus[] = ['PLACED', 'PACKED'];
-export const RETURN_WINDOW_DAYS = 7;
+export interface PlaceOrderInput {
+  shippingAddress: string;
+  paymentMethod?: string;
+}
 
-export function findCustomerByPhone(phoneInput: string): Customer | null {
-  const phone = normalizePhone(phoneInput);
-  if (!phone) return null;
-  for (const customer of getShopDb().customers.values()) {
-    if (customer.phone === phone) return customer;
+/** Turns the client's cart into an order and empties the cart. */
+export async function placeOrder(
+  clientId: string,
+  input: PlaceOrderInput,
+): Promise<ServiceResult<OrderView>> {
+  const cart = await getCart(clientId);
+  if (cart.lines.length === 0) {
+    return fail('CART_EMPTY', 'The cart is empty — add a product before placing an order.');
   }
-  return null;
+  const address = input.shippingAddress?.trim() ?? '';
+  if (address.length < 10) {
+    return fail('INVALID_ADDRESS', 'A delivery address with house/flat, area, city and PIN code is required.');
+  }
+  const paymentMethod = ['UPI', 'CARD', 'COD'].includes(String(input.paymentMethod).toUpperCase())
+    ? String(input.paymentMethod).toUpperCase()
+    : 'COD';
+
+  const now = Date.now();
+  const code = await nextOrderCode();
+  const order = await prisma.order.create({
+    data: {
+      code,
+      clientId,
+      status: 'PLACED',
+      totalInr: cart.totalInr,
+      shippingAddress: address,
+      paymentMethod,
+      placedAt: new Date(now),
+      statusUpdatedAt: new Date(now),
+      expectedDelivery: new Date(now + placedWindowMs() + transitWindowMs()),
+      history: [{ at: now, event: 'Order placed' }],
+      items: {
+        create: cart.lines.map((line) => ({
+          productId: line.productId,
+          sku: line.sku,
+          title: line.title,
+          qty: line.qty,
+          priceInr: line.priceInr,
+        })),
+      },
+    },
+    include: ORDER_INCLUDE,
+  });
+  await clearCart(clientId);
+  return { ok: true, data: toOrderView(order as OrderRow) };
 }
 
-export function getCustomer(customerId: string): Customer | null {
-  return getShopDb().customers.get(customerId) ?? null;
+export async function listOrders(clientId: string, limit = 20): Promise<OrderView[]> {
+  await syncOrderStatuses(clientId);
+  const rows = await prisma.order.findMany({
+    where: { clientId },
+    include: ORDER_INCLUDE,
+    orderBy: { placedAt: 'desc' },
+    take: limit,
+  });
+  return rows.map((row) => toOrderView(row as OrderRow));
 }
 
-export function listCustomers(): Customer[] {
-  return [...getShopDb().customers.values()];
-}
-
-export function listOrdersForCustomer(customerId: string, limit = 5): Order[] {
-  return [...getShopDb().orders.values()]
-    .filter((o) => o.customerId === customerId)
-    .sort((a, b) => b.placedAt - a.placedAt)
-    .slice(0, limit);
-}
-
-export function getOrder(orderIdInput: string): Order | null {
-  return getShopDb().orders.get(normalizeOrderId(orderIdInput)) ?? null;
-}
-
-/** Order scoped to a customer — the AI can never read another customer's order. */
-export function getOrderForCustomer(customerId: string, orderIdInput: string): ServiceResult<Order> {
-  const order = getOrder(orderIdInput);
-  if (!order || order.customerId !== customerId) {
+export async function getOrderForClient(
+  clientId: string,
+  codeInput: string,
+): Promise<ServiceResult<OrderView>> {
+  await syncOrderStatuses(clientId);
+  const code = normalizeOrderCode(codeInput);
+  const row = await prisma.order.findFirst({
+    where: { code, clientId },
+    include: ORDER_INCLUDE,
+  });
+  if (!row) {
     return fail(
       'ORDER_NOT_FOUND',
-      `No order ${normalizeOrderId(orderIdInput)} found for this customer. Ask the customer to re-check the order number.`,
+      `No order ${code} on this account. Ask the customer to re-check the order number, or list their recent orders.`,
     );
   }
+  return { ok: true, data: toOrderView(row as OrderRow) };
+}
+
+async function loadEditableOrder(clientId: string, codeInput: string) {
+  const found = await getOrderForClient(clientId, codeInput);
+  if (!found.ok) return found;
+  if (found.data.status !== 'PLACED') {
+    return fail<OrderView>(
+      'ORDER_LOCKED',
+      `Order ${found.data.code} is already "${found.data.statusText.toLowerCase()}", so its items can no longer be changed. ` +
+        'Only orders still in the PLACED stage can be edited.',
+    );
+  }
+  return found;
+}
+
+async function recalcOrder(orderId: string, event: string): Promise<OrderView> {
+  const row = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, include: ORDER_INCLUDE });
+  const total = row.items.reduce((sum, item) => sum + item.priceInr * item.qty, 0);
+  const history = [...historyOf(row), { at: Date.now(), event }];
+  const updated = await prisma.order.update({
+    where: { id: orderId },
+    data: { totalInr: total, history },
+    include: ORDER_INCLUDE,
+  });
+  return toOrderView(updated as OrderRow);
+}
+
+/** Adds a catalogue product to an order that is still PLACED. */
+export async function addItemToOrder(
+  clientId: string,
+  codeInput: string,
+  productRef: string,
+  qty = 1,
+): Promise<ServiceResult<OrderView>> {
+  const found = await loadEditableOrder(clientId, codeInput);
+  if (!found.ok) return found;
+  const product = await findProduct(productRef);
+  if (!product) {
+    return fail('PRODUCT_NOT_FOUND', `"${productRef}" is not in the NexaMart catalogue. Search the catalogue first.`);
+  }
+  const amount = Math.min(10, Math.max(1, Math.floor(qty) || 1));
+  await prisma.orderItem.upsert({
+    where: { orderId_productId: { orderId: found.data.id, productId: product.id } },
+    create: {
+      orderId: found.data.id,
+      productId: product.id,
+      sku: product.sku,
+      title: product.title,
+      qty: amount,
+      priceInr: product.priceInr,
+    },
+    update: { qty: { increment: amount } },
+  });
+  const order = await recalcOrder(found.data.id, `Added ${amount} x ${product.title}`);
   return { ok: true, data: order };
 }
 
-function statusLabel(status: OrderStatus): string {
-  switch (status) {
-    case 'PLACED':
-      return 'Order placed, not yet packed';
-    case 'PACKED':
-      return 'Packed at warehouse, awaiting pickup';
-    case 'SHIPPED':
-      return 'Shipped, in transit';
-    case 'OUT_FOR_DELIVERY':
-      return 'Out for delivery today';
-    case 'DELIVERED':
-      return 'Delivered';
-    case 'CANCELLED':
-      return 'Cancelled';
-    case 'RETURN_REQUESTED':
-      return 'Return requested, pickup pending';
-    case 'REFUNDED':
-      return 'Refunded';
-  }
-}
-
-/** Compact, LLM-friendly view of an order (no internal ids beyond the order number). */
-export function summarizeOrder(order: Order) {
-  return {
-    order_id: order.id,
-    status: order.status,
-    status_text: statusLabel(order.status),
-    items: order.items.map((i) => `${i.qty} x ${i.title}`),
-    total_inr: order.totalInr,
-    payment_method: order.paymentMethod,
-    placed_on: new Date(order.placedAt).toISOString().slice(0, 10),
-    expected_delivery: order.expectedDelivery,
-    delivered_on: order.deliveredAt ? new Date(order.deliveredAt).toISOString().slice(0, 10) : undefined,
-    courier: order.courier,
-    tracking_id: order.trackingId,
-    shipping_address: order.shippingAddress,
-    can_cancel: CANCELLABLE_STATUSES.includes(order.status),
-    can_change_address: ADDRESS_EDITABLE_STATUSES.includes(order.status),
-    can_return: canReturn(order),
-    refund_status: order.refundStatus,
-    last_update: order.history[order.history.length - 1]?.event,
-  };
-}
-
-export function canReturn(order: Order): boolean {
-  if (order.status !== 'DELIVERED' || !order.deliveredAt) return false;
-  return Date.now() - order.deliveredAt <= RETURN_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-}
-
-export function cancelOrder(
-  customerId: string,
-  orderIdInput: string,
-  reason: string,
-): ServiceResult<ReturnType<typeof summarizeOrder>> {
-  const found = getOrderForCustomer(customerId, orderIdInput);
+/** Removes a product (or part of its quantity) from an order that is still PLACED. */
+export async function removeItemFromOrder(
+  clientId: string,
+  codeInput: string,
+  productRef: string,
+  qty?: number,
+): Promise<ServiceResult<OrderView>> {
+  const found = await loadEditableOrder(clientId, codeInput);
   if (!found.ok) return found;
-  const order = found.data;
-  if (order.status === 'CANCELLED') {
-    return fail('ALREADY_CANCELLED', `Order ${order.id} is already cancelled.`);
+
+  const needle = String(productRef ?? '').trim().toLowerCase();
+  const line =
+    found.data.items.find((i) => i.sku.toLowerCase() === needle) ??
+    found.data.items.find((i) => i.title.toLowerCase() === needle) ??
+    found.data.items.find((i) => needle.length > 2 && i.title.toLowerCase().includes(needle)) ??
+    found.data.items.find((i) => needle.split(/\s+/).some((w) => w.length > 3 && i.title.toLowerCase().includes(w)));
+
+  if (!line) {
+    return fail(
+      'ITEM_NOT_IN_ORDER',
+      `Order ${found.data.code} does not contain "${productRef}". It has: ${found.data.items
+        .map((i) => `${i.qty} x ${i.title}`)
+        .join(', ')}.`,
+    );
   }
-  if (!CANCELLABLE_STATUSES.includes(order.status)) {
+  if (found.data.items.length === 1 && (!qty || qty >= line.qty)) {
+    return fail(
+      'LAST_ITEM',
+      `${line.title} is the only item in ${found.data.code}. Removing it would empty the order — cancel the order instead.`,
+    );
+  }
+
+  const remove = qty && qty > 0 ? Math.min(Math.floor(qty), line.qty) : line.qty;
+  if (remove >= line.qty) {
+    await prisma.orderItem.deleteMany({ where: { orderId: found.data.id, productId: line.productId } });
+  } else {
+    await prisma.orderItem.update({
+      where: { orderId_productId: { orderId: found.data.id, productId: line.productId } },
+      data: { qty: line.qty - remove },
+    });
+  }
+  const order = await recalcOrder(found.data.id, `Removed ${remove} x ${line.title}`);
+  return { ok: true, data: order };
+}
+
+/** Changes a line quantity on an order that is still PLACED (0 removes it). */
+export async function setOrderItemQty(
+  clientId: string,
+  codeInput: string,
+  productId: string,
+  qty: number,
+): Promise<ServiceResult<OrderView>> {
+  const found = await loadEditableOrder(clientId, codeInput);
+  if (!found.ok) return found;
+  const line = found.data.items.find((i) => i.productId === productId);
+  if (!line) return fail('ITEM_NOT_IN_ORDER', 'That product is not part of this order.');
+  if (qty <= 0) return removeItemFromOrder(clientId, codeInput, line.sku);
+  if (found.data.items.length === 0) return fail('LAST_ITEM', 'An order must keep at least one item.');
+  await prisma.orderItem.update({
+    where: { orderId_productId: { orderId: found.data.id, productId } },
+    data: { qty: Math.min(10, Math.floor(qty)) },
+  });
+  const order = await recalcOrder(found.data.id, `Quantity of ${line.title} set to ${Math.min(10, Math.floor(qty))}`);
+  return { ok: true, data: order };
+}
+
+export async function cancelOrder(
+  clientId: string,
+  codeInput: string,
+  reason: string,
+): Promise<ServiceResult<OrderView>> {
+  const found = await getOrderForClient(clientId, codeInput);
+  if (!found.ok) return found;
+  if (found.data.status === 'CANCELLED') {
+    return fail('ALREADY_CANCELLED', `Order ${found.data.code} is already cancelled.`);
+  }
+  if (found.data.status !== 'PLACED') {
     return fail(
       'NOT_CANCELLABLE',
-      `Order ${order.id} is ${statusLabel(order.status).toLowerCase()} and can no longer be cancelled. ` +
-        (order.status === 'DELIVERED'
-          ? 'Offer a return instead if within 7 days of delivery.'
-          : 'The customer can refuse the package at the door; a refund is issued once it returns to the warehouse.'),
+      `Order ${found.data.code} is already "${found.data.statusText.toLowerCase()}" and can no longer be cancelled.`,
     );
   }
   const now = Date.now();
-  order.status = 'CANCELLED';
-  order.cancellationReason = reason;
-  markShopTouched(order.id);
-  order.refundStatus = order.paymentMethod === 'COD' ? undefined : 'INITIATED';
-  order.history.push({ at: now, event: `Cancelled by customer via support (${reason})` });
-  if (order.refundStatus) {
-    order.history.push({ at: now, event: 'Refund initiated to original payment method (5-7 business days)' });
-  }
-  return { ok: true, data: summarizeOrder(order) };
+  const updated = await prisma.order.update({
+    where: { id: found.data.id },
+    data: {
+      status: 'CANCELLED',
+      statusUpdatedAt: new Date(now),
+      cancelledAt: new Date(now),
+      cancellationReason: reason || 'customer request',
+      history: [...found.data.history, { at: now, event: `Cancelled (${reason || 'customer request'})` }],
+    },
+    include: ORDER_INCLUDE,
+  });
+  return { ok: true, data: toOrderView(updated as OrderRow) };
 }
 
-export function updateShippingAddress(
-  customerId: string,
-  orderIdInput: string,
+export async function updateOrderAddress(
+  clientId: string,
+  codeInput: string,
   newAddress: string,
-): ServiceResult<ReturnType<typeof summarizeOrder>> {
-  const found = getOrderForCustomer(customerId, orderIdInput);
+): Promise<ServiceResult<OrderView>> {
+  const found = await loadEditableOrder(clientId, codeInput);
   if (!found.ok) return found;
-  const order = found.data;
-  if (!ADDRESS_EDITABLE_STATUSES.includes(order.status)) {
-    return fail(
-      'ADDRESS_LOCKED',
-      `Order ${order.id} has already been ${statusLabel(order.status).toLowerCase()}; the address cannot be changed now. Offer to create a ticket for the courier team.`,
-    );
-  }
-  const address = newAddress.trim();
+  const address = String(newAddress ?? '').trim();
   if (address.length < 10) {
     return fail('INVALID_ADDRESS', 'The new address is too short. Collect house/flat, street, city and PIN code.');
   }
-  order.shippingAddress = address;
-  markShopTouched(order.id);
-  order.history.push({ at: Date.now(), event: `Shipping address updated via support` });
-  return { ok: true, data: summarizeOrder(order) };
-}
-
-export function requestReturn(
-  customerId: string,
-  orderIdInput: string,
-  reason: string,
-): ServiceResult<ReturnType<typeof summarizeOrder>> {
-  const found = getOrderForCustomer(customerId, orderIdInput);
-  if (!found.ok) return found;
-  const order = found.data;
-  if (order.status === 'RETURN_REQUESTED') {
-    return fail('RETURN_ALREADY_REQUESTED', `A return is already in progress for ${order.id}.`);
-  }
-  if (!canReturn(order)) {
-    return fail(
-      'NOT_RETURNABLE',
-      order.status === 'DELIVERED'
-        ? `Order ${order.id} was delivered more than ${RETURN_WINDOW_DAYS} days ago and is outside the return window. Escalate to a human if the customer disputes this.`
-        : `Order ${order.id} is not delivered yet (${statusLabel(order.status).toLowerCase()}); returns are only possible after delivery.`,
-    );
-  }
-  order.status = 'RETURN_REQUESTED';
-  order.returnReason = reason;
-  markShopTouched(order.id);
-  order.refundStatus = 'PENDING';
-  order.history.push({ at: Date.now(), event: `Return requested (${reason}); pickup scheduled within 2 days` });
-  return { ok: true, data: summarizeOrder(order) };
-}
-
-export interface CreateTicketInput {
-  customerId?: string;
-  conversationId?: string;
-  orderId?: string;
-  category: string;
-  summary: string;
-}
-
-export function createTicket(input: CreateTicketInput): Ticket {
-  const db = getShopDb();
-  db.counters.ticket += 1;
   const now = Date.now();
-  const ticket: Ticket = {
-    id: `TKT-${db.counters.ticket}`,
-    customerId: input.customerId,
-    conversationId: input.conversationId,
-    orderId: input.orderId ? normalizeOrderId(input.orderId) : undefined,
-    category: input.category.trim().toLowerCase().replace(/\s+/g, '_'),
-    summary: input.summary.trim(),
-    status: 'OPEN',
-    createdAt: now,
-    updatedAt: now,
-  };
-  db.tickets.set(ticket.id, ticket);
-  markShopTouched(ticket.id);
-  return ticket;
+  const updated = await prisma.order.update({
+    where: { id: found.data.id },
+    data: {
+      shippingAddress: address,
+      history: [...found.data.history, { at: now, event: 'Delivery address updated' }],
+    },
+    include: ORDER_INCLUDE,
+  });
+  return { ok: true, data: toOrderView(updated as OrderRow) };
 }
 
-export function listTickets(customerId?: string): Ticket[] {
-  const all = [...getShopDb().tickets.values()].sort((a, b) => b.createdAt - a.createdAt);
-  return customerId ? all.filter((t) => t.customerId === customerId) : all;
-}
+// ---------------------------------------------------------------------------
+// Compact shapes for the LLM / handoff summary
+// ---------------------------------------------------------------------------
 
-export function toCustomerSnapshot(customer: Customer) {
+export function summarizeOrderForAgent(order: OrderView) {
   return {
-    id: customer.id,
-    name: customer.name,
-    phone: customer.phone,
-    email: customer.email,
-    tier: customer.tier,
-    city: customer.city,
+    order_id: order.code,
+    status: order.status,
+    status_text: order.statusText,
+    items: order.items.map((i) => `${i.qty} x ${i.title} (${i.sku}, ${formatInr(i.priceInr)})`),
+    total_inr: order.totalInr,
+    payment_method: order.paymentMethod,
+    placed_at: new Date(order.placedAt).toISOString(),
+    expected_delivery: new Date(order.expectedDelivery).toISOString(),
+    shipping_address: order.shippingAddress,
+    can_edit_items: order.editable,
+    can_cancel: order.status === 'PLACED',
+    seconds_until_next_status_change: Math.round(order.nextChangeInMs / 1000),
   };
 }

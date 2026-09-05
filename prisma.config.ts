@@ -26,6 +26,6 @@ export default defineConfig({
   },
   migrations: {
     path: 'prisma/migrations',
-    seed: 'tsx scripts/seed-demo-store.ts',
+    seed: 'tsx scripts/seed-catalog.ts',
   },
 });

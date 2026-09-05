@@ -39,12 +39,15 @@ export interface ToolAuditEntry {
 }
 
 export interface CustomerSnapshot {
+  /** Client row id (PostgreSQL) — every tool call is scoped to it. */
   id: string;
   name: string;
   phone: string;
   email: string;
-  tier: 'standard' | 'prime';
+  tier: string;
   city: string;
+  address?: string;
+  preferredLanguage?: string;
 }
 
 export interface ConversationContext {
@@ -52,7 +55,7 @@ export interface ConversationContext {
   intent?: string;
   customerName?: string;
   customer?: CustomerSnapshot;
-  /** Orders the AI looked up or changed in this conversation. */
+  /** Orders the AI looked up or changed in this conversation (order codes). */
   orderIds: string[];
   confidence?: number;
   missingInformation: string[];
@@ -68,6 +71,8 @@ export interface ConversationContext {
   };
   /** Consecutive turns the rule-based chat agent failed to understand. */
   misunderstandings?: number;
+  /** Free-form facts the customer gave during this conversation (for the handoff). */
+  notes?: string[];
 }
 
 export interface Conversation {
@@ -85,6 +90,8 @@ export interface Conversation {
   agentId?: string;
   /** Latest agent state reported by the client (listening/thinking/speaking…). */
   agentState?: string;
+  /** Last heartbeat received from the customer's browser. */
+  lastSeenAt?: number;
   /** Human agent uid when a human has joined the voice channel. */
   humanUid?: string;
   humanAgentName?: string;
@@ -96,7 +103,12 @@ export interface Conversation {
 
 export type CasePriority = 'LOW' | 'MEDIUM' | 'HIGH';
 
-/** Handoff summary — v1.md §24 shape, generated at escalation time. */
+/**
+ * Handoff summary generated at escalation time — everything the human agent
+ * needs to continue without asking the customer to repeat themselves:
+ * who they are (from the database), what they bought, what the AI already did,
+ * and the tail of the actual conversation.
+ */
 export interface HandoffSummary {
   conversation_id: string;
   mode: 'chat' | 'voice';
@@ -109,6 +121,20 @@ export interface HandoffSummary {
   reason_for_escalation: string;
   confidence: number;
   missing_information: string[];
+  /** Client record as stored in PostgreSQL at escalation time. */
+  customer_profile?: CustomerSnapshot;
+  /** Live orders of that client, newest first. */
+  orders?: Array<{
+    order_id: string;
+    status: string;
+    status_text: string;
+    items: string[];
+    total_inr: number;
+    expected_delivery: string;
+    editable: boolean;
+  }>;
+  /** Last turns of the conversation, oldest first ("Customer: …" / "AI: …"). */
+  transcript_excerpt?: string[];
 }
 
 export interface SupportCase {

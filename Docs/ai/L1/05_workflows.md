@@ -15,25 +15,23 @@ If start fails, run `agora project doctor --deep`.
 
 ## Run the NexaVoice demo end to end
 
-1. Customer: open `/client/chat` (works fully offline from Agora — LLM-driven when `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` are set, rule-based otherwise) or `/client/voice` (needs Agora credentials; voice tools need no extra config on an https origin).
-2. Verify with a demo mobile number (`9876543210`, `9123456780`, `9988776655`), ask for an order status, cancel/return with confirmation, or say "talk to a human".
-3. Human: open `/support-agent` in another tab — the case appears instantly with the handoff summary and customer details; accept it.
-4. Chat: reply from `/support-agent/cases/<id>`; the customer sees `human_agent` messages in the same chat. Voice: click **Join the customer's call** — the AI says the handover line and leaves; talk directly.
-5. Mark resolved. The customer UI shows the resolved banner.
+0. Database first: `pnpm dev:db` (or any PostgreSQL), `pnpm db:push`, `pnpm seed`.
+1. Customer: sign in at `/login` (three demo customers are one click away, or invent one) and shop at `/client` — add products, place an order, watch it go `Placed → On the way → Delivered`.
+2. Open the support dock on the same page: **Chat with support** (works fully offline from Agora — LLM-driven when `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` are set, rule-based otherwise) or **Call support** (needs Agora credentials; voice tools need no extra config on an https origin).
+3. Ask for the order status, ask to add or remove an item **while the order is still Placed** (the agent proposes, you confirm), or say "talk to a human".
+4. Human: open `/support-agent` in another tab — the case appears instantly with the handoff summary and customer details; accept it.
+5. Chat: reply from `/support-agent/cases/<id>`; the customer sees `human_agent` messages in the same chat. Voice: click **Join the customer's call** — the AI says the handover line and leaves; talk directly.
+6. Mark resolved. The customer UI shows the resolved banner. Closing the customer tab terminates the conversation — the dashboard drops it within ~30s.
 
 For local voice tool calls expose the dev server publicly (e.g. `ngrok http 3000`) and set `AGENT_TOOLS_BASE_URL` to that https URL before starting a call — tools are skipped when the engine would have to reach `localhost`.
 
-To exercise the serverless state path locally, run `NEXAVOICE_STORE=file pnpm build && pnpm start`: separate processes then share `.data/nexavoice-store.json`, the way Vercel instances share the Blob store. `pnpm run dev` keeps one in-process store, which is why state bugs do not reproduce there.
+To exercise the serverless state path locally, run `pnpm build && pnpm start` against a real `DATABASE_URL`: the support store then round-trips through the `StoreState` row on every request, the way Vercel instances share it. `pnpm run dev` keeps one in-process cache, which is why state bugs do not reproduce there.
 
-## Populate the Dashboard with Demo Data
+## Reset the Data
 
-1. Set `NEXAVOICE_SEED=demo` where you want it (on Vercel: Development, Preview **and** Production). The next request to any support route fills an empty store with one live chat, one HIGH waiting case and one resolved voice call.
-2. Or from a terminal against the same store: copy `BLOB_READ_WRITE_TOKEN` from Vercel → Storage → Blob store into `.env.local`, then `pnpm run seed`.
-3. Local file store instead: `NEXAVOICE_STORE=file pnpm run seed`, then the same two variables when you `pnpm run dev`.
-
-Seeding is a no-op once the store holds any conversation and it never replaces an
-existing record: leave the flag set in a demo project, unset it in a real one, and remove
-it if a store reset should not repopulate the demo set.
+- `pnpm db:reset` drops and recreates the schema (development only), then `pnpm seed` to reload the catalogue.
+- `pnpm seed` alone is idempotent: it upserts the 50 products by SKU and leaves clients, carts and orders untouched.
+- The dashboard needs no fixture — it shows live conversations only, so it is empty until somebody actually shops and asks for support.
 
 ## Change Agent Behavior
 
@@ -45,7 +43,7 @@ Typical edits:
 - Shared agent UID (`DEFAULT_AGENT_UID` in `lib/agora.ts`) and human UID (`DEFAULT_HUMAN_UID`).
 - VAD (`turnDetection.config.*`), interaction language (`AGENT_LANGUAGE`), STT/TTS vendors and voice (`lib/agent-config.ts`).
 - Tools: schema in `lib/agent-tools.ts`, execution + guardrails in `lib/support/tools.ts`, rule-based chat path in `lib/chat-agent.ts`, contract test in `scripts/verify-api-contracts.ts`.
-- Demo data and business rules: `lib/shop/data.ts`, `lib/shop/service.ts`.
+- Catalogue: `lib/shop/catalog-data.ts` (then `pnpm seed`); shop business rules and the order status machine: `lib/shop/service.ts`.
 
 Validation path:
 
@@ -96,10 +94,10 @@ Bootstrap behavior:
 
 ## Workflow: Change a Shop Business Rule
 
-1. Rules live in `lib/shop/service.ts` (windows, allowed transitions); fixtures in `lib/shop/data.ts`.
-2. A mutation must call `markShopTouched(<record id>)`, or the durable merge treats this instance's write as pristine seed data and another instance overwrites it.
-3. Any route that reads the shop needs `withStore()` — GET-only demo routes included — otherwise it answers from a stale copy on a warm instance. `scripts/verify-api-contracts.ts` fails on an unbracketed state-reading route.
-4. Cancel/return/address changes surface in three places: the tool response (`lib/support/tools.ts`), the chat agent's reply copy (`lib/chat-agent.ts`) and the case view (`components/CaseWorkspace.tsx`).
+1. Rules live in `lib/shop/service.ts` only — status timings (`ORDER_PLACED_SECONDS`, `ORDER_TRANSIT_SECONDS`), the "editable only while `PLACED`" gate, `LAST_ITEM`, cancellation. The catalogue itself is `lib/shop/catalog-data.ts` (re-run `pnpm seed` after editing it).
+2. Never duplicate a rule in a route or a component: `app/api/shop/*` (the customer's own clicks) and `lib/support/tools.ts` (the agent) both call these functions, which is what keeps the two paths honest.
+3. Shop routes are unbracketed by design — Prisma is already shared between instances — so do not add `withStore()` there; `scripts/verify-api-contracts.ts` only enforces the bracket for routes importing `lib/support/{store,tools}`.
+4. A changed rule surfaces in four places: the service result codes, the tool response (`lib/support/tools.ts`), the chat agent's reply copy (`lib/chat-agent.ts`) and the shopping UI (`components/ShoppingPage.tsx`). Extend `verifyOrderLifecycle` in `scripts/verify-api-contracts.ts` to cover it.
 
 ## Workflow: Add a Route That Touches Support State
 

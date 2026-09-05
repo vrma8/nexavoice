@@ -16,16 +16,19 @@
 - **No hydration TTL.** Consecutive requests from one browser land on different
   instances; skipping a read because "we just synced" answers the next turn from stale
   state (the customer is asked for their phone number again).
-- **The demo shop is state too.** `lib/shop/data.ts` seeds a process-local copy of the
-  catalog, so a tool's cancellation only survives on Vercel because `toSnapshot()` carries
-  `shop` and `applySnapshot()` merges it back through `mergeShopSnapshot`. Two consequences:
-  a route that reads the shop must be bracketed (the contract checks enforce this, GET-only
-  routes included), and an order this instance did **not** write always takes the remote
-  version — otherwise a freshly seeded copy silently reverts another instance's write.
-- **Demo records need fixed ids.** `NEXAVOICE_SEED=demo` data is written by whichever
-  instance cold-starts first, and two at once is normal on Vercel. The seeded
-  conversations, messages and events in `lib/support/seed.ts` therefore use deterministic
-  ids so `mergeSnapshots` dedupes them — random ids double the seeded transcript.
+- **The shop is not in the mirror.** Products, carts and orders are Prisma rows, so
+  `app/api/shop/*` needs no `withStore()` bracket — but every shop read/write must go
+  through `lib/shop/service.ts`, never through a second copy of the rules. The customer's
+  buttons and the agent's tools call the same functions on purpose: that is the only reason
+  "editable only while Placed" cannot be bypassed from one side.
+- **Order status is computed, not scheduled.** `syncOrderStatuses()` derives
+  `PLACED → ON_THE_WAY → DELIVERED` from `placedAt` on every read. Do not add a timer or a
+  cron to "advance" orders — a serverless instance is frozen between requests, and a lazy
+  derivation is correct on both.
+- **A conversation only stays on the dashboard while the customer is there.** The browser
+  heartbeats every 8s and beacons `/api/conversations/:id/close` on `pagehide`; the server
+  sweeps anything older than `STALE_AFTER_MS`. Any new surface that creates a conversation
+  must do both, or it leaves ghosts in the agent's queue.
 - **Anything added to `lib/support/types.ts` must be mirrored** in
   `lib/support/snapshot.ts`'s `toSnapshot()`/`applySnapshot()`, or it works locally and
   vanishes on a serverless deployment.

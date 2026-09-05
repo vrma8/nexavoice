@@ -12,7 +12,9 @@
  *      live database, so no `pg_catalog` type-mapping edge cases are hit.
  *   3. It applies that SQL through the Postgres driver adapter.
  *
- * Run it with `pnpm db:push`.
+ * Run it with `pnpm db:push`. Pass `--force` to drop the existing `public`
+ * schema first and recreate it from scratch (development reset — it deletes
+ * every row, so it refuses to run when NODE_ENV is production).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { config as loadEnv } from 'dotenv';
@@ -80,10 +82,28 @@ async function databaseHasUserTables() {
 // Main
 // ---------------------------------------------------------------------------
 
+const force = process.argv.includes('--force') || process.argv.includes('-f');
+if (force && process.env.NODE_ENV === 'production') {
+  console.error('Refusing to run --force with NODE_ENV=production.');
+  process.exit(1);
+}
+
 const schemaPath = process.env.PRISMA_SCHEMA_PATH ?? 'prisma/schema.prisma';
 const schemaContent = readFileSync(schemaPath, 'utf8');
 
 await ensureDatabase();
+
+if (force) {
+  const client = new pg.Client({ connectionString: DATABASE_URL });
+  await client.connect();
+  try {
+    await client.query('DROP SCHEMA IF EXISTS public CASCADE');
+    await client.query('CREATE SCHEMA public');
+    console.log(`✔ Dropped and recreated the public schema of "${targetDb}".`);
+  } finally {
+    await client.end();
+  }
+}
 
 // `bindMigrationAwareSqlAdapterFactory` re-exposes the driver adapter as a
 // plain object whose methods are bound (and return the `{ ok, value }`
@@ -112,11 +132,12 @@ try {
     process.exit(0);
   }
 
-  const hasTables = await databaseHasUserTables();
+  const hasTables = !force && (await databaseHasUserTables());
   if (hasTables) {
     console.error(
       `⚠ Database "${targetDb}" already contains tables; skipping baseline apply to avoid destructive changes.\n` +
-        `  Run the SQL below manually (or reset the database) if you need to re-sync it:\n\n${diff.stdout}`,
+        `  Re-run with \`--force\` to drop and recreate the schema (development only),\n` +
+        `  or run the SQL below manually:\n\n${diff.stdout}`,
     );
     process.exit(1);
   }

@@ -14,6 +14,8 @@ export interface ClientSession {
   phone: string;
   tier: string;
   city: string;
+  /** Saved delivery address — pre-fills checkout, updated when an order is placed. */
+  address: string;
   preferredLanguage: string;
 }
 

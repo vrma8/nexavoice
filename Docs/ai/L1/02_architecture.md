@@ -81,9 +81,9 @@ Human dashboard (SupportDashboard, CaseWorkspace, HumanVoiceBridge)
 - Local development via `pnpm run dev` — one process, so the in-memory support store
   is shared by every route.
 - Vercel deployment as a single Next.js app with server env vars. Each route is an
-  independent function instance, so the store mirrors to a durable backend
-  (`lib/support/persist.ts`): Vercel Blob when `BLOB_READ_WRITE_TOKEN` exists, a file
-  when `NEXAVOICE_STORE=file`, otherwise memory-only.
+  independent function instance, so the support store mirrors to PostgreSQL
+  (`lib/support/persist.ts` → one `StoreState` JSONB row) when `DATABASE_URL` exists,
+  otherwise memory-only. Shop data is always plain Prisma rows.
 - `GET /api/health` reports which of those is active, plus Agora credential/tool/LLM
   readiness, for diagnosing a deployment without reading secrets.
 
@@ -92,9 +92,9 @@ Human dashboard (SupportDashboard, CaseWorkspace, HumanVoiceBridge)
 - Browser never sees the app certificate; only receives signed short-lived tokens.
 - The App ID the browser joins with is served by the server (same response as the
   token), so a `NEXT_PUBLIC_AGORA_APP_ID` that the build never saw cannot strand the client.
-- Conversation/case state **and the demo shop's mutated orders/tickets** cross function
-  instances through the durable mirror; a write is flushed inside the request that made it
-  (never from a timer).
+- Conversation/case state crosses function instances through the durable mirror; a write is
+  flushed inside the request that made it (never from a timer). Shop state needs no mirror —
+  it is read from and written to PostgreSQL directly.
 - Agent lifecycle control (`start`, `stop`) is server-routed.
 - Transcript/state/metrics are data-plane RTM events from agent to browser.
 - UI control-plane actions (start/end, renew) originate in `VoiceAgentCall`.

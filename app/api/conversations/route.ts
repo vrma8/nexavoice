@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createConversation, listConversations } from '@/lib/support/store';
-import type { ConversationMode } from '@/lib/support/types';
+import type { ConversationMode, CustomerSnapshot } from '@/lib/support/types';
 import { withStore } from '@/lib/support/route-store';
-import * as shop from '@/lib/shop/service';
+import { prisma, hasDatabaseUrl } from '@/lib/db';
 
 /** GET /api/conversations?active=1 — list conversations (dashboard). */
 async function handleGet(request: NextRequest) {
@@ -11,15 +11,41 @@ async function handleGet(request: NextRequest) {
 }
 
 /**
+ * Loads the signed-in client from PostgreSQL and turns it into the snapshot the
+ * conversation (and every tool call made inside it) is scoped to. The browser
+ * only ever sends an id — the profile itself always comes from the database.
+ */
+async function loadClient(clientId?: string): Promise<CustomerSnapshot | undefined> {
+  if (!clientId || !hasDatabaseUrl()) return undefined;
+  try {
+    const row = await prisma.client.findUnique({ where: { id: clientId } });
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      name: row.name,
+      phone: row.phone,
+      email: row.email,
+      tier: row.tier,
+      city: row.city,
+      address: row.address,
+      preferredLanguage: row.preferredLanguage,
+    };
+  } catch (error) {
+    console.warn('[conversations] could not load client:', error);
+    return undefined;
+  }
+}
+
+/**
  * POST /api/conversations
- * Body: { mode: "CHAT" | "VOICE", customerName?, customerPhone? }
+ * Body: { mode: "CHAT" | "VOICE", clientId?, customerName? }
  *
- * The signed-in client's details (from /login) ride along so the conversation —
- * and any case it becomes — carries the customer's name and, when the mobile
- * number matches a NexaMart account, the full verified customer profile.
+ * The conversation is bound to the signed-in client record, so the AI agent
+ * starts out knowing who it is talking to and can never touch another
+ * customer's orders.
  */
 async function handlePost(request: NextRequest) {
-  let body: { mode?: string; customerName?: string; customerPhone?: string } = {};
+  let body: { mode?: string; clientId?: string; customerName?: string } = {};
   try {
     body = await request.json();
   } catch {
@@ -30,14 +56,11 @@ async function handlePost(request: NextRequest) {
     return NextResponse.json({ error: 'mode must be CHAT or VOICE' }, { status: 400 });
   }
 
-  const customerName = body.customerName?.trim() || undefined;
-  const customerPhone = body.customerPhone?.trim() || undefined;
-  const customer = customerPhone ? shop.findCustomerByPhone(customerPhone) : null;
-
+  const customer = await loadClient(body.clientId?.trim());
   const conversation = createConversation({
     mode,
-    customerName: customer ? customer.name : customerName,
-    customer: customer ? shop.toCustomerSnapshot(customer) : undefined,
+    customerName: customer?.name ?? body.customerName?.trim(),
+    customer,
   });
   return NextResponse.json({ conversation }, { status: 201 });
 }

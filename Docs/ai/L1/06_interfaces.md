@@ -65,7 +65,7 @@ OpenAI-compatible SSE proxy used as the Agora **custom LLM** when `NEXT_LLM_URL`
 ### `POST /api/agent-tools/[tool]?conversation_id=…` (engine → backend)
 
 Headers: `x-nexavoice-tool-token: <tool secret>` (401 otherwise) — `AGENT_TOOLS_SECRET`,
-or a value derived from `NEXT_AGORA_APP_CERTIFICATE` when that variable is unset. Body: tool args (+ optional `tool_call_id`, echoed back). Tools: `verify_customer`, `get_order_status`, `list_recent_orders`, `cancel_order`, `update_shipping_address`, `request_return`, `create_ticket`, `escalate_to_human` (404 for anything else). Response: `{ ok, tool, tool_call_id?, ...result }`; guardrail errors come back as `ok: false` with `error` ∈ `CUSTOMER_NOT_VERIFIED | CONFIRMATION_REQUIRED | HANDED_OFF | INVALID_ARGS` (never HTTP 4xx, so the LLM can recover).
+or a value derived from `NEXT_AGORA_APP_CERTIFICATE` when that variable is unset. Body: tool args (+ optional `tool_call_id`, echoed back). Tools: `get_customer_context`, `search_products`, `list_recent_orders`, `get_order_status`, `add_item_to_order`, `remove_item_from_order`, `cancel_order`, `update_shipping_address`, `escalate_to_human` (404 for anything else). Response: `{ ok, tool, tool_call_id?, ...result }`; guardrail errors come back as `ok: false` with `error` ∈ `NO_SIGNED_IN_CUSTOMER | CONFIRMATION_REQUIRED | HANDED_OFF | PRODUCT_NOT_FOUND | ORDER_NOT_FOUND | ORDER_LOCKED | NOT_CANCELLABLE | LAST_ITEM | INVALID_ARGS` (never HTTP 4xx, so the LLM can recover).
 
 ### Conversations
 
@@ -90,11 +90,15 @@ Timestamp units: every timestamp an API route returns (including `expiresAt`) is
 - `GET /api/health` → always HTTP 200 with `{ status: "ok" | "degraded" | "error", agora, agent, store, checkedAt }`:
   - `agora`: `{ appIdConfigured, appId (masked: first 6 + last 4 chars), appCertificateConfigured, credentialSources, publicAppIdInlined, area, error, convoai }` — `publicAppIdInlined: false` means the browser bundle was built without the App ID. `credentialSources: { appId, appCertificate, inertVarsSet }` names the env vars that actually provided each credential and lists set-but-never-read Agora CLI variables (`AGORA_PROJECT_ID`, `AGORA_FEATURE_*`, `AGORA_ENABLED_FEATURES`). `convoai` is the result of one read-only live `GET /v2/projects/{appid}/agents` round trip (`{ ok, area, latencyMs?, agents? { running, starting, total }, error?, hint?, statusCode? }`) unless skipped with `?deep=0`; a failed probe also flips `status` to `"degraded"`.
   - `agent`: `{ llm: "custom" | "agora-managed", tools: { enabled, baseUrl, secretSource: "AGENT_TOOLS_SECRET" | "derived-from-app-certificate" | null }, interactionLanguage, sttLanguage, ttsVoice }`.
-  - `seed`: `{ requested, created, skipped, reason?, error? }` — what the opt-in `NEXAVOICE_SEED=demo` fixture did on this instance.
+  - `store`: `{ backend, target, ready }` — `postgres` when `DATABASE_URL` is set, otherwise `memory` (per-instance).
   - `store`: `getStoreSyncStatus()` (`backend`, `revision`, `remoteRev`, `lastSyncAt`, `lastError`, …) plus `conversations` and a `note` naming the fix when `backend: "none"`.
 
   Public and safe to open in a browser: booleans, masked ids and non-secret config only — never a certificate, token, or secret value.
-- `GET /api/shop/customers[?phone=]`, `GET /api/shop/orders/:id`, `GET /api/shop/tickets?customer_id=` → read-only demo data.
+- Shop (all require the signed-in client via the `x-nexavoice-client-id` header, or `?clientId=`; 503 when `DATABASE_URL` is unset, 401 when the client is unknown):
+  - `GET /api/shop/products` → `{ products }` — the fixed 50-product catalogue.
+  - `GET|POST|PATCH|DELETE /api/shop/cart` → `{ cart }` — read, add (`{ productId, qty }`), set quantity, clear.
+  - `GET /api/shop/orders` → `{ orders }`; `POST /api/shop/orders` `{ shippingAddress, paymentMethod }` → `{ order, orders, cart }` (also saves the address on the client).
+  - `GET /api/shop/orders/:code` → `{ order }`; `PATCH /api/shop/orders/:code` `{ action: 'add_item'|'remove_item'|'set_qty'|'address'|'cancel', … }` → `{ order, orders }`, rejected with `ORDER_LOCKED`/`NOT_CANCELLABLE` once the order is no longer `PLACED`.
 
 ### Handoff summary (`SupportCase.handoff`, v1.md §24)
 
@@ -142,7 +146,7 @@ From `types/conversation.ts` (high-use):
 - Invite route requires both `requester_id` and `channel_name`.
 - Stop route requires `agent_id`; missing should never be tolerated silently.
 - Token route should always return UID as string for downstream compatibility.
-- Tool endpoint never executes a write without `confirmed: true`, never before `verify_customer`, and never after escalation.
+- Tool endpoint never executes a write without `confirmed: true`, never outside the conversation's signed-in client, and never after escalation (`HANDED_OFF`).
 - Human agent RTC uid is always `654321` (`DEFAULT_HUMAN_UID`); the customer client uses it to detect a human joining.
 
 ## Event Interface Notes

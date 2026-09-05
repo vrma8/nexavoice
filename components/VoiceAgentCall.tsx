@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, Suspense, useEffect, useCallback } from "react";
+import { useState, Suspense, useEffect, useCallback } from "react";
 import dynamic from "next/dynamic";
 import type { RTMClient } from "agora-rtm";
 import type {
@@ -10,14 +10,13 @@ import type {
   AgoraRenewalTokens,
   StopConversationRequest,
 } from "@/types/conversation";
-import { mirrorVoiceState } from "@/lib/api";
+import { endConversation, mirrorVoiceState, sendHeartbeat } from "@/lib/api";
 import { MISSING_APP_ID_MESSAGE, resolveAppId } from "@/lib/agora";
 import { getClientSession } from "@/lib/session";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { LoadingSkeleton } from "./LoadingSkeleton";
 import { Button } from "@/components/ui/button";
 import { Phone, Loader2 } from "lucide-react";
-import { useRouter } from "next/navigation";
 
 // Dynamically import the ConversationComponent with SSR disabled
 const ConversationComponent = dynamic(() => import("./ConversationComponent"), {
@@ -50,8 +49,13 @@ async function readErrorBody(
   return { message, hint: body?.hint };
 }
 
-export default function VoiceAgentCall() {
-  const router = useRouter();
+/**
+ * Voice call with the AI agent, started from the shopping page.
+ *
+ * `onCallEnded` lets the host (the agent dock) close itself and refresh the
+ * orders, because the AI may have changed one during the call.
+ */
+export default function VoiceAgentCall({ onCallEnded }: { onCallEnded?: () => void } = {}) {
   const [showConversation, setShowConversation] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -64,6 +68,22 @@ export default function VoiceAgentCall() {
     import("agora-rtc-react").catch(() => {});
     import("agora-rtm").catch(() => {});
   }, []);
+
+  // While the call is up, tell the backend the customer is still on the page,
+  // and end the conversation the moment the tab goes away — the agent dashboard
+  // must never show a call nobody is on.
+  const conversationId = agoraData?.conversationId;
+  useEffect(() => {
+    if (!conversationId || !showConversation) return;
+    void sendHeartbeat(conversationId);
+    const beat = setInterval(() => void sendHeartbeat(conversationId), 8000);
+    const leave = () => endConversation(conversationId, true);
+    window.addEventListener("pagehide", leave);
+    return () => {
+      clearInterval(beat);
+      window.removeEventListener("pagehide", leave);
+    };
+  }, [conversationId, showConversation]);
 
   const handleStartCall = async () => {
     setIsLoading(true);
@@ -99,8 +119,8 @@ export default function VoiceAgentCall() {
           body: JSON.stringify({
             requester_id: responseData.uid,
             channel_name: responseData.channel,
+            client_id: session?.id,
             customer_name: session?.name,
-            customer_phone: session?.phone,
           } as ClientStartRequest),
         })
           .then(async (res) => {
@@ -213,7 +233,7 @@ export default function VoiceAgentCall() {
     rtmClient?.logout().catch((err) => console.error("RTM logout error:", err));
     setRtmClient(null);
     setShowConversation(false);
-    router.push("/client");
+    onCallEnded?.();
   };
 
   if (showConversation && agoraData && rtmClient) {
