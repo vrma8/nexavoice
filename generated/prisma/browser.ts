@@ -28,7 +28,33 @@ export type Client = Prisma.ClientModel
  */
 export type Agent = Prisma.AgentModel
 /**
+ * Model Product
+ * Fixed NexaMart catalogue — the only products a client can buy.
+ */
+export type Product = Prisma.ProductModel
+/**
+ * Model CartItem
+ * One product line in a client's cart.
+ */
+export type CartItem = Prisma.CartItemModel
+/**
+ * Model Order
+ * A placed order. `status` advances on a timer (see lib/shop/orders.ts):
+ * PLACED → ON_THE_WAY → DELIVERED. Items may only change while PLACED.
+ */
+export type Order = Prisma.OrderModel
+/**
+ * Model OrderItem
+ * One product line inside a placed order (price captured at order time).
+ */
+export type OrderItem = Prisma.OrderItemModel
+/**
+ * Model OrderCounter
+ * Sequence source for human-readable order numbers (NM-10001, NM-10002, …).
+ */
+export type OrderCounter = Prisma.OrderCounterModel
+/**
  * Model StoreState
- * Durable support-store document (one row). Replaces Vercel Blob / .data file.
+ * Durable live-support document (one row): conversations, cases, events.
  */
 export type StoreState = Prisma.StoreStateModel

@@ -20,6 +20,8 @@ import { getAgentSession } from "@/lib/session";
 
 const POLL_MS = 3000;
 const AGENT_NAME_KEY = "nexavoice.agentName";
+/** Matches STALE_AFTER_MS in lib/support/store.ts — a browser beats every 8s. */
+const STALE_AFTER_MS = 30_000;
 
 function formatAge(from: number, now: number) {
   const s = Math.max(0, Math.round((now - from) / 1000));
@@ -154,7 +156,12 @@ export default function SupportDashboard() {
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col rounded-xl border border-zinc-800 bg-zinc-900">
-          <div className="border-b border-zinc-800 p-3 text-sm font-semibold text-zinc-300">Ongoing conversations</div>
+          <div className="border-b border-zinc-800 p-3">
+            <p className="text-sm font-semibold text-zinc-300">Ongoing conversations</p>
+            <p className="text-[11px] text-zinc-500">
+              Live sessions only — a conversation disappears as soon as the customer signs out or closes the page.
+            </p>
+          </div>
           <div className="flex-1 space-y-2 overflow-y-auto p-2">
             {[...(snapshot?.liveCalls ?? []), ...(snapshot?.activeChats ?? [])].map((c) => (
               <ConversationRow key={c.id} conversation={c} now={now} />
@@ -353,6 +360,7 @@ function ConversationRow({ conversation, now }: { conversation: Conversation; no
           <MessageSquare className="h-3.5 w-3.5 text-blue-400" />
         )}
         <span className="truncate font-medium">{name}</span>
+        <PresenceDot conversation={conversation} now={now} />
         <span className="ml-auto text-[11px] text-zinc-500">{formatAge(conversation.createdAt, now)}</span>
       </div>
       <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-400">
@@ -366,11 +374,29 @@ function ConversationRow({ conversation, now }: { conversation: Conversation; no
           <span className="rounded bg-zinc-800 px-1.5 py-0.5">{conversation.context.orderIds.join(", ")}</span>
         )}
       </div>
-      <div className="mt-1 font-mono text-[10px] text-zinc-600">
-        {conversation.id}
-        {conversation.channel ? ` · ${conversation.channel}` : ""}
+      <div className="mt-1 flex items-center gap-2 font-mono text-[10px] text-zinc-600">
+        <span className="truncate">
+          {conversation.id}
+          {conversation.channel ? ` · ${conversation.channel}` : ""}
+        </span>
+        <span className="ml-auto shrink-0">seen {formatAge(conversation.lastSeenAt ?? conversation.lastActivityAt, now)} ago</span>
       </div>
     </div>
+  );
+}
+
+/**
+ * Green while the customer's browser is still sending heartbeats, amber once they
+ * go quiet — the sweep closes the conversation a few seconds later.
+ */
+function PresenceDot({ conversation, now }: { conversation: Conversation; now: number }) {
+  const lastSeen = conversation.lastSeenAt ?? conversation.lastActivityAt;
+  const quiet = now - lastSeen > STALE_AFTER_MS / 2;
+  return (
+    <span
+      title={quiet ? "No heartbeat — the customer may have left" : "Customer is on the page"}
+      className={`h-2 w-2 shrink-0 rounded-full ${quiet ? "bg-amber-400" : "animate-pulse bg-emerald-400"}`}
+    />
   );
 }
 

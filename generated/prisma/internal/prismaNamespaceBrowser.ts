@@ -53,6 +53,11 @@ export const AnyNull = runtime.AnyNull
 export const ModelName = {
   Client: 'Client',
   Agent: 'Agent',
+  Product: 'Product',
+  CartItem: 'CartItem',
+  Order: 'Order',
+  OrderItem: 'OrderItem',
+  OrderCounter: 'OrderCounter',
   StoreState: 'StoreState'
 } as const
 
@@ -79,6 +84,7 @@ export const ClientScalarFieldEnum = {
   phone: 'phone',
   tier: 'tier',
   city: 'city',
+  address: 'address',
   preferredLanguage: 'preferredLanguage',
   createdAt: 'createdAt',
   updatedAt: 'updatedAt'
@@ -97,6 +103,75 @@ export const AgentScalarFieldEnum = {
 } as const
 
 export type AgentScalarFieldEnum = (typeof AgentScalarFieldEnum)[keyof typeof AgentScalarFieldEnum]
+
+
+export const ProductScalarFieldEnum = {
+  id: 'id',
+  sku: 'sku',
+  title: 'title',
+  category: 'category',
+  description: 'description',
+  priceInr: 'priceInr',
+  emoji: 'emoji',
+  rating: 'rating',
+  active: 'active',
+  createdAt: 'createdAt'
+} as const
+
+export type ProductScalarFieldEnum = (typeof ProductScalarFieldEnum)[keyof typeof ProductScalarFieldEnum]
+
+
+export const CartItemScalarFieldEnum = {
+  id: 'id',
+  clientId: 'clientId',
+  productId: 'productId',
+  qty: 'qty',
+  addedAt: 'addedAt'
+} as const
+
+export type CartItemScalarFieldEnum = (typeof CartItemScalarFieldEnum)[keyof typeof CartItemScalarFieldEnum]
+
+
+export const OrderScalarFieldEnum = {
+  id: 'id',
+  code: 'code',
+  clientId: 'clientId',
+  status: 'status',
+  totalInr: 'totalInr',
+  shippingAddress: 'shippingAddress',
+  paymentMethod: 'paymentMethod',
+  placedAt: 'placedAt',
+  statusUpdatedAt: 'statusUpdatedAt',
+  expectedDelivery: 'expectedDelivery',
+  deliveredAt: 'deliveredAt',
+  cancelledAt: 'cancelledAt',
+  cancellationReason: 'cancellationReason',
+  history: 'history',
+  updatedAt: 'updatedAt'
+} as const
+
+export type OrderScalarFieldEnum = (typeof OrderScalarFieldEnum)[keyof typeof OrderScalarFieldEnum]
+
+
+export const OrderItemScalarFieldEnum = {
+  id: 'id',
+  orderId: 'orderId',
+  productId: 'productId',
+  sku: 'sku',
+  title: 'title',
+  qty: 'qty',
+  priceInr: 'priceInr'
+} as const
+
+export type OrderItemScalarFieldEnum = (typeof OrderItemScalarFieldEnum)[keyof typeof OrderItemScalarFieldEnum]
+
+
+export const OrderCounterScalarFieldEnum = {
+  id: 'id',
+  value: 'value'
+} as const
+
+export type OrderCounterScalarFieldEnum = (typeof OrderCounterScalarFieldEnum)[keyof typeof OrderCounterScalarFieldEnum]
 
 
 export const StoreStateScalarFieldEnum = {
@@ -139,4 +214,12 @@ export const JsonNullValueFilter = {
 } as const
 
 export type JsonNullValueFilter = (typeof JsonNullValueFilter)[keyof typeof JsonNullValueFilter]
+
+
+export const NullsOrder = {
+  first: 'first',
+  last: 'last'
+} as const
+
+export type NullsOrder = (typeof NullsOrder)[keyof typeof NullsOrder]
 

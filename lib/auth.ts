@@ -15,6 +15,7 @@ export interface ClientInput {
   phone: string;
   tier?: string;
   city?: string;
+  address?: string;
   preferredLanguage?: string;
 }
 
@@ -31,6 +32,7 @@ export interface ClientRecord {
   phone: string;
   tier: string;
   city: string;
+  address: string;
   preferredLanguage: string;
 }
 
@@ -51,6 +53,7 @@ export async function upsertClient(input: ClientInput): Promise<ClientRecord> {
       phone: input.phone,
       tier,
       city: input.city?.trim() ?? '',
+      address: input.address?.trim() ?? '',
       preferredLanguage: input.preferredLanguage ?? 'english',
     },
     update: {
@@ -58,6 +61,8 @@ export async function upsertClient(input: ClientInput): Promise<ClientRecord> {
       email: input.email,
       tier,
       city: input.city?.trim() ?? '',
+      // An address the client saved at checkout must survive a re-login.
+      ...(input.address?.trim() ? { address: input.address.trim() } : {}),
       preferredLanguage: input.preferredLanguage ?? 'english',
     },
   });
@@ -102,6 +107,7 @@ function toClientRecord(row: {
   phone: string;
   tier: string;
   city: string;
+  address: string;
   preferredLanguage: string;
 }): ClientRecord {
   return {
@@ -111,6 +117,7 @@ function toClientRecord(row: {
     phone: row.phone,
     tier: row.tier,
     city: row.city,
+    address: row.address,
     preferredLanguage: row.preferredLanguage,
   };
 }
@@ -120,9 +127,10 @@ function toClientRecord(row: {
 // ---------------------------------------------------------------------------
 
 /**
- * The same three customers the demo shop (`lib/shop/data.ts`) ships with, plus a
- * demo agent, so /login's "use a demo account" buttons and the dashboard always
- * have matching records in the database. Seeded once per process, never throws.
+ * Ready-made identities so /login's "use a demo account" buttons always resolve
+ * to real database rows. Products, carts and orders are *not* seeded — every
+ * client starts with an empty cart and shops from the shared catalogue.
+ * Seeded once per process, never throws.
  */
 const DEMO_CLIENTS: ClientInput[] = [
   {
@@ -131,6 +139,7 @@ const DEMO_CLIENTS: ClientInput[] = [
     phone: '9876543210',
     tier: 'prime',
     city: 'Delhi',
+    address: 'B-42, Lajpat Nagar II, New Delhi 110024',
     preferredLanguage: 'hinglish',
   },
   {
@@ -139,6 +148,7 @@ const DEMO_CLIENTS: ClientInput[] = [
     phone: '9123456780',
     tier: 'standard',
     city: 'Bengaluru',
+    address: '12, 4th Cross, Indiranagar, Bengaluru 560038',
     preferredLanguage: 'english',
   },
   {
@@ -147,6 +157,7 @@ const DEMO_CLIENTS: ClientInput[] = [
     phone: '9988776655',
     tier: 'standard',
     city: 'Lucknow',
+    address: '221, Gomti Nagar, Lucknow 226010',
     preferredLanguage: 'hindi',
   },
 ];

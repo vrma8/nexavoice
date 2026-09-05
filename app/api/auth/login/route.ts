@@ -11,6 +11,7 @@ interface LoginBody {
   phone?: string;
   tier?: string;
   city?: string;
+  address?: string;
   preferredLanguage?: string;
   title?: string;
 }
@@ -70,6 +71,7 @@ export async function POST(request: NextRequest) {
         phone,
         tier: body.tier,
         city: body.city,
+        address: body.address,
         preferredLanguage: body.preferredLanguage,
       });
       return NextResponse.json({ ok: true, client });

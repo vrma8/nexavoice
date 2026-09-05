@@ -12,14 +12,23 @@ type Role = "client" | "agent";
 interface LoginResult {
   ok?: boolean;
   error?: string;
-  client?: { id: string; name: string; email: string; phone: string; tier: string; city: string; preferredLanguage: string };
+  client?: {
+    id: string;
+    name: string;
+    email: string;
+    phone: string;
+    tier: string;
+    city: string;
+    address: string;
+    preferredLanguage: string;
+  };
   agent?: { id: string; name: string; email: string; title: string };
 }
 
 const DEMO_CLIENTS = [
-  { name: "Rahul Sharma", email: "rahul.sharma@example.com", phone: "9876543210", city: "Delhi", preferredLanguage: "hinglish", tier: "prime" },
-  { name: "Priya Nair", email: "priya.nair@example.com", phone: "9123456780", city: "Bengaluru", preferredLanguage: "english", tier: "standard" },
-  { name: "Amit Verma", email: "amit.verma@example.com", phone: "9988776655", city: "Lucknow", preferredLanguage: "hindi", tier: "standard" },
+  { name: "Rahul Sharma", email: "rahul.sharma@example.com", phone: "9876543210", city: "Delhi", address: "B-42, Lajpat Nagar II, New Delhi 110024", preferredLanguage: "hinglish", tier: "prime" },
+  { name: "Priya Nair", email: "priya.nair@example.com", phone: "9123456780", city: "Bengaluru", address: "12, 4th Cross, Indiranagar, Bengaluru 560038", preferredLanguage: "english", tier: "standard" },
+  { name: "Amit Verma", email: "amit.verma@example.com", phone: "9988776655", city: "Lucknow", address: "221, Gomti Nagar, Lucknow 226010", preferredLanguage: "hindi", tier: "standard" },
 ];
 
 const DEMO_AGENT = { name: "Kavya R.", email: "kavya.r@nexamart.example", title: "Senior Support Agent" };
@@ -34,6 +43,7 @@ export default function LoginForm() {
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [city, setCity] = useState("");
+  const [address, setAddress] = useState("");
   const [language, setLanguage] = useState("english");
   const [title, setTitle] = useState("");
   const [loading, setLoading] = useState(false);
@@ -50,6 +60,7 @@ export default function LoginForm() {
     setEmail(demo.email);
     setPhone(demo.phone);
     setCity(demo.city);
+    setAddress(demo.address);
     setLanguage(demo.preferredLanguage);
     setError(null);
   };
@@ -71,7 +82,7 @@ export default function LoginForm() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
           role === "client"
-            ? { role, name, email, phone, city, preferredLanguage: language }
+            ? { role, name, email, phone, city, address, preferredLanguage: language }
             : { role, name, email, title },
         ),
       });
@@ -181,6 +192,15 @@ export default function LoginForm() {
                   </select>
                 </Field>
               </div>
+              <Field label="Delivery address (optional)">
+                <input
+                  className={inputClass}
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value)}
+                  placeholder="House/flat, area, city, PIN code"
+                  autoComplete="street-address"
+                />
+              </Field>
               <DemoRow
                 label="Demo accounts:"
                 items={DEMO_CLIENTS.map((c) => c.name.split(" ")[0])}
@@ -227,7 +247,7 @@ export default function LoginForm() {
           {error && <p className="text-sm text-red-400">{error}</p>}
 
           <Button type="submit" className="w-full py-2.5" disabled={loading}>
-            {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : role === "client" ? "Continue to support" : "Open agent dashboard"}
+            {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : role === "client" ? "Continue to shopping" : "Open agent dashboard"}
           </Button>
         </form>
 

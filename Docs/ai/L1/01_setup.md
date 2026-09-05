@@ -8,6 +8,7 @@
 - `pnpm` package manager.
 - Agora CLI (`agora`) for project binding and environment bootstrap.
 - Agora project with Conversational AI enabled.
+- PostgreSQL (`DATABASE_URL`). `pnpm dev:db` provides one locally with nothing to install (PGlite over TCP on `127.0.0.1:5433`).
 
 Install the Agora CLI from the root `README.md` instructions. On Windows, use the PowerShell installer first; if it fails, run the shell installer from Git Bash and then verify with `agora --help`.
 
@@ -24,14 +25,19 @@ agora login
 agora project use <your-project>
 agora project env write .env.local
 agora project doctor --deep
+
+# Database (required for the shop and for shared conversation state)
+pnpm dev:db        # optional local PostgreSQL; leave running in its own terminal
+# DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5433/postgres → .env.local
+pnpm db:push       # create the tables (pnpm db:reset drops and recreates them)
+pnpm seed          # upsert the fixed 50-product catalogue
 ```
 
 ## Required Environment Variables
 
 - `NEXT_PUBLIC_AGORA_APP_ID`: Agora project App ID. Alias: `AGORA_APP_ID` (server-side only; the browser then gets the App ID at runtime from `/api/generate-agora-token`).
 - `NEXT_AGORA_APP_CERTIFICATE`: Agora App Certificate (server only). Alias: `AGORA_APP_CERTIFICATE`.
-
-The base `.env.local` contract contains only these Agora credentials; chat, dashboard and the voice agent (without backend tools) work with them alone.
+- `DATABASE_URL`: PostgreSQL. Holds clients, the 50-product catalogue, carts, orders and the mirrored support store. Without it `/api/shop/*` answers 503 and conversation state is per-instance.
 
 Names that look related but are **never read**: `AGORA_PROJECT_ID`, `AGORA_PROJECT_NAME`, `AGORA_ENABLED_FEATURES`, `AGORA_FEATURE_RTC/RTM/CONVOAI` (Agora CLI / template metadata). Enabling Conversational AI is a console action (`agora project doctor --deep` verifies), not an env var. `/api/health` (`agora.credentialSources`) lists any of these that are set.
 
@@ -46,6 +52,8 @@ Names that look related but are **never read**: `AGORA_PROJECT_ID`, `AGORA_PROJE
   map directly; the CLI's `global` routes through the US gateway). Read only when
   `AGORA_AREA` is unset.
 - `AGENT_LANGUAGE` (`en-IN` default), `AGENT_STT_LANGUAGE` (`multi`), `AGENT_TTS_VOICE_ID`.
+- `ORDER_PLACED_SECONDS` (120) + `ORDER_TRANSIT_SECONDS` (180): how fast an order walks `placed → on the way → delivered`. The *placed* window is also the window in which the customer or the agent may change its items.
+- `NEXAVOICE_STORE` (`memory` | `postgres`, auto-detected) and `NEXAVOICE_STATE_KEY` (mirror row id).
 - `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` (+ `NEXT_LLM_MODEL`): BYOK LLM for the chat agent and the custom-LLM voice path. Without them chat falls back to the rule-based agent.
 
 See `env.local.example` for the annotated template.
@@ -53,6 +61,9 @@ See `env.local.example` for the annotated template.
 ## Primary Commands
 
 ```bash
+pnpm dev:db
+pnpm db:push
+pnpm seed
 pnpm run dev
 pnpm run lint
 pnpm run typecheck
@@ -67,7 +78,7 @@ Safe without live session:
 
 - `pnpm run lint`
 - `pnpm run typecheck`
-- `pnpm run verify:api`
+- `pnpm run verify:api` (its shop / tool / escalation checks skip themselves when `DATABASE_URL` is unreachable — start `pnpm dev:db` to run them)
 - `pnpm run build`
 
 Requires env/project binding:
@@ -78,7 +89,7 @@ Requires env/project binding:
 ## Local Run Notes
 
 - App + API routes run at `http://localhost:3000`.
-- Session starts from `VoiceAgentCall` (`Start Call` on `/client/voice`) and bootstraps token + RTM + invite flow. The `components/LandingPage.tsx` / `QuickstartPreCallCard.tsx` pair from the upstream quickstart was removed: it was an unused second bootstrap path that never registered a conversation, so escalation and transcript mirroring could not work through it.
+- Session starts from `VoiceAgentCall` (**Call support** in the agent dock on `/client`) and bootstraps token + RTM + invite flow. The `components/LandingPage.tsx` / `QuickstartPreCallCard.tsx` pair from the upstream quickstart was removed: it was an unused second bootstrap path that never registered a conversation, so escalation and transcript mirroring could not work through it.
 - If transcript or agent join fails, first run `agora project doctor --deep`.
 
 ## CI Expectations
@@ -95,10 +106,11 @@ Requires env/project binding:
 | Transcript missing | RTM token capability missing | Token route implementation | Ensure `buildTokenWithRtm` remains unchanged |
 | `verify` fails at doctor | Project not bound | `agora project use` output | Re-bind project and rewrite `.env.local` |
 | Mic publishes but no agent response | Agent start failed | UI warning (`agentJoinError`) | Inspect `/api/invite-agent` response |
-| Chat "Conversation not found", or the agent re-asks for the phone number every turn | Each Vercel function got its own in-memory store | `GET /api/health` → `store.backend` is `memory` | Create a Vercel Blob store (sets `BLOB_READ_WRITE_TOKEN`), or `NEXAVOICE_STORE=file` for one container |
+| Chat "Conversation not found", or the agent forgets the customer every turn | Each Vercel function got its own in-memory store | `GET /api/health` → `store.backend` is `memory` | Set `DATABASE_URL` (Vercel → Storage → Postgres) and run `pnpm db:push` |
+| Shopping page says the shop is unavailable (503) | No `DATABASE_URL`, or the schema/catalogue was never created | `GET /api/shop/products` | `pnpm db:push && pnpm seed` |
 | Voice banner stays on "Connecting…" / call never joins with no error | App ID absent from the client bundle (`NEXT_PUBLIC_*` is inlined at build time, so a variable added after the last deploy never reaches it) or the join error was swallowed | `GET /api/health` → `agora.publicAppIdInlined`; the banner now renders the `useJoin` error | Target `NEXT_PUBLIC_AGORA_APP_ID` at Production/Preview and **redeploy**; the `appId` served by `/api/generate-agora-token` also carries it |
 | Agent answers without looking up orders | Engine could not reach the tool URL | `GET /api/health` → `agent.tools` (`enabled`, `baseUrl`, `secretSource`) | Expose the app over https (Vercel URL / ngrok) and set `AGENT_TOOLS_BASE_URL` |
-| Dashboard is empty on a fresh deployment | Nothing has chatted yet | `/api/health` → `seed.requested` is `false` | Set `NEXAVOICE_SEED=demo` (or `pnpm run seed` with the store token in `.env.local`) |
+| Dashboard is empty | Nothing is live — by design it shows ongoing conversations only | Shop in another tab and open the support dock | Nothing to fix; a conversation is swept 30s after the customer's last heartbeat |
 | Chat answers look canned, no free discussion | No LLM configured — the rule-based agent is active | `GET /api/health` → `agent.llm` is `agora-managed` | Set `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` (and `NEXT_LLM_MODEL`) |
 | `Agent invite failed: fetch failed` | Region mismatch with the Agora project | `AGORA_AREA`, `agora project doctor --deep` | Set `AGORA_AREA` to the project region (`US`/`EU`/`AP`/`CN`) |
 
@@ -124,14 +136,12 @@ Vercel:
   to the browser.
 - Do not rely on a **Development** target for a deployed app: that one feeds a local
   `vercel env pull` / `vercel dev`, not a Production deployment.
-- Create a Blob store (Project → Storage → Create Database → Blob) so conversation and
-  case state are shared between function instances; `BLOB_READ_WRITE_TOKEN` is injected
-  and `lib/support/persist.ts` picks it up automatically. Check that the injected variable
-  covers Production — a store created before that environment existed can end up
-  Preview-only, and state then silently stops being shared. Without a store the chat cannot
-  complete a second turn.
-- Set `NEXAVOICE_SEED=demo` if the deployment should come up with a populated dashboard
-  (see `05_workflows.md` → "Populate the Dashboard with Demo Data").
+- Create a PostgreSQL database (Project → Storage → Create Database → Postgres) so
+  `DATABASE_URL` is injected: it holds the shop (clients, products, carts, orders) and the
+  mirrored conversation/case state that lets a second chat turn find its conversation.
+  Check the variable covers Production, then run `pnpm db:push && pnpm seed` against it once.
+- Tune `ORDER_PLACED_SECONDS` / `ORDER_TRANSIT_SECONDS` if the demo should show a longer
+  (or shorter) editable window before an order ships.
 - Set `AGORA_AREA` when the project is not in the `US` area (`AP` covers India; `AGORA_REGION`
   with the CLI's `global` value routes through `US`), and
   `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` to replace the rule-based chat agent with the LLM one.

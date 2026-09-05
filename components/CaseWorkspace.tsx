@@ -123,6 +123,9 @@ export default function CaseWorkspace({ caseId }: { caseId: string }) {
   const conversation = detail?.conversation;
   const isVoice = supportCase?.mode === 'VOICE';
   const isOpen = supportCase && (supportCase.status === 'WAITING_FOR_HUMAN' || supportCase.status === 'HUMAN_HANDLING');
+  // The handoff carries the client row as it was at escalation time; fall back to
+  // the case's own snapshot so older cases still render.
+  const profile = supportCase?.handoff.customer_profile ?? supportCase?.customer ?? null;
 
   const handleAccept = async () => {
     window.localStorage.setItem(AGENT_NAME_KEY, agentName);
@@ -319,29 +322,80 @@ export default function CaseWorkspace({ caseId }: { caseId: string }) {
           <Bullets title="Information collected" items={supportCase.handoff.information_collected} />
           <Bullets title="Actions taken by AI" items={supportCase.handoff.actions_taken} />
           <Bullets title="Missing information" items={supportCase.handoff.missing_information} />
+          {(supportCase.handoff.transcript_excerpt?.length ?? 0) > 0 && (
+            <div className="mt-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">What was said before the handoff</p>
+              <ol className="mt-1 space-y-1 border-l border-zinc-800 pl-3 text-xs text-zinc-300">
+                {supportCase.handoff.transcript_excerpt!.map((line, i) => (
+                  <li key={i} className={line.startsWith('Customer:') ? 'text-zinc-100' : 'text-zinc-400'}>
+                    {line}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
         </div>
 
         <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-sm">
           <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Customer</h3>
-          {supportCase.customer ? (
+          {profile ? (
             <dl className="grid grid-cols-[90px_1fr] gap-y-1 text-zinc-300">
               <dt className="text-zinc-500">Name</dt>
-              <dd>{supportCase.customer.name}</dd>
+              <dd>{profile.name}</dd>
               <dt className="text-zinc-500">Phone</dt>
-              <dd>{supportCase.customer.phone}</dd>
+              <dd>{profile.phone}</dd>
               <dt className="text-zinc-500">Email</dt>
-              <dd>{supportCase.customer.email}</dd>
+              <dd className="truncate">{profile.email}</dd>
               <dt className="text-zinc-500">City</dt>
-              <dd>{supportCase.customer.city}</dd>
+              <dd>{profile.city}</dd>
+              {profile.address && (
+                <>
+                  <dt className="text-zinc-500">Address</dt>
+                  <dd>{profile.address}</dd>
+                </>
+              )}
               <dt className="text-zinc-500">Tier</dt>
-              <dd className="uppercase">{supportCase.customer.tier}</dd>
-              <dt className="text-zinc-500">Orders</dt>
+              <dd className="uppercase">{profile.tier}</dd>
+              <dt className="text-zinc-500">Language</dt>
+              <dd>{profile.preferredLanguage ?? supportCase.handoff.language}</dd>
+              <dt className="text-zinc-500">Discussed</dt>
               <dd>{conversation?.context.orderIds.join(', ') || '—'}</dd>
             </dl>
           ) : (
-            <p className="text-zinc-500">Not verified — ask for the registered mobile number.</p>
+            <p className="text-zinc-500">The customer was not signed in — ask for their registered mobile number.</p>
           )}
         </div>
+
+        {/* Their orders exactly as they stood when the AI handed the case over. */}
+        {(supportCase.handoff.orders?.length ?? 0) > 0 && (
+          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-sm">
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Their orders</h3>
+            <ul className="space-y-2">
+              {supportCase.handoff.orders!.map((order) => (
+                <li key={order.order_id} className="rounded-lg border border-zinc-800 bg-zinc-950 p-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs text-zinc-200">{order.order_id}</span>
+                    <span
+                      className={`rounded-full border px-1.5 py-0.5 text-[10px] ${
+                        order.editable
+                          ? 'border-amber-700 bg-amber-900/40 text-amber-200'
+                          : 'border-zinc-700 bg-zinc-800 text-zinc-300'
+                      }`}
+                    >
+                      {order.status_text}
+                    </span>
+                    <span className="ml-auto text-xs text-zinc-300">₹{order.total_inr.toLocaleString('en-IN')}</span>
+                  </div>
+                  <p className="mt-1 text-xs text-zinc-400">{order.items.join(', ')}</p>
+                  <p className="mt-0.5 text-[11px] text-zinc-500">
+                    {order.expected_delivery}
+                    {order.editable ? ' · items can still be changed' : ' · items are locked'}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </aside>
 
       {/* Right: transcript + reply */}

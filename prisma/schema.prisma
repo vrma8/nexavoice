@@ -1,13 +1,13 @@
 // NexaVoice — PostgreSQL data layer (Prisma ORM 7).
 //
-// This schema replaces the old "blob database file" durability layer:
-//   • `Client` / `Agent` hold the people who sign in on the /login page
-//     (customer and support agent details are maintained here).
-//   • `StoreState` is the durable mirror for the support store (conversations,
-//     messages, cases, events and the demo shop). It is a single JSONB document
-//     so the store's snapshot merge/prune rules in lib/support/snapshot.ts keep
-//     working unchanged; PostgreSQL is now the shared backend instead of
-//     Vercel Blob or a .data/ JSON file.
+//   • `Client` / `Agent` hold the people who sign in on the /login page.
+//   • `Product` is the fixed NexaMart catalogue (50 items, seeded once). Every
+//     client — new or returning — shops from these rows only.
+//   • `CartItem` is the per-client shopping cart, `Order` / `OrderItem` the
+//     placed orders whose status moves PLACED → ON_THE_WAY → DELIVERED.
+//   • `StoreState` is the durable mirror for the live support store
+//     (conversations, cases, events) — one JSONB document, see
+//     lib/support/snapshot.ts.
 //
 // Push the schema into a running Postgres with `pnpm db:push`, or use a proper
 // migration workflow with `pnpm db:migrate`. The connection string lives in
@@ -30,9 +30,13 @@ model Client {
   phone             String   @unique
   tier              String   @default("standard") // standard | prime
   city              String   @default("")
+  address           String   @default("")
   preferredLanguage String   @default("english") // hindi | english | hinglish
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
+
+  cart   CartItem[]
+  orders Order[]
 
   @@index([phone])
 }
@@ -49,7 +53,92 @@ model Agent {
   @@index([email])
 }
 
-/// Durable support-store document (one row). Replaces Vercel Blob / .data file.
+/// Fixed NexaMart catalogue — the only products a client can buy.
+model Product {
+  id          String   @id @default(cuid())
+  sku         String   @unique
+  title       String
+  category    String
+  description String   @default("")
+  priceInr    Int
+  emoji       String   @default("🛍️")
+  rating      Float    @default(4.2)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+
+  @@index([category])
+}
+
+/// One product line in a client's cart.
+model CartItem {
+  id        String   @id @default(cuid())
+  clientId  String
+  productId String
+  qty       Int      @default(1)
+  addedAt   DateTime @default(now())
+
+  client  Client  @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, productId])
+  @@index([clientId])
+}
+
+/// A placed order. `status` advances on a timer (see lib/shop/orders.ts):
+/// PLACED → ON_THE_WAY → DELIVERED. Items may only change while PLACED.
+model Order {
+  id               String   @id @default(cuid())
+  /// Human/agent facing order number, e.g. NM-10023.
+  code             String   @unique
+  clientId         String
+  status           String   @default("PLACED") // PLACED | ON_THE_WAY | DELIVERED | CANCELLED
+  totalInr         Int      @default(0)
+  shippingAddress  String
+  paymentMethod    String   @default("COD") // UPI | CARD | COD
+  placedAt         DateTime @default(now())
+  statusUpdatedAt  DateTime @default(now())
+  expectedDelivery DateTime
+  deliveredAt      DateTime?
+  cancelledAt      DateTime?
+  cancellationReason String?
+  /// [{ at: number, event: string }] — order timeline shown to client + agent.
+  history          Json     @default("[]")
+  updatedAt        DateTime @updatedAt
+
+  client Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  items  OrderItem[]
+
+  @@index([clientId])
+  @@index([status])
+}
+
+/// One product line inside a placed order (price captured at order time).
+model OrderItem {
+  id        String @id @default(cuid())
+  orderId   String
+  productId String
+  sku       String
+  title     String
+  qty       Int
+  priceInr  Int
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+
+  @@unique([orderId, productId])
+  @@index([orderId])
+}
+
+/// Sequence source for human-readable order numbers (NM-10001, NM-10002, …).
+model OrderCounter {
+  id    String @id
+  value Int    @default(10000)
+}
+
+/// Durable live-support document (one row): conversations, cases, events.
 model StoreState {
   id        String   @id
   rev       Int      @default(0)

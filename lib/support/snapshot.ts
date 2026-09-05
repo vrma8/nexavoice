@@ -26,16 +26,12 @@ const MAX_MESSAGES_PER_CONVERSATION = 200;
 const MAX_EVENTS = 500;
 
 /**
- * The demo shop rides along in the mirror: a cancellation the agent made has to still be
- * visible when the next turn — or the human dashboard — reads the order. Merging it is the
- * shop module's job (`mergeShopSnapshot`), because only the shop knows which records this
- * process actually wrote; the snapshot just carries the document.
+ * Products, carts and orders are *not* in here: they live in their own
+ * PostgreSQL tables (see lib/shop/service.ts). This document only carries the
+ * live support state — conversations, messages, cases and events.
  */
-import type { ShopSnapshot } from '../shop/data';
-
 export interface StoreSnapshot {
   version: number;
-  shop?: ShopSnapshot;
   savedAt: number;
   /** Bumped on every write; lets callers detect a concurrent writer. */
   rev: number;
@@ -77,7 +73,6 @@ export function parseSnapshot(raw: string | null): StoreSnapshot | null {
     savedAt: typeof candidate.savedAt === 'number' ? candidate.savedAt : 0,
     rev: typeof candidate.rev === 'number' ? candidate.rev : 0,
     conversations: candidate.conversations.filter(isConversation),
-    shop: isShopSnapshot(candidate.shop) ? candidate.shop : undefined,
     messages: normalizeMessages(candidate.messages, candidate.conversations),
     cases: Array.isArray(candidate.cases) ? candidate.cases.filter(isCase) : [],
     events: Array.isArray(candidate.events) ? candidate.events.filter(isEvent) : [],
@@ -109,12 +104,6 @@ function normalizeMessages(
     if (id && !out[id]) out[id] = [];
   }
   return out;
-}
-
-/** Deliberately shallow; `mergeShopSnapshot` skips anything malformed as it applies it. */
-function isShopSnapshot(value: unknown): value is ShopSnapshot {
-  const shop = value as ShopSnapshot | undefined;
-  return !!shop && Array.isArray(shop.orders) && Array.isArray(shop.customers);
 }
 
 function isConversation(value: unknown): value is Conversation {
@@ -175,9 +164,6 @@ export function mergeSnapshots(local: StoreSnapshot, remote: StoreSnapshot): Sto
     cases: [...cases.values()],
     events,
     caseCounter: Math.max(local.caseCounter, remote.caseCounter),
-    // Only so a rebuilt snapshot does not drop the field; the real merge happens in
-    // `applySnapshot`, against the shop module's own state.
-    shop: local.shop ?? remote.shop,
   };
 }
 

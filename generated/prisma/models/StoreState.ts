@@ -14,7 +14,7 @@ import type * as Prisma from "../internal/prismaNamespace"
 
 /**
  * Model StoreState
- * Durable support-store document (one row). Replaces Vercel Blob / .data file.
+ * Durable live-support document (one row): conversations, cases, events.
  */
 export type StoreStateModel = runtime.Types.Result.DefaultSelection<Prisma.$StoreStatePayload>
 
@@ -319,14 +319,6 @@ export type StoreStateMinOrderByAggregateInput = {
 
 export type StoreStateSumOrderByAggregateInput = {
   rev?: Prisma.SortOrder
-}
-
-export type IntFieldUpdateOperationsInput = {
-  set?: number
-  increment?: number
-  decrement?: number
-  multiply?: number
-  divide?: number
 }
 
 

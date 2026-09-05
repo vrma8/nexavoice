@@ -11,7 +11,6 @@
  * observed remote state; the default only writes when something actually changed.
  */
 import { maybeSeedAuthData } from '../auth';
-import { maybeSeedDemoData } from './seed';
 import { flushStore, hydrateStore } from './store';
 
 export interface WithStoreOptions {
@@ -26,10 +25,10 @@ export function withStore<T extends (...args: never[]) => Promise<unknown>>(
   const wrapped = async (...args: Parameters<T>): Promise<Awaited<ReturnType<T>>> => {
     if (options.hydrate !== false) {
       await hydrateStore();
-      // Opt-in demo data (`NEXAVOICE_SEED=demo`), after the hydration so it sees what
-      // other instances already wrote, and once per process. Never throws.
-      await maybeSeedDemoData();
       // Demo login identities (Client / Agent rows), once per process. Never throws.
+      //
+      // Conversations are deliberately never seeded: the agent dashboard must only
+      // ever show real, live conversations (see sweepStaleConversations in store.ts).
       await maybeSeedAuthData();
     }
     try {
