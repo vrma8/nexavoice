@@ -1,7 +1,7 @@
 // NexaVoice — PostgreSQL data layer (Prisma ORM 7).
 //
 //   • `Client` / `Agent` hold the people who sign in on the /login page.
-//   • `Product` is the fixed NexaMart catalogue (50 items, seeded once). Every
+//   • `Product` is the fixed NexaMart catalogue (60 items, seeded once). Every
 //     client — new or returning — shops from these rows only.
 //   • `CartItem` is the per-client shopping cart, `Order` / `OrderItem` the
 //     placed orders whose status moves PLACED → ON_THE_WAY → DELIVERED.
@@ -59,13 +59,15 @@ model Product {
   sku         String   @unique
   title       String
   category    String
-  description String   @default("")
-  priceInr    Int
-  emoji       String   @default("🛍️")
-  imageUrl    String?
-  rating      Float    @default(4.2)
-  active      Boolean  @default(true)
-  createdAt   DateTime @default(now())
+    description String   @default("")
+    priceInr    Int
+    emoji       String   @default("🛍️")
+    imageUrl    String?
+    rating      Float    @default(4.2)
+    /// Short safety note shown on the product card (e.g. medicines).
+    caution     String   @default("")
+    active      Boolean  @default(true)
+    createdAt   DateTime @default(now())
 
   cartItems  CartItem[]
   orderItems OrderItem[]

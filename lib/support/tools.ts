@@ -192,7 +192,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'search_products',
     description:
-      'Search the fixed NexaMart catalogue (50 products) by keywords, e.g. "bluetooth headphones", "kettle", "saree". ' +
+      'Search the fixed NexaMart catalogue (60 products) by keywords, e.g. "bluetooth headphones", "kettle", "saree", "paracetamol". ' +
       'Use it before adding anything to an order so you quote a real product and price.',
     parameters: {
       type: 'object',

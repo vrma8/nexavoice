@@ -57,7 +57,7 @@ types/               Shared TypeScript route/component contracts
 - `support/persist.ts`, `support/snapshot.ts`, `support/route-store.ts`: durable mirror — PostgreSQL (`StoreState` JSONB row) or memory, the versioned snapshot + merge rules, and the `withStore()` hydrate/flush bracket every support route uses.
 - `support/store.ts` also owns liveness: `heartbeatConversation()`, `STALE_AFTER_MS` (30s) and `sweepStaleConversations()`, called from `getDashboardSnapshot()`/`hydrateStore()` so the dashboard can only ever show live conversations.
 - `agora.ts`: browser-safe Agora constants (`AGENT_UID`, `HUMAN_UID`, fallback App ID) and `resolveAppId()`.
-- `shop/catalog-data.ts`: the fixed 50-product NexaMart catalogue (INR prices, categories, SKUs) — the single source every client shops from.
+- `shop/catalog-data.ts`: the fixed 60-product NexaMart catalogue (INR prices, categories, SKUs) — the single source every client shops from.
 - `shop/service.ts`: every shop read/write through Prisma — catalogue, cart, checkout, order edits — plus `syncOrderStatuses()`, the lazy `PLACED → ON_THE_WAY → DELIVERED` machine and the "editable only while placed" rule shared by the UI and the agent tools.
 - `shop/http.ts`: `x-nexavoice-client-id` parsing and `requireClient()` (503 without `DATABASE_URL`, 401 without a known client).
 - `db.ts`: the Prisma client singleton.
@@ -67,7 +67,7 @@ types/               Shared TypeScript route/component contracts
 ## Validation and Tooling
 
 - `scripts/verify-api-contracts.ts`: imports route handlers and validates contract behavior (tool schemas, guards, token/agent/health contracts, tool URL + secret derivation, snapshot round-trip, store bracketing).
-- `scripts/seed-catalog.ts`: `pnpm seed` — upserts the 50 products by SKU (idempotent; never touches clients, carts or orders).
+- `scripts/seed-catalog.ts`: `pnpm seed` — upserts the 60 products by SKU (idempotent; never touches clients, carts or orders).
 - `scripts/db-push.mjs`: `pnpm db:push` / `pnpm db:reset --force` — offline `prisma db push` using the WASM schema engine.
 - `scripts/dev-db.mjs`: `pnpm dev:db` — PGlite over TCP on `127.0.0.1:5433`, a real PostgreSQL with nothing to install.
 - `scripts/doctor.mjs`: local setup checks consumed by `pnpm run doctor`.

@@ -1,5 +1,5 @@
 /**
- * Writes the fixed 50-product NexaMart catalogue into PostgreSQL.
+ * Writes the fixed 60-product NexaMart catalogue into PostgreSQL.
  *
  * The app also seeds it lazily on the first catalogue read (`ensureCatalog()`),
  * so this script is only needed when you want the products in place before

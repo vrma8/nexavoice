@@ -1093,6 +1093,7 @@ export const ProductScalarFieldEnum = {
   emoji: 'emoji',
   imageUrl: 'imageUrl',
   rating: 'rating',
+  caution: 'caution',
   active: 'active',
   createdAt: 'createdAt'
 } as const

@@ -95,7 +95,7 @@ Timestamp units: every timestamp an API route returns (including `expiresAt`) is
 
   Public and safe to open in a browser: booleans, masked ids and non-secret config only — never a certificate, token, or secret value.
 - Shop (all require the signed-in client via the `x-nexavoice-client-id` header, or `?clientId=`; 503 when `DATABASE_URL` is unset, 401 when the client is unknown):
-  - `GET /api/shop/products` → `{ products }` — the fixed 50-product catalogue.
+  - `GET /api/shop/products` → `{ products }` — the fixed 60-product catalogue.
   - `GET|POST|PATCH|DELETE /api/shop/cart` → `{ cart }` — read, add (`{ productId, qty }`), set quantity, clear.
   - `GET /api/shop/orders` → `{ orders }`; `POST /api/shop/orders` `{ shippingAddress, paymentMethod }` → `{ order, orders, cart }` (also saves the address on the client).
   - `GET /api/shop/orders/:code` → `{ order }`; `PATCH /api/shop/orders/:code` `{ action: 'add_item'|'remove_item'|'set_qty'|'address'|'cancel', … }` → `{ order, orders }`, rejected with `ORDER_LOCKED`/`NOT_CANCELLABLE` once the order is no longer `PLACED`.

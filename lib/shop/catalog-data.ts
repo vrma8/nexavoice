@@ -16,6 +16,8 @@ export interface SeedProduct {
   emoji: string;
   imageUrl?: string;
   rating: number;
+  /** Short safety / usage note shown on the product card. Usually blank. */
+  caution?: string;
 }
 
 export const CATEGORIES = [
@@ -27,6 +29,7 @@ export const CATEGORIES = [
   'Sports',
   'Books & Stationery',
   'Toys & Baby',
+  'Medicine',
 ] as const;
 
 export const CATALOG: SeedProduct[] = [
@@ -95,9 +98,21 @@ export const CATALOG: SeedProduct[] = [
   { sku: 'NM-TB-001', title: 'Building Blocks Set (120 pcs)', category: 'Toys & Baby', description: 'Non-toxic creative blocks for ages 3+.', priceInr: 899, emoji: '🧱', imageUrl: '/products/NM-TB-001.jpg', rating: 4.5 },
   { sku: 'NM-TB-002', title: 'Remote Control Car', category: 'Toys & Baby', description: 'Rechargeable 2.4GHz stunt car.', priceInr: 1299, emoji: '🚗', imageUrl: '/products/NM-TB-002.jpg', rating: 4.1 },
   { sku: 'NM-TB-003', title: 'Baby Diapers Pack (60)', category: 'Toys & Baby', description: 'Size M pants, 12 hour absorption.', priceInr: 1099, emoji: '🍼', imageUrl: '/products/NM-TB-003.jpg', rating: 4.3 },
+
+  // --- Medicine (10) ---------------------------------------------------------
+  { sku: 'NM-MD-001', title: 'Paracetamol 500mg (10 tabs)', category: 'Medicine', description: 'Relieves fever and mild to moderate pain. Take as directed; do not exceed the dose.', priceInr: 49, emoji: '💊', imageUrl: '/products/NM-MD-001.jpg', rating: 4.5, caution: 'Caution: not to be used by children without medical advice. Follow the dose on the pack; do not exceed 4 tablets in 24 hours.' },
+  { sku: 'NM-MD-002', title: 'Ibuprofen 400mg (10 tabs)', category: 'Medicine', description: 'For pain and inflammation. Take with food; not for children under 12.', priceInr: 65, emoji: '💊', imageUrl: '/products/NM-MD-002.jpg', rating: 4.3, caution: 'Caution: take with food. Avoid if you have stomach ulcers or are pregnant. Not for children under 12.' },
+  { sku: 'NM-MD-003', title: 'Cough Syrup 100ml', category: 'Medicine', description: 'Soothing relief for dry and wet cough. Use the measuring cup; avoid drowsiness.', priceInr: 120, emoji: '🧴', imageUrl: '/products/NM-MD-003.jpg', rating: 4.2, caution: 'Caution: may cause drowsiness; avoid driving. Use the measuring cup. Consult a doctor before giving to children.' },
+  { sku: 'NM-MD-004', title: 'Antacid Tablets (Digene-like, 15)', category: 'Medicine', description: 'Quick relief from acidity, heartburn and gas. Chew before swallowing.', priceInr: 75, emoji: '🫙', imageUrl: '/products/NM-MD-004.jpg', rating: 4.4, caution: 'Caution: for occasional acidity only. Do not use for more than 2 weeks without a doctor. Keep out of reach of children.' },
+  { sku: 'NM-MD-005', title: 'Multivitamin Capsules (30)', category: 'Medicine', description: 'Daily essential vitamins and minerals for energy and immunity. One a day after a meal.', priceInr: 199, emoji: '💊', imageUrl: '/products/NM-MD-005.jpg', rating: 4.1, caution: 'Caution: take one after a meal. Do not exceed the daily dose; consult a doctor if you are pregnant or on other supplements.' },
+  { sku: 'NM-MD-006', title: 'Cetirizine 10mg (10 tabs)', category: 'Medicine', description: 'Allergy relief for sneezing, itching and runny nose. May cause mild drowsiness.', priceInr: 55, emoji: '💊', imageUrl: '/products/NM-MD-006.jpg', rating: 4.3, caution: 'Caution: may cause drowsiness; avoid alcohol and driving. Not for children under 6 without medical advice.' },
+  { sku: 'NM-MD-007', title: 'ORS Rehydration Salts (10 sachets)', category: 'Medicine', description: 'Electrolyte mix to prevent dehydration from fever, heat or loose motions. Dissolve in 1L water.', priceInr: 90, emoji: '🥤', imageUrl: '/products/NM-MD-007.jpg', rating: 4.6, caution: 'Caution: dissolve one sachet in the stated amount of clean water only. Do not add sugar. Seek help for persistent symptoms.' },
+  { sku: 'NM-MD-008', title: 'Antiseptic Liquid 550ml', category: 'Medicine', description: 'First-aid antiseptic for cuts, wounds and insect bites. Dilute with water; for external use only.', priceInr: 165, emoji: '🧴', imageUrl: '/products/NM-MD-008.jpg', rating: 4.5, caution: 'Caution: external use only. Do not apply undiluted to broken skin; avoid contact with eyes. Keep away from children.' },
+  { sku: 'NM-MD-009', title: 'Hand Sanitizer 100ml', category: 'Medicine', description: 'Kills 99.9% germs without water. Keep away from eyes; for external use only.', priceInr: 45, emoji: '🧼', imageUrl: '/products/NM-MD-009.jpg', rating: 4.2, caution: 'Caution: flammable — keep away from fire. External use only; avoid contact with eyes. Do not ingest.' },
+  { sku: 'NM-MD-010', title: 'Digital Thermometer (Oral/Forehead)', category: 'Medicine', description: 'Fast and accurate temperature reading for the whole family. Clean before and after use.', priceInr: 249, emoji: '🌡️', imageUrl: '/products/NM-MD-010.jpg', rating: 4.4, caution: 'Caution: clean the tip before and after each use. Read the manual for proper placement. Avoid dropping or exposing to heat.' },
 ];
 
-if (CATALOG.length !== 50) {
-  // Guard: the shopping page and the docs both promise exactly 50 products.
-  throw new Error(`Catalogue must contain 50 products, found ${CATALOG.length}`);
+if (CATALOG.length !== 60) {
+  // Guard: the shopping page and the docs both promise exactly 60 products.
+  throw new Error(`Catalogue must contain 60 products, found ${CATALOG.length}`);
 }

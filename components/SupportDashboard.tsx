@@ -135,9 +135,9 @@ export default function SupportDashboard() {
   const openCase = (c: SupportCase) => router.push(`/support-agent/cases/${c.id}`);
 
   return (
-    <div className="flex h-[calc(100vh-80px)] gap-4 text-zinc-100">
+    <div className="flex flex-col gap-4 text-zinc-100 lg:h-[calc(100vh-90px)] lg:flex-row">
       {/* Left column: live activity */}
-      <div className="flex w-[30%] min-w-[300px] flex-col gap-4">
+      <div className="flex w-full flex-col gap-4 lg:w-[30%] lg:min-w-[300px]">
         <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="flex items-center gap-2 font-semibold">
@@ -177,7 +177,7 @@ export default function SupportDashboard() {
           </div>
         </div>
 
-        <div className="max-h-[30%] rounded-xl border border-zinc-800 bg-zinc-900">
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900 lg:max-h-[30%]">
           <div className="border-b border-zinc-800 p-3 text-sm font-semibold text-zinc-300">Event feed</div>
           <ul className="max-h-40 space-y-1 overflow-y-auto p-2 text-[11px] text-zinc-400">
             {[...(snapshot?.recentEvents ?? [])].reverse().slice(0, 30).map((e) => (
@@ -189,7 +189,7 @@ export default function SupportDashboard() {
       </div>
 
       {/* Middle column: queue */}
-      <div className="flex w-[30%] min-w-[280px] flex-col rounded-xl border border-zinc-800 bg-zinc-900">
+      <div className="flex w-full flex-col rounded-xl border border-zinc-800 bg-zinc-900 lg:w-[30%] lg:min-w-[280px]">
         <div className="flex items-center justify-between border-b border-zinc-800 p-3">
           <h2 className="font-semibold text-zinc-200">Escalation queue</h2>
           <Button variant="ghost" size="sm" className="h-7 px-2 text-zinc-400" onClick={() => void refresh()} aria-label="Refresh">
@@ -220,7 +220,7 @@ export default function SupportDashboard() {
       </div>
 
       {/* Right column: case detail */}
-      <div className="flex min-w-0 flex-1 flex-col rounded-xl border border-zinc-800 bg-zinc-950">
+      <div className="flex min-h-[24rem] min-w-0 flex-1 flex-col rounded-xl border border-zinc-800 bg-zinc-950 lg:min-h-0">
         {selectedCase ? (
           <>
             <div className="flex items-start justify-between border-b border-zinc-800 p-4">
