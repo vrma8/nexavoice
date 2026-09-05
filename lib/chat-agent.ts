@@ -8,12 +8,14 @@
  *  - With `NEXT_LLM_API_KEY` + `NEXT_LLM_URL` set → an OpenAI-compatible LLM
  *    runs with the system prompt and tools of `lib/support/tools.ts`.
  *  - Without an LLM key → the deterministic agent below covers the demo flows
- *    (orders, add/remove items on a PLACED order, cancel, address, escalation)
- *    through the *same* `executeTool()` layer, so the guardrails are identical.
+ *    (cart add/remove/status, orders, add/remove items on a PLACED order,
+ *    cancel, address, language preference, escalation) through the *same*
+ *    `executeTool()` layer, so the guardrails are identical.
  */
 import { generateText, stepCountIs, type ModelMessage } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
-import { buildSystemPrompt } from './agent-prompt';
+import { buildSystemPrompt, normalizeLanguageName } from './agent-prompt';
+import { spokenNumbersToDigits } from './numbers';
 import { buildConversationTools } from './chat-completions';
 import { getConversation, listMessages, updateConversation } from './support/store';
 import { executeTool } from './support/tools';
@@ -38,7 +40,29 @@ export async function runChatTurn(conversationId: string): Promise<ChatTurnResul
       console.error('[chat-agent] LLM turn failed, using rule-based fallback:', error);
     }
   }
-  return { text: await runRuleBasedTurn(conversation), degraded: true };
+  const text = await runRuleBasedTurn(conversation);
+  return { text: withLanguageConfirmation(conversation.id, text), degraded: true };
+}
+
+/**
+ * First rule-based turn only: confirm — in the language just used — that this is
+ * the language the customer wants. The greeting already asked; this repeats the
+ * confirmation once in the conversation itself and marks it settled. An explicit
+ * language request ("hindi me baat karo") at any point switches and saves the
+ * preference through `set_preferred_language` (see the rule-based turn below).
+ */
+function withLanguageConfirmation(conversationId: string, reply: string): string {
+  const conversation = getConversation(conversationId);
+  if (!conversation || conversation.state !== 'AI_HANDLING') return reply;
+  if (conversation.context.languageConfirmed || conversation.caseId) return reply;
+  if (listMessages(conversationId).length > 2) return reply; // not the first turn
+  const lang = toLang(conversation.context.language) ?? 'hinglish';
+  updateConversation(conversationId, { context: { languageConfirmed: true } });
+  return `${reply}\n\n${pick(lang, {
+    en: "(I'll continue in English — tell me if you'd prefer Hindi or Hinglish.)",
+    hi: '(मैं हिंदी में बात कर रही हूँ — अगर आप English या Hinglish पसंद करेंगे तो बता दीजिए।)',
+    hinglish: '(Main Hinglish mein baat kar rahi hoon — Hindi ya English prefer karein to bata dijiye.)',
+  })}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -57,7 +81,13 @@ async function runLlmTurn(conversation: Conversation, apiKey: string, url: strin
     );
   const { text } = await generateText({
     model: openai(modelId),
-    system: buildSystemPrompt({ mode: 'chat', customerName: conversation.context.customer?.name }),
+    system: buildSystemPrompt({
+      mode: 'chat',
+      customerName: conversation.context.customer?.name,
+      preferredLanguage: normalizeLanguageName(
+        conversation.context.customer?.preferredLanguage ?? conversation.context.language,
+      ),
+    }),
     messages: history,
     tools: buildConversationTools(conversation.id),
     stopWhen: stepCountIs(6),
@@ -93,6 +123,24 @@ function detectLanguage(text: string, fallback?: string): Lang {
   return 'en';
 }
 
+// An explicit language request: a language NAME plus a switch-ish word ("hindi
+// me baat karo", "speak in english", "switch to hinglish", "हिंदी में बात करें"),
+// or the bare language name as an answer to the greeting's preference question.
+const LANGUAGE_NAME_RE = /(hinglish|हिंग्लिश|hindi|english|हिंदी|हिन्दी|अंग्रेजी|अंग्रेज़ी|इंग्लिश)/gi;
+const LANGUAGE_SWITCH_RE =
+  /\b(baat|bol|speak|talk|reply|answer|jawab|switch|change|prefer|language|bhasha|karo|karein|kijiye|chahiye|want|please|haan|ha|ji|yes|ok|okay|theek|thik)\b|में\b|\bme\b|\bmein\b|भाषा/i;
+const BARE_LANGUAGE_RE =
+  /^\s*(?:please\s+)?(?:hinglish|hindi|english|हिंग्लिश|हिंदी|हिन्दी|अंग्रेजी|अंग्रेज़ी|इंग्लिश)(?:\s+please)?\s*[.!]*\s*$/i;
+
+/** The language the customer explicitly asked for, or null. Last name wins ("english se hindi" → hindi). */
+function detectLanguageRequest(text: string): Lang | null {
+  const matches = [...text.matchAll(LANGUAGE_NAME_RE)];
+  if (matches.length === 0) return null;
+  if (!BARE_LANGUAGE_RE.test(text) && !LANGUAGE_SWITCH_RE.test(text)) return null;
+  const named = normalizeLanguageName(matches[matches.length - 1][0]);
+  return named === 'hindi' ? 'hi' : named === 'english' ? 'en' : named === 'hinglish' ? 'hinglish' : null;
+}
+
 function pick(lang: Lang, copy: Copy): string {
   return copy[lang];
 }
@@ -100,15 +148,19 @@ function pick(lang: Lang, copy: Copy): string {
 const RE = {
   human:
     /\b(talk|speak|connect|transfer|need|want)\s+(me\s+)?(to|with)?\s*(a|an|some)?\s*(human|real|live|support|customer[- ]care|executive|representative|agent|manager|person)\b|\b(human|live)\s+(agent|support|executive)\b|\bescalate\b|\b(insaan|insan|aadmi|human|agent|manager|executive)\s+(se|sa|ki)\s+baat\b|\bbaat\s+(karao|karwao)\b|इंसान\s+से\s+बात|एजेंट\s+से\s+बात|किसी\s+से\s+बात/i,
-  add: /\b(add|include|bhi (chahiye|dal|add)|dal do|daal do|jod|add kar|order me[in]? (add|dal))\b|जोड़|डाल दो|और चाहिए/i,
-  remove: /\b(remove|delete|hata|hataa|nikal|cancel the (item|product)|mat bhejo|nahi chahiye|dont want|don't want)\b|हटा|निकाल/i,
+  add: /\b(add|include|bhi (chahiye|dal|add)|dal do|daal do|daalo|dalo|jod|jodo|add kar|order me[in]? (add|dal))\b|जोड़|डाल|और चाहिए/i,
+  remove: /\b(remove|delete|hata|hataa|hatao|nikal|nikalo|nikaalo|cancel the (item|product)|mat bhejo|nahi chahiye|dont want|don't want)\b|हटा|निकाल/i,
   cancel: /\b(cancel|cancle|radd|rad kar|band karo|order cancel)\b|रद्द|कैंसिल/i,
   address: /\b(address|pata|change address|address change|deliver (to|at)|new address)\b|पता|एड्रेस/i,
   status: /\b(status|kahan|kaha|where|track|tracking|deliver|delivery|kab|when|aayega|pahunch|update|my order|orders)\b|कहाँ|कब|स्टेटस|ऑर्डर|डिलीवरी/i,
   products: /\b(product|catalogue|catalog|show me|dikha|kitne ka|price|kitna|available|buy|kharid)\b|कीमत|दिखाओ|खरीद/i,
-  yes: /^\s*(yes|yeah|yep|ya|haan|haa|han|ha|ji|ji haan|theek|thik|ok|okay|sure|confirm|kar do|kardo|karo|bilkul|zaroor|go ahead|y|हाँ|हां|जी|ठीक)\b/i,
-  no: /^\s*(no|nope|nahi|nahin|na|mat|don'?t|rehne do|ruko|नहीं|मत)\b/i,
-  greeting: /^\s*(hi|hii|hello|hey|namaste|namaskar|good (morning|evening|afternoon)|हेलो|नमस्ते)\b/i,
+  cart: /\b(cart|basket)\b|कार्ट|टोकरी/i,
+  // Two alternations each: the ASCII half needs the trailing \b, but `\b` never
+  // matches after Devanagari (its characters are not `\w`), so the Devanagari
+  // half is anchored at the start only — otherwise "हाँ" would never confirm.
+  yes: /^\s*(yes|yeah|yep|ya|haan|haa|han|ha|ji|ji haan|theek|thik|ok|okay|sure|confirm|kar do|kardo|karo|bilkul|zaroor|go ahead|y)\b|^\s*(हाँ|हां|जी|ठीक|बिल्कुल|जरूर|ज़रूर|कर दो|हो गया|चलेगा)/i,
+  no: /^\s*(no|nope|nahi|nahin|na|mat|don'?t|rehne do|ruko)\b|^\s*(नहीं|नही|मत|रहने दो|रुको|बिल्कुल नहीं)/i,
+  greeting: /^\s*(hi|hii|hello|hey|namaste|namaskar|good (morning|evening|afternoon))\b|^\s*(हेलो|नमस्ते|नमस्कार)/i,
   thanks: /\b(thanks|thank you|dhanyawad|shukriya|thnx|bye|that'?s all|bas|done)\b|धन्यवाद|शुक्रिया/i,
 };
 
@@ -131,6 +183,13 @@ interface AgentProduct {
   category: string;
 }
 
+interface AgentCartLine {
+  product: string;
+  sku: string;
+  qty: number;
+  total_inr: number;
+}
+
 function extractOrderCode(text: string): string | null {
   const explicit = text.match(/\bnm\s*-?\s*(\d{4,6})\b/i);
   if (explicit) return `NM-${explicit[1]}`;
@@ -145,15 +204,35 @@ function extractQty(text: string): number | undefined {
   return n >= 1 && n <= 10 ? n : undefined;
 }
 
+/**
+ * Hindi command words to drop from the product phrase. `\b` does not work with
+ * Devanagari (the characters are not `\w`), so these are filtered token-wise
+ * instead of by the word-boundary regex below.
+ */
+const DEV_STOPWORDS = new Set([
+  'से', 'में', 'मे', 'को', 'का', 'की', 'के', 'और', 'भी', 'ही',
+  'हटा', 'हटाओ', 'हटाइए', 'हटाएँ', 'हटाना', 'निकाल', 'निकालो', 'निकालें',
+  'डाल', 'डालो', 'डालिए', 'डालें', 'डालना', 'जोड़', 'जोड़ो', 'जोड़ें', 'जोड़ना',
+  'दो', 'दीजिए', 'दें', 'दे', 'करो', 'करें', 'करिए', 'कीजिए', 'करना', 'चाहिए',
+  'मुझे', 'मेरा', 'मेरी', 'मेरे', 'मैं', 'हम', 'आप', 'आपका', 'आपकी', 'आपके',
+  'कृपया', 'जल्दी', 'अभी', 'कार्ट', 'टोकरी', 'ऑर्डर', 'खरीद', 'खरीदो', 'खरीदना',
+  'दिखाओ', 'बताओ', 'एक', 'यह', 'वह', 'इस', 'इसमें', 'उस', 'कुछ', 'कोई', 'नया', 'नई',
+]);
+
 /** Strips the command words so what is left is (mostly) the product the customer named. */
 function extractProductPhrase(text: string): string {
   return text
     .replace(/\bnm\s*-?\s*\d{4,6}\b/gi, ' ')
     .replace(
-      /\b(please|kindly|can you|could you|i want to|i want|i would like|mujhe|main|mera|meri|order|orders|me|mein|in|to|from|the|my|a|an|add|include|remove|delete|hata|hataa|hatao|nikal|nikalo|dal|daal|do|dijiye|kar|karo|kardo|de|chahiye|bhi|aur|and|please|jaldi|abhi)\b/gi,
+      /\b(please|kindly|can you|could you|i want to|i want|i would like|mujhe|main|mera|meri|order|orders|cart|basket|me|mein|in|to|from|the|my|a|an|add|include|remove|delete|hata|hataa|hatao|nikal|nikalo|dal|daal|daalo|dalo|do|dijiye|kar|karo|kardo|de|chahiye|bhi|aur|and|please|jaldi|abhi|ek|se|sa|kya|dikhao|dikha|batao|bata)\b/gi,
       ' ',
     )
-    .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
+    // \p{M} keeps Devanagari matras attached to their consonants ("केतली" must
+    // not be shredded into "क तल") — only real punctuation is replaced.
+    .replace(/[^\p{L}\p{N}\p{M}\s-]/gu, ' ')
+    .split(/\s+/)
+    .filter((word) => !DEV_STOPWORDS.has(word.toLowerCase()))
+    .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -177,6 +256,20 @@ function describeOrder(lang: Lang, o: AgentOrder): string {
   }
 }
 
+/** "Cart: 2 x Kettle, 1 x Saree — total ₹1,299." in the turn's language. */
+function describeCart(lang: Lang, result: Record<string, unknown>): string {
+  const lines = ((result.cart as AgentCartLine[]) ?? []).filter(Boolean);
+  if (lines.length === 0) {
+    return pick(lang, { en: 'The cart is now empty.', hi: 'कार्ट अब खाली है।', hinglish: 'Cart ab khaali hai.' });
+  }
+  const items = lines.map((l) => `${l.qty} x ${l.product}`).join(', ');
+  return `${pick(lang, { en: 'Cart', hi: 'कार्ट', hinglish: 'Cart' })}: ${items} — ${pick(lang, {
+    en: 'total',
+    hi: 'कुल',
+    hinglish: 'total',
+  })} ₹${result.total_inr}.`;
+}
+
 function listOrdersText(lang: Lang, orders: AgentOrder[]): string {
   if (orders.length === 0) {
     return pick(lang, {
@@ -198,7 +291,11 @@ function listOrdersText(lang: Lang, orders: AgentOrder[]): string {
 async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
   const messages = listMessages(conversation.id);
   const last = [...messages].reverse().find((m) => m.role === 'user');
-  const text = last?.content?.trim() ?? '';
+  // Interpret the message with spoken numbers rendered as digits ("तीन केतली" →
+  // "3 केतली", "pin ek ek shunya…" → digits), so quantities, phone numbers and
+  // PIN codes are understood — and stored — the same way whichever language or
+  // script the customer typed them in.
+  const text = spokenNumbersToDigits(last?.content?.trim() ?? '');
   const lang = detectLanguage(text, conversation.context.language);
   updateConversation(conversation.id, {
     context: { language: lang === 'hi' ? 'hindi' : lang === 'hinglish' ? 'hinglish' : 'english' },
@@ -297,7 +394,11 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
         }
         const order = outcome.result.order as AgentOrder | undefined;
         const done = (outcome.result.message as string) ?? 'Done.';
-        const summary = order ? `\n${describeOrder(lang, order)}` : '';
+        const summary = order
+          ? `\n${describeOrder(lang, order)}`
+          : Array.isArray(outcome.result.cart)
+            ? `\n${describeCart(lang, outcome.result)}`
+            : '';
         return `${done}${summary}\n${pick(lang, {
           en: 'Anything else I can help with?',
           hi: 'और कुछ मदद करूँ?',
@@ -316,26 +417,58 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
     }
   }
 
-  // 2. Explicit human request ---------------------------------------------------
+  // 2. Explicit language preference — switch, confirm and save it on the account.
+  const requestedLang = detectLanguageRequest(text);
+  if (requestedLang) {
+    const language = requestedLang === 'hi' ? 'hindi' : requestedLang === 'en' ? 'english' : 'hinglish';
+    const outcome = await call('set_preferred_language', { language });
+    if (outcome.ok) {
+      return `${outcome.result.message} ${pick(requestedLang, {
+        en: 'How can I help you now?',
+        hi: 'अब मैं आपकी क्या मदद करूँ?',
+        hinglish: 'Ab bataiye, kya madad karoon?',
+      })}`;
+    }
+    // Could not save (no signed-in client): still honour it for this conversation.
+    setCtx({ language: requestedLang === 'hi' ? 'hindi' : requestedLang === 'en' ? 'english' : 'hinglish', languageConfirmed: true });
+    return pick(requestedLang, {
+      en: "Sure, let's continue in English. How can I help you?",
+      hi: 'ज़रूर, अब से हिंदी में बात करते हैं। बताइए, क्या मदद करूँ?',
+      hinglish: 'Zaroor, ab se Hinglish mein baat karte hain. Bataiye, kya madad karoon?',
+    });
+  }
+
+  // 3. Explicit human request ---------------------------------------------------
   if (RE.human.test(text)) return escalate('Customer asked for a human agent', ctx().intent ?? 'other');
 
-  // 3. Intent -------------------------------------------------------------------
-  const intent = RE.add.test(text)
-    ? 'order_edit_add'
-    : RE.remove.test(text)
-      ? 'order_edit_remove'
-      : RE.cancel.test(text)
-        ? 'cancellation'
-        : RE.address.test(text)
-          ? 'address_change'
-          : RE.status.test(text)
-            ? 'order_status'
-            : RE.products.test(text)
-              ? 'product_search'
-              : null;
+  // 4. Intent -------------------------------------------------------------------
+  // "cart" wins over the order flows: the cart is what the customer is about to
+  // order, and cart changes go straight to their account (CartItem rows).
+  const wantsCart = RE.cart.test(text);
+  const intent = wantsCart
+    ? RE.add.test(text)
+      ? 'cart_add'
+      : RE.remove.test(text)
+        ? 'cart_remove'
+        : 'cart_status'
+    : RE.add.test(text)
+      ? 'order_edit_add'
+      : RE.remove.test(text)
+        ? 'order_edit_remove'
+        : RE.cancel.test(text)
+          ? 'cancellation'
+          : RE.address.test(text)
+            ? 'address_change'
+            : RE.status.test(text)
+              ? 'order_status'
+              : RE.products.test(text)
+                ? 'product_search'
+                : null;
   if (intent) setCtx({ intent, misunderstandings: 0 });
 
-  const orders = intent && intent !== 'product_search' ? await loadOrders() : [];
+  const needsOrders =
+    intent !== null && !['product_search', 'cart_add', 'cart_remove', 'cart_status'].includes(intent);
+  const orders = needsOrders ? await loadOrders() : [];
   const editable = orders.filter((o) => o.can_edit_items);
   const explicitCode = extractOrderCode(text);
   const remembered = ctx().orderIds[ctx().orderIds.length - 1];
@@ -350,6 +483,118 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
   };
 
   switch (intent) {
+    case 'cart_status': {
+      const outcome = await call('get_cart_status');
+      if (!outcome.ok) return `${outcome.result.message}`;
+      const lines = ((outcome.result.cart as AgentCartLine[]) ?? []).filter(Boolean);
+      if (lines.length === 0) {
+        return pick(lang, {
+          en: 'Your cart is empty right now. Tell me what to add — e.g. "add a kettle to my cart" — or browse the shopping page.',
+          hi: 'आपका कार्ट अभी खाली है। बताइए क्या जोड़ूँ — जैसे "कार्ट में केतली डालो" — या शॉपिंग पेज देखें।',
+          hinglish: 'Aapka cart abhi khaali hai. Batayein kya add karoon — jaise "cart mein kettle daalo" — ya shopping page browse karein.',
+        });
+      }
+      const items = lines.map((l) => `${l.qty} x ${l.product} (₹${l.total_inr})`).join(', ');
+      return `${pick(lang, { en: 'Your cart:', hi: 'आपका कार्ट:', hinglish: 'Aapka cart:' })} ${items}. ${pick(lang, {
+        en: 'Total',
+        hi: 'कुल',
+        hinglish: 'Total',
+      })} ₹${outcome.result.total_inr}. ${pick(lang, {
+        en: 'Should I add or remove anything?',
+        hi: 'कुछ जोड़ूँ या हटाऊँ?',
+        hinglish: 'Kuch add ya remove karoon?',
+      })}`;
+    }
+
+    case 'cart_add': {
+      const phrase = extractProductPhrase(text);
+      if (!phrase) {
+        return pick(lang, {
+          en: 'Which product should I add to your cart?',
+          hi: 'कार्ट में कौन सा प्रोडक्ट जोड़ूँ?',
+          hinglish: 'Cart mein kaunsa product add karoon?',
+        });
+      }
+      const qty = extractQty(text) ?? 1;
+      const outcome = await call('add_item_to_cart', { product: phrase, quantity: qty });
+      if (outcome.ok) return `${outcome.result.message}\n${describeCart(lang, outcome.result)}`;
+      if (outcome.result.error === 'CONFIRMATION_REQUIRED') {
+        const preview = outcome.result.preview as Record<string, unknown>;
+        setCtx({
+          pendingAction: {
+            tool: 'add_item_to_cart',
+            args: { product: String(preview.sku ?? phrase), quantity: qty },
+            stage: 'confirm',
+          },
+        });
+        note(`wants to add ${qty} x ${preview.product} to the cart`);
+        return pick(lang, {
+          en: `${preview.product} costs ₹${preview.unit_price_inr}. Adding ${qty} makes your cart total ₹${preview.new_total_inr}. Should I add it to your cart? (yes / no)`,
+          hi: `${preview.product} की कीमत ₹${preview.unit_price_inr} है। ${qty} जोड़ने पर कार्ट का कुल ₹${preview.new_total_inr} हो जाएगा। कार्ट में जोड़ दूँ? (हाँ / नहीं)`,
+          hinglish: `${preview.product} ka price ₹${preview.unit_price_inr} hai. ${qty} add karne par cart ka total ₹${preview.new_total_inr} ho jayega. Cart mein add kar doon? (haan / nahi)`,
+        });
+      }
+      return `${outcome.result.message}`;
+    }
+
+    case 'cart_remove': {
+      const currentCart = await call('get_cart_status');
+      const lines = ((currentCart.result.cart as AgentCartLine[]) ?? []).filter(Boolean);
+      const phrase = extractProductPhrase(text);
+      if (!phrase) {
+        if (lines.length === 0) {
+          return pick(lang, {
+            en: 'Your cart is already empty.',
+            hi: 'आपका कार्ट पहले से खाली है।',
+            hinglish: 'Aapka cart pehle se khaali hai.',
+          });
+        }
+        return `${pick(lang, { en: 'Your cart has:', hi: 'आपके कार्ट में है:', hinglish: 'Aapke cart mein hai:' })} ${lines
+          .map((l) => `${l.qty} x ${l.product}`)
+          .join(', ')}. ${pick(lang, {
+          en: 'Which one should I remove?',
+          hi: 'किसे हटाऊँ?',
+          hinglish: 'Kise remove karoon?',
+        })}`;
+      }
+      const qty = extractQty(text);
+      const outcome = await call('remove_item_from_cart', {
+        product: phrase,
+        ...(qty ? { quantity: qty } : {}),
+      });
+      if (outcome.ok) return `${outcome.result.message}\n${describeCart(lang, outcome.result)}`;
+      if (outcome.result.error === 'CONFIRMATION_REQUIRED') {
+        const preview = outcome.result.preview as Record<string, unknown>;
+        setCtx({
+          pendingAction: {
+            tool: 'remove_item_from_cart',
+            args: { product: String(preview.sku ?? phrase), ...(qty ? { quantity: qty } : {}) },
+            stage: 'confirm',
+          },
+        });
+        note(`wants to remove ${preview.removing_qty} x ${preview.product} from the cart`);
+        return pick(lang, {
+          en: `Removing ${preview.removing_qty} x ${preview.product} from your cart. The cart total would be ₹${preview.new_total_inr}. Should I go ahead? (yes / no)`,
+          hi: `कार्ट से ${preview.removing_qty} x ${preview.product} हटा रही हूँ। कार्ट का कुल ₹${preview.new_total_inr} रह जाएगा। आगे बढ़ूँ? (हाँ / नहीं)`,
+          hinglish: `Cart se ${preview.removing_qty} x ${preview.product} hata rahi hoon. Cart total ₹${preview.new_total_inr} reh jayega. Aage badhoon? (haan / nahi)`,
+        });
+      }
+      if (outcome.result.error === 'NOT_IN_CART') {
+        return `${pick(lang, {
+          en: 'That product is not in your cart.',
+          hi: 'यह प्रोडक्ट आपके कार्ट में नहीं है।',
+          hinglish: 'Yeh product aapke cart mein nahi hai.',
+        })} ${
+          lines.length
+            ? `${pick(lang, { en: 'Your cart has:', hi: 'कार्ट में है:', hinglish: 'Cart mein hai:' })} ${lines
+                .map((l) => `${l.qty} x ${l.product}`)
+                .join(', ')}.`
+            : pick(lang, { en: 'The cart is empty.', hi: 'कार्ट खाली है।', hinglish: 'Cart khaali hai.' })
+        }`;
+      }
+      return `${outcome.result.message}`;
+    }
+
     case 'product_search': {
       const phrase = extractProductPhrase(text);
       const outcome = await call('search_products', { query: phrase || text });
@@ -395,13 +640,37 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
     case 'order_edit_add': {
       const order = resolveOrder(true);
       if (!order) {
-        return editable.length === 0
-          ? pick(lang, {
-              en: 'None of your orders is in the PLACED stage anymore, so items cannot be added. Placing a new order takes a second on the shopping page.',
-              hi: 'आपका कोई ऑर्डर अब "Placed" चरण में नहीं है, इसलिए आइटम नहीं जोड़े जा सकते। शॉपिंग पेज से नया ऑर्डर करें।',
-              hinglish: 'Aapka koi order ab "Placed" stage mein nahi hai, isliye item add nahi ho sakta. Shopping page se naya order kar lijiye.',
-            })
-          : listOrdersText(lang, editable);
+        if (editable.length === 0) {
+          // Nothing is editable anymore — but "add X" still makes sense for the
+          // cart, so offer that instead of dead-ending the request.
+          const phrase = extractProductPhrase(text);
+          if (phrase) {
+            const qty = extractQty(text) ?? 1;
+            const preview = await call('add_item_to_cart', { product: phrase, quantity: qty });
+            if (preview.result.error === 'CONFIRMATION_REQUIRED') {
+              const p = preview.result.preview as Record<string, unknown>;
+              setCtx({
+                pendingAction: {
+                  tool: 'add_item_to_cart',
+                  args: { product: String(p.sku ?? phrase), quantity: qty },
+                  stage: 'confirm',
+                },
+              });
+              note(`wants to add ${qty} x ${p.product}; no PLACED order, offered the cart instead`);
+              return pick(lang, {
+                en: `None of your orders is still in the PLACED stage, so I can't add to an order. Should I add ${qty} x ${p.product} (₹${p.unit_price_inr}) to your cart instead? New cart total: ₹${p.new_total_inr}. (yes / no)`,
+                hi: `आपका कोई ऑर्डर "Placed" चरण में नहीं है, इसलिए ऑर्डर में नहीं जोड़ सकती। क्या ${qty} x ${p.product} (₹${p.unit_price_inr}) कार्ट में जोड़ दूँ? कार्ट का नया कुल: ₹${p.new_total_inr}. (हाँ / नहीं)`,
+                hinglish: `Aapka koi order "Placed" stage mein nahi hai, isliye order mein add nahi kar sakti. Kya ${qty} x ${p.product} (₹${p.unit_price_inr}) cart mein add kar doon? Naya cart total: ₹${p.new_total_inr}. (haan / nahi)`,
+              });
+            }
+          }
+          return pick(lang, {
+            en: 'None of your orders is in the PLACED stage anymore, so items cannot be added. Placing a new order takes a second on the shopping page.',
+            hi: 'आपका कोई ऑर्डर अब "Placed" चरण में नहीं है, इसलिए आइटम नहीं जोड़े जा सकते। शॉपिंग पेज से नया ऑर्डर करें।',
+            hinglish: 'Aapka koi order ab "Placed" stage mein nahi hai, isliye item add nahi ho sakta. Shopping page se naya order kar lijiye.',
+          });
+        }
+        return listOrdersText(lang, editable);
       }
       const phrase = extractProductPhrase(text);
       if (!phrase) {

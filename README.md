@@ -188,7 +188,7 @@ action, not an env var (`agora project doctor --deep` verifies it). `/api/health
 any of these it finds set under `agora.credentialSources.inertVarsSet`, next to the names
 that actually provided the working credentials.
 
-The agent pipeline in [`lib/agent-config.ts`](lib/agent-config.ts) uses Agora-managed Deepgram STT, OpenAI LLM and MiniMax TTS, so no vendor keys are required. The Conversational AI feature and Agora-managed vendors must be enabled on the Agora project (`agora project doctor --deep`). Without `NEXT_LLM_*`, chat is answered by the deterministic rule-based agent in [`lib/chat-agent.ts`](lib/chat-agent.ts) — it covers the shopping flows (order status → add/remove item → cancel → address → escalation) with fixed copy, so free-form questions get a "what can I do" reply rather than an LLM answer.
+The agent pipeline in [`lib/agent-config.ts`](lib/agent-config.ts) uses Agora-managed Deepgram STT, OpenAI LLM and MiniMax TTS, so no vendor keys are required. The Conversational AI feature and Agora-managed vendors must be enabled on the Agora project (`agora project doctor --deep`). Without `NEXT_LLM_*`, chat is answered by the deterministic rule-based agent in [`lib/chat-agent.ts`](lib/chat-agent.ts) — it covers the shopping flows (cart add/remove/status, order status → add/remove item → cancel → address → escalation, plus explicit language switches) with fixed copy, so free-form questions get a "what can I do" reply rather than an LLM answer.
 
 ### The catalogue and the demo data
 
@@ -282,7 +282,7 @@ If `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` are set, the engine is pointed at this app'
 
 ### Chat
 
-`POST /api/conversations` (with the signed-in `clientId`) → `POST /api/conversations/:id/messages`. With an LLM configured, [`lib/chat-agent.ts`](lib/chat-agent.ts) runs `generateText` with the same tool set; otherwise a deterministic EN/HI/Hinglish rule-based agent drives the same `executeTool` layer (order status, add/remove item, address, cancel — each write proposed and confirmed first — and human request → escalation). After escalation the AI stays silent and the human replies from the case page.
+`POST /api/conversations` (with the signed-in `clientId`) → `POST /api/conversations/:id/messages`. With an LLM configured, [`lib/chat-agent.ts`](lib/chat-agent.ts) runs `generateText` with the same tool set; otherwise a deterministic EN/HI/Hinglish rule-based agent drives the same `executeTool` layer (cart status/add/remove, order status, add/remove item, address, cancel — each write proposed and confirmed first — language switches via `set_preferred_language`, and human request → escalation). After escalation the AI stays silent and the human replies from the case page.
 
 ### State machine
 

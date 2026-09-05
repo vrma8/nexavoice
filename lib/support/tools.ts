@@ -20,6 +20,7 @@
  *     dashboard shows exactly what the AI did.
  */
 import * as shop from '@/lib/shop/service';
+import { LANGUAGE_CONFIRM_MESSAGE, normalizeLanguageName } from '@/lib/agent-prompt';
 import {
   appendToolAudit,
   createCase,
@@ -42,6 +43,7 @@ export const TOOL_NAMES = [
   'remove_item_from_order',
   'cancel_order',
   'update_shipping_address',
+  'set_preferred_language',
   'escalate_to_human',
 ] as const;
 
@@ -205,6 +207,19 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         confirmed: CONFIRMED_PROP,
       },
       required: ['order_id', 'new_address'],
+    },
+    write: true,
+  },
+  {
+    name: 'set_preferred_language',
+    description:
+      'Save the language the customer confirmed they want to be served in. Call this as soon as the customer confirms, names or switches their language — the choice is stored on their NexaMart account and every future chat and call starts in it. The customer stating the preference IS the confirmation; no separate yes/no needed. Respond to them in the new language using the returned message.',
+    parameters: {
+      type: 'object',
+      properties: {
+        language: { type: 'string', description: 'hindi | english | hinglish' },
+      },
+      required: ['language'],
     },
     write: true,
   },
@@ -675,6 +690,50 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
         ok: true,
         result: { order: shop.summarizeOrderForAgent(result.data), message: 'Delivery address updated.' },
         summary: `Updated address on ${result.data.code}`,
+      };
+    }
+
+    case 'set_preferred_language': {
+      const requested = str(args, 'language');
+      const language = normalizeLanguageName(requested);
+      if (!language) {
+        return {
+          ok: false,
+          result: {
+            error: 'UNSUPPORTED_LANGUAGE',
+            message:
+              'Only hindi, english and hinglish are supported. Ask the customer to pick one of those three.',
+          },
+          summary: `Unsupported language "${requested}"`,
+        };
+      }
+      const profile = conversation.context.customer;
+      // The conversation follows the new language immediately; the account keeps it
+      // for the next chat/call (the greeting is built from Client.preferredLanguage).
+      updateConversation(conversation.id, {
+        context: {
+          language,
+          languageConfirmed: true,
+          ...(profile ? { customer: { ...profile, preferredLanguage: language } } : {}),
+        },
+      });
+      let saved = false;
+      if (clientId) {
+        try {
+          await shop.setPreferredLanguage(clientId, language);
+          saved = true;
+        } catch (error) {
+          console.warn('[tools] could not persist preferred language:', error);
+        }
+      }
+      return {
+        ok: true,
+        result: {
+          language,
+          saved_to_account: saved,
+          message: LANGUAGE_CONFIRM_MESSAGE[language],
+        },
+        summary: `Preferred language set to ${language}${saved ? ' (saved on account)' : ''}`,
       };
     }
 

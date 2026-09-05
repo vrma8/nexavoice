@@ -52,6 +52,8 @@ export interface CustomerSnapshot {
 
 export interface ConversationContext {
   language?: string;
+  /** The customer confirmed the language preference in this conversation (or asked for one explicitly). */
+  languageConfirmed?: boolean;
   intent?: string;
   customerName?: string;
   customer?: CustomerSnapshot;

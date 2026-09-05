@@ -65,7 +65,7 @@ OpenAI-compatible SSE proxy used as the Agora **custom LLM** when `NEXT_LLM_URL`
 ### `POST /api/agent-tools/[tool]?conversation_id=…` (engine → backend)
 
 Headers: `x-nexavoice-tool-token: <tool secret>` (401 otherwise) — `AGENT_TOOLS_SECRET`,
-or a value derived from `NEXT_AGORA_APP_CERTIFICATE` when that variable is unset. Body: tool args (+ optional `tool_call_id`, echoed back). Tools: `get_customer_context`, `search_products`, `list_recent_orders`, `get_order_status`, `add_item_to_order`, `remove_item_from_order`, `cancel_order`, `update_shipping_address`, `escalate_to_human` (404 for anything else). Response: `{ ok, tool, tool_call_id?, ...result }`; guardrail errors come back as `ok: false` with `error` ∈ `NO_SIGNED_IN_CUSTOMER | CONFIRMATION_REQUIRED | HANDED_OFF | PRODUCT_NOT_FOUND | ORDER_NOT_FOUND | ORDER_LOCKED | NOT_CANCELLABLE | LAST_ITEM | INVALID_ARGS` (never HTTP 4xx, so the LLM can recover).
+or a value derived from `NEXT_AGORA_APP_CERTIFICATE` when that variable is unset. Body: tool args (+ optional `tool_call_id`, echoed back). Tools: `get_customer_context`, `search_products`, `list_recent_orders`, `get_order_status`, `get_cart_status`, `add_item_to_cart`, `remove_item_from_cart`, `add_item_to_order`, `remove_item_from_order`, `cancel_order`, `update_shipping_address`, `set_preferred_language`, `escalate_to_human` (404 for anything else). Response: `{ ok, tool, tool_call_id?, ...result }`; guardrail errors come back as `ok: false` with `error` ∈ `NO_SIGNED_IN_CUSTOMER | CONFIRMATION_REQUIRED | HANDED_OFF | PRODUCT_NOT_FOUND | NOT_IN_CART | ORDER_NOT_FOUND | ORDER_LOCKED | NOT_CANCELLABLE | LAST_ITEM | UNSUPPORTED_LANGUAGE | INVALID_ARGS` (never HTTP 4xx, so the LLM can recover).
 
 ### Conversations
 

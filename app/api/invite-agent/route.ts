@@ -80,6 +80,12 @@ async function handlePost(request: NextRequest) {
       conversationId: conversation.id,
       toolToken: access?.secret ?? null,
       toolsBaseUrl: access?.baseUrl ?? null,
+      // The signed-in customer drives the greeting language + the prompt's
+      // "confirm the preference" section (falls back to the name from the body).
+      customer: {
+        name: conversation.context.customer?.name ?? conversation.context.customerName,
+        preferredLanguage: conversation.context.customer?.preferredLanguage,
+      },
     });
 
     // remoteUids restricts the agent to only process audio from this user,

@@ -20,7 +20,7 @@ import {
   type TurnDetectionLanguage,
 } from 'agora-agents';
 import { buildAgoraRestTools, TEMPLATE_VARS } from './agent-tools';
-import { buildSystemPrompt, FAILURE_MESSAGE, VOICE_GREETING } from './agent-prompt';
+import { buildSystemPrompt, buildVoiceGreeting, FAILURE_MESSAGE, normalizeLanguageName } from './agent-prompt';
 
 export interface BuildAgentOptions {
   client: AgoraClient;
@@ -29,6 +29,8 @@ export interface BuildAgentOptions {
   toolToken: string | null;
   /** Public origin the engine calls back into; omitted → tools disabled. */
   toolsBaseUrl?: string | null;
+  /** Signed-in customer (from PostgreSQL) — name for the prompt, saved language for the greeting. */
+  customer?: { name?: string; preferredLanguage?: string } | null;
 }
 
 /** Deepgram nova-3 `multi` transcribes Hindi/English code-switching in one stream. */
@@ -73,6 +75,7 @@ export function buildNexaVoiceAgent({
   conversationId,
   toolToken,
   toolsBaseUrl,
+  customer,
 }: BuildAgentOptions): BuiltAgent {
   const customLlmUrl = process.env.NEXT_LLM_URL?.trim();
   const customLlmKey = process.env.NEXT_LLM_API_KEY?.trim();
@@ -83,11 +86,23 @@ export function buildNexaVoiceAgent({
     [TEMPLATE_VARS.toolToken]: toolToken ?? 'disabled',
   };
 
+  const preferredLanguage = normalizeLanguageName(customer?.preferredLanguage);
+
   const llmCommon = {
     maxHistory: 24,
-    greetingMessage: VOICE_GREETING,
+    // The greeting confirms the saved language preference in that very language.
+    greetingMessage: buildVoiceGreeting(preferredLanguage, customer?.name),
     failureMessage: FAILURE_MESSAGE,
-    systemMessages: [{ role: 'system', content: buildSystemPrompt({ mode: 'voice' }) }],
+    systemMessages: [
+      {
+        role: 'system',
+        content: buildSystemPrompt({
+          mode: 'voice',
+          customerName: customer?.name,
+          preferredLanguage,
+        }),
+      },
+    ],
     params: { max_tokens: 400, temperature: 0.4, top_p: 0.9 },
     templateVariables,
   };

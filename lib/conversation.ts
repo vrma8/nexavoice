@@ -9,6 +9,7 @@ import {
   type AgentVisualizerState,
   type IMessageListItem,
 } from 'agora-agent-uikit';
+import { spokenNumbersToDigits } from './numbers';
 
 // Fixes compacted punctuation emitted by some TTS/ASR providers where sentence-ending
 // characters run directly into the next word (e.g. "Hello.World" → "Hello. World").
@@ -18,6 +19,14 @@ export function normalizeTranscriptSpacing(text: string): string {
     .replace(/,([A-Za-z])/g, ', $1')
     .replace(/\s{2,}/g, ' ')
     .trim();
+}
+
+// Transcript text as the customer reads it: punctuation spacing fixed AND spoken
+// number words rendered as digits ("nine eight seven…" → "987…", "दो हज़ार" →
+// "2,000"), so phone numbers, PIN codes, order codes and amounts always look
+// like numbers in the live transcript — see lib/numbers.ts for the rules.
+export function normalizeTranscriptText(text: string): string {
+  return spokenNumbersToDigits(normalizeTranscriptSpacing(text));
 }
 
 // Agora timestamps vary by source: some RTM payloads use Unix-seconds while
@@ -76,7 +85,7 @@ export function toMessageListItem(
   return {
     turn_id: item.turn_id,
     uid: Number(item.uid) || 0,
-    text: typeof item.text === 'string' ? item.text : '',
+    text: typeof item.text === 'string' ? normalizeTranscriptText(item.text) : '',
     status: item.status as unknown as IMessageListItem['status'],
     createdAt:
       typeof item._time === 'number'
@@ -87,7 +96,9 @@ export function toMessageListItem(
 
 // uid="0" is the toolkit's sentinel for local-user speech. Without remapping it to
 // the actual RTC UID, the transcript panel renders the user's speech on the agent's side.
-// Also normalises punctuation spacing so all turns display consistently.
+// Also normalises punctuation spacing and converts spoken number words to digits
+// (lib/numbers.ts) so all turns display consistently — the mirrored transcript the
+// dashboard and the handoff summary see carries the same digits.
 export function normalizeTranscript(
   transcript: TranscriptHelperItem<Partial<UserTranscription | AgentTranscription>>[],
   localUID: string,
@@ -96,7 +107,7 @@ export function normalizeTranscript(
     const remappedUID = item.uid === '0' ? localUID : item.uid;
     const normalizedText =
       typeof item.text === 'string'
-        ? normalizeTranscriptSpacing(item.text)
+        ? normalizeTranscriptText(item.text)
         : item.text;
     return { ...item, uid: remappedUID, text: normalizedText };
   });
