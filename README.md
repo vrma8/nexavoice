@@ -220,6 +220,7 @@ only thing it is allowed to show (see below).
 | Chat answers look canned | `NEXT_LLM_*` not set → rule-based agent | Set `NEXT_LLM_URL` / `NEXT_LLM_API_KEY` |
 | Dashboard shows nothing while a call is live | State not shared (see above) | Add `DATABASE_URL`; SSE is best-effort — the 3s poll reads the mirror |
 | A conversation lingers on the dashboard after the customer left | Nothing — the sweep closes it ~30s after the last heartbeat | Wait for it to disappear, or check the browser tab is really closed |
+| `ERR_PNPM_OUTDATED_LOCKFILE` during Vercel build | `package.json` was updated but the lockfile wasn't | Run `pnpm install` locally to synchronize `pnpm-lock.yaml` and push the changes |
 
 ## Commands
 
