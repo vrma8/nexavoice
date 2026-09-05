@@ -24,34 +24,7 @@ const ConversationComponent = dynamic(() => import("./ConversationComponent"), {
   ssr: false,
 });
 
-// Dynamically import AgoraRTCProvider (browser-only)
-const AgoraProvider = dynamic(
-  async () => {
-    const { AgoraRTCProvider, default: AgoraRTC } =
-      await import("agora-rtc-react");
-    return {
-      default: function AgoraProviders({
-        children,
-      }: {
-        children: React.ReactNode;
-      }) {
-        const clientRef = useRef<ReturnType<typeof AgoraRTC.createClient> | null>(null);
-        if (!clientRef.current) {
-          clientRef.current = AgoraRTC.createClient({
-            mode: "rtc",
-            codec: "vp8",
-          });
-        }
-        return (
-          <AgoraRTCProvider client={clientRef.current}>
-            {children}
-          </AgoraRTCProvider>
-        );
-      },
-    };
-  },
-  { ssr: false }
-);
+const AgoraProvider = dynamic(() => import("./AgoraProvider"), { ssr: false });
 
 /** Why the AI agent could not be invited, shown verbatim instead of a generic banner. */
 interface AgentJoinError {
