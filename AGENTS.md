@@ -31,7 +31,7 @@ The sections below (Start Here, Patterns, Anti-Patterns, etc.) remain the canoni
 - UI components: `agora-agent-uikit` for visualizer, transcript, and mic controls
 - Server SDK: `agora-agents` for managed agent session startup, `stopAgent`, and `agents.speak` (handover line)
 - API routes in `app/api`: token, invite/stop agent, REST tool endpoint for the engine, custom-LLM proxy, conversations/messages (chat) + heartbeat/close, escalation, cases (accept/takeover/resolve), dashboard (+SSE), shop (catalogue/cart/orders), auth, health (deployment self-check)
-- **PostgreSQL via Prisma is required** (`DATABASE_URL`, `prisma/schema.prisma`): `Client`, `Product`, `CartItem`, `Order`/`OrderItem` and the mirrored `StoreState` row. `pnpm dev:db` runs a zero-install PostgreSQL (PGlite over TCP) for local work, `pnpm db:push` creates the tables, `pnpm seed` (`scripts/seed-catalog.ts`) upserts the fixed 50-product catalogue from `lib/shop/catalog-data.ts`.
+- **PostgreSQL via Prisma is required** (`DATABASE_URL`, `prisma/schema.prisma`): `Client`, `Product`, `CartItem`, `Order`/`OrderItem` and the mirrored `StoreState` row. `pnpm dev:db` runs a zero-install PostgreSQL (PGlite over TCP) for local work, `pnpm db:push` creates the tables, `pnpm seed` (`scripts/seed-catalog.ts`) upserts the fixed 60-product catalogue from `lib/shop/catalog-data.ts`.
 - Shop domain in `lib/shop` (`catalog-data.ts` the fixed catalogue, `service.ts` all Prisma reads/writes + the order status machine, `http.ts` the `x-nexavoice-client-id` identity helper). Support domain in `lib/support` (conversation/case store, guarded `executeTool`, handoff summary). The support store is an in-memory cache on `globalThis` mirrored into one JSONB row so state survives across serverless instances — `lib/support/persist.ts` + `snapshot.ts` own that layer.
 - Default agent config (`lib/agent-config.ts`): Agora-managed Deepgram STT (`multi`), OpenAI `gpt-4o-mini`, MiniMax TTS; NexaMart system prompt in `lib/agent-prompt.ts`; inline REST tools from `lib/agent-tools.ts`. `/api/health` reports the deployment self-check. `.env.local` needs only Agora credentials — `AGENT_TOOLS_BASE_URL`/`AGENT_TOOLS_SECRET` are optional now (tool origin comes from the request URL, the secret is derived from the App Certificate).
 - Chat: `lib/chat-agent.ts` — LLM (`ai` + `@ai-sdk/openai`) when `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` are set, otherwise a rule-based EN/HI/Hinglish agent over the same tools (cart add/remove/status included).
@@ -230,7 +230,7 @@ pnpm install
 pnpm run doctor
 pnpm dev:db      # optional: PostgreSQL with nothing to install (127.0.0.1:5433)
 pnpm db:push     # tables; pnpm db:reset drops and recreates them
-pnpm seed        # the 50-product catalogue
+pnpm seed        # the 60-product catalogue
 pnpm run dev
 pnpm run verify
 ```

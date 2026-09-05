@@ -30,14 +30,14 @@ agora project doctor --deep
 pnpm dev:db        # optional local PostgreSQL; leave running in its own terminal
 # DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5433/postgres → .env.local
 pnpm db:push       # create the tables (pnpm db:reset drops and recreates them)
-pnpm seed          # upsert the fixed 50-product catalogue
+pnpm seed          # upsert the fixed 60-product catalogue
 ```
 
 ## Required Environment Variables
 
 - `NEXT_PUBLIC_AGORA_APP_ID`: Agora project App ID. Alias: `AGORA_APP_ID` (server-side only; the browser then gets the App ID at runtime from `/api/generate-agora-token`).
 - `NEXT_AGORA_APP_CERTIFICATE`: Agora App Certificate (server only). Alias: `AGORA_APP_CERTIFICATE`.
-- `DATABASE_URL`: PostgreSQL. Holds clients, the 50-product catalogue, carts, orders and the mirrored support store. Without it `/api/shop/*` answers 503 and conversation state is per-instance.
+- `DATABASE_URL`: PostgreSQL. Holds clients, the 60-product catalogue, carts, orders and the mirrored support store. Without it `/api/shop/*` answers 503 and conversation state is per-instance.
 
 Names that look related but are **never read**: `AGORA_PROJECT_ID`, `AGORA_PROJECT_NAME`, `AGORA_ENABLED_FEATURES`, `AGORA_FEATURE_RTC/RTM/CONVOAI` (Agora CLI / template metadata). Enabling Conversational AI is a console action (`agora project doctor --deep` verifies), not an env var. `/api/health` (`agora.credentialSources`) lists any of these that are set.
 

@@ -17,6 +17,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  ShieldAlert,
   ShoppingCart,
   Trash2,
   Truck,
@@ -113,8 +114,10 @@ export default function ShoppingPage() {
   }, []);
 
   // --- data ---------------------------------------------------------------
+  const [ordersFetchedAt, setOrdersFetchedAt] = useState(() => Date.now());
   const refreshOrders = useCallback(async (clientId: string) => {
     const list = await getOrders(clientId);
+    setOrdersFetchedAt(Date.now());
     setOrders(list);
   }, []);
 
@@ -244,7 +247,7 @@ export default function ShoppingPage() {
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search 50 products — headphones, kettle, saree, atta…"
+              placeholder="Search 60 products — headphones, kettle, saree, paracetamol…"
               className="w-full rounded-full border border-zinc-800 bg-zinc-900 py-2 pl-9 pr-3 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-600"
             />
           </div>
@@ -331,10 +334,21 @@ export default function ShoppingPage() {
                     ) : (
                       product.emoji
                     )}
+                    {product.caution && (
+                      <span className="absolute left-1.5 top-1.5 flex items-center gap-1 rounded-full border border-red-700 bg-red-950/90 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-red-200">
+                        <ShieldAlert className="h-3 w-3" /> Caution
+                      </span>
+                    )}
                   </div>
                   <p className="text-[10px] uppercase tracking-wide text-zinc-600">{product.category}</p>
                   <h3 className="mt-0.5 line-clamp-2 text-sm font-medium leading-snug">{product.title}</h3>
                   <p className="mt-1 line-clamp-2 text-[11px] text-zinc-500">{product.description}</p>
+                  {product.caution && (
+                    <p className="mt-1 flex items-start gap-1 rounded-md border border-red-900/50 bg-red-950/30 px-1.5 py-1 text-[10px] leading-snug text-red-200/90">
+                      <ShieldAlert className="mt-0.5 h-3 w-3 shrink-0 text-red-300" />
+                      <span className="line-clamp-2">{product.caution}</span>
+                    </p>
+                  )}
                   <div className="mt-auto flex items-center justify-between pt-3">
                     <div>
                       <p className="text-base font-semibold">{inr(product.priceInr)}</p>
@@ -381,8 +395,12 @@ export default function ShoppingPage() {
             products={products}
             clientId={client.id}
             now={tick}
+            fetchedAt={ordersFetchedAt}
             onRefresh={() => void refreshOrders(client.id)}
-            onChanged={(updated) => setOrders(updated)}
+            onChanged={(updated) => {
+              setOrdersFetchedAt(Date.now());
+              setOrders(updated);
+            }}
             onError={setError}
             onNotice={flash}
           />
@@ -390,24 +408,41 @@ export default function ShoppingPage() {
       </main>
 
       {/* Talk to the agent — chat or call, right here on the shopping page */}
-      <div className="fixed bottom-5 right-5 z-40 flex flex-col items-end gap-2">
-        {dock === null && (
-          <>
+      {dock === null && (
+        <div className="fixed bottom-5 right-5 z-40 w-72 rounded-2xl border border-zinc-800 bg-zinc-950/90 p-3 shadow-2xl backdrop-blur">
+          <div className="mb-2 flex items-center gap-2 px-1">
+            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-700">
+              <Headset className="h-4 w-4 text-white" />
+            </span>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-white">NexaVoice support</p>
+              <p className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+                <span className="relative flex h-1.5 w-1.5">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60"></span>
+                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
+                </span>
+                AI agent is online
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
             <button
               onClick={() => setDock("voice")}
-              className="flex items-center gap-2 rounded-full border border-green-700 bg-green-900/80 px-4 py-2.5 text-sm font-medium text-green-100 shadow-lg backdrop-blur hover:bg-green-800"
+              className="flex flex-col items-center gap-1 rounded-xl border border-green-800 bg-green-950/40 px-3 py-2.5 text-green-200 transition-colors hover:bg-green-900/50"
             >
-              <Phone className="h-4 w-4" /> Call the agent
+              <Phone className="h-4 w-4" />
+              <span className="text-xs font-medium">Call the agent</span>
             </button>
             <button
               onClick={() => setDock("chat")}
-              className="flex items-center gap-2 rounded-full border border-blue-700 bg-blue-900/80 px-4 py-2.5 text-sm font-medium text-blue-100 shadow-lg backdrop-blur hover:bg-blue-800"
+              className="flex flex-col items-center gap-1 rounded-xl border border-blue-800 bg-blue-950/40 px-3 py-2.5 text-blue-200 transition-colors hover:bg-blue-900/50"
             >
-              <MessageSquare className="h-4 w-4" /> Chat with the agent
+              <MessageSquare className="h-4 w-4" />
+              <span className="text-xs font-medium">Chat with the agent</span>
             </button>
-          </>
-        )}
-      </div>
+          </div>
+        </div>
+      )}
 
       {dock && (
         <AgentDock
@@ -626,6 +661,7 @@ function OrdersCard({
   products,
   clientId,
   now,
+  fetchedAt,
   onRefresh,
   onChanged,
   onError,
@@ -635,6 +671,7 @@ function OrdersCard({
   products: ProductView[];
   clientId: string;
   now: number;
+  fetchedAt: number;
   onRefresh: () => void;
   onChanged: (orders: OrderView[]) => void;
   onError: (message: string | null) => void;
@@ -663,6 +700,7 @@ function OrdersCard({
             products={products}
             clientId={clientId}
             now={now}
+            fetchedAt={fetchedAt}
             onChanged={onChanged}
             onError={onError}
             onNotice={onNotice}
@@ -678,6 +716,7 @@ function OrderCard({
   products,
   clientId,
   now,
+  fetchedAt,
   onChanged,
   onError,
   onNotice,
@@ -686,6 +725,7 @@ function OrderCard({
   products: ProductView[];
   clientId: string;
   now: number;
+  fetchedAt: number;
   onChanged: (orders: OrderView[]) => void;
   onError: (message: string | null) => void;
   onNotice: (message: string) => void;
@@ -696,7 +736,10 @@ function OrderCard({
   const [addressDraft, setAddressDraft] = useState(order.shippingAddress);
   const [showAddress, setShowAddress] = useState(false);
 
-  const remaining = Math.max(0, order.nextChangeInMs - (now - order.statusUpdatedAt < 0 ? 0 : 0));
+  // The server returns nextChangeInMs as of the last fetch; subtract the time
+  // that has elapsed since then so the countdown ticks down smoothly (it resets
+  // to ~1 minute whenever the order is edited while still PLACED).
+  const remaining = Math.max(0, order.nextChangeInMs - Math.max(0, now - fetchedAt));
   const stepIndex = STATUS_STEPS.findIndex((s) => s.key === order.status);
 
   const apply = async (edit: Parameters<typeof editOrder>[2], successMessage: string) => {
@@ -752,7 +795,16 @@ function OrderCard({
 
       {order.nextChangeInMs > 0 && (
         <p className="mt-2 text-[11px] text-zinc-500">
-          Next status change in <span className="text-zinc-300">{countdown(remaining)}</span>
+          {order.editable && order.statusUpdatedAt > order.placedAt ? (
+            <>
+              Timer restarted — <span className="text-zinc-300">{countdown(remaining)}</span> to the next stage
+              (editing again resets it to 1 minute).
+            </>
+          ) : (
+            <>
+              Next status change in <span className="text-zinc-300">{countdown(remaining)}</span>
+            </>
+          )}
         </p>
       )}
 

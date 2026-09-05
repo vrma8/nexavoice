@@ -16,7 +16,7 @@ import { getClientSession } from "@/lib/session";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { LoadingSkeleton } from "./LoadingSkeleton";
 import { Button } from "@/components/ui/button";
-import { Phone, Loader2 } from "lucide-react";
+import { Phone, Loader2, Lock } from "lucide-react";
 
 // Dynamically import the ConversationComponent with SSR disabled
 const ConversationComponent = dynamic(() => import("./ConversationComponent"), {
@@ -277,46 +277,62 @@ export default function VoiceAgentCall({ onCallEnded }: { onCallEnded?: () => vo
   }
 
   return (
-    <div className="flex flex-col items-center justify-center h-full absolute inset-0 space-y-8 px-4">
-      <div className="text-center space-y-4">
-        <div className="w-32 h-32 rounded-full bg-zinc-800 border-4 border-blue-500 mx-auto flex items-center justify-center relative">
-          <div className="absolute inset-0 bg-blue-500/10 rounded-full"></div>
-          <Phone className="w-12 h-12 text-blue-400 z-10" />
+    <div className="flex h-full w-full flex-col items-center justify-center overflow-y-auto px-6 py-8">
+      <div className="flex w-full max-w-sm flex-1 flex-col items-center justify-start pt-6 text-center">
+        {/* Avatar */}
+        <div className="relative mb-5">
+          <div className="flex h-28 w-28 items-center justify-center rounded-full border-4 border-blue-500 bg-zinc-800 shadow-lg shadow-blue-900/40">
+            <span className="absolute inset-0 rounded-full bg-blue-500/10"></span>
+            <Phone className="h-12 w-12 text-blue-400" />
+          </div>
+          <span className="absolute -bottom-1 -right-1 flex h-7 w-7 items-center justify-center rounded-full border-2 border-zinc-950 bg-green-500">
+            <span className="h-2 w-2 rounded-full bg-zinc-950"></span>
+          </span>
         </div>
+
         <h2 className="text-2xl font-semibold text-white">Talk to Nexa</h2>
-        <p className="text-zinc-400 max-w-xs mx-auto text-sm">
-          Tap to call NexaMart support. Speak in Hindi, English, or Hinglish — check an order, cancel,
-          return, change an address, or ask for a human agent.
+        <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+          Speak in Hindi, English, or Hinglish — check an order, cancel, change an address,
+          or ask for a human agent.
         </p>
       </div>
 
       {error && (
-        <div className="bg-red-900/30 border border-red-700 text-red-400 text-sm rounded-lg px-4 py-3 max-w-xs text-center">
+        <div className="mt-5 w-full max-w-sm rounded-lg border border-red-800 bg-red-950/40 px-4 py-3 text-center text-sm text-red-300">
           {error}
         </div>
       )}
 
-      <Button
-        className="w-48 h-14 text-lg rounded-full bg-green-600 hover:bg-green-700 text-white font-semibold shadow-lg shadow-green-900/40 transition-all"
-        onClick={handleStartCall}
-        disabled={isLoading}
-      >
-        {isLoading ? (
-          <>
-            <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-            Connecting...
-          </>
-        ) : (
-          <>
-            <Phone className="w-5 h-5 mr-2" />
-            Start Call
-          </>
-        )}
-      </Button>
+      {/* Primary action + reassurance */}
+      <div className="mt-auto flex w-full max-w-sm flex-col items-center gap-3 pb-2 pt-8">
+        <Button
+          className="h-14 w-full rounded-full bg-green-600 text-lg font-semibold text-white shadow-lg shadow-green-900/40 transition-all hover:bg-green-700"
+          onClick={handleStartCall}
+          disabled={isLoading}
+        >
+          {isLoading ? (
+            <>
+              <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+              Connecting…
+            </>
+          ) : (
+            <>
+              <Phone className="mr-2 h-5 w-5" />
+              Start Call
+            </>
+          )}
+        </Button>
 
-      <p className="text-xs text-zinc-600">
-        Powered by Agora Conversational AI
-      </p>
+        <ul className="flex w-full flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[11px] text-zinc-500">
+          <li className="flex items-center gap-1"><Lock className="h-3 w-3" /> Private</li>
+          <li className="text-zinc-700">•</li>
+          <li>Clear audio</li>
+          <li className="text-zinc-700">•</li>
+          <li>No app needed</li>
+        </ul>
+
+        <p className="text-center text-xs text-zinc-600">Powered by Agora Conversational AI</p>
+      </div>
     </div>
   );
 }

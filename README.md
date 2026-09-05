@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org/)
 
-NexaVoice is **NexaMart**, a small Indian online shop with AI-first customer support. A customer signs in, shops a 50-product catalogue priced in rupees, places an order and watches it move **placed → on the way → delivered**. While an order is still *placed* its items can be changed — by the customer on the page, or by the AI agent when they ask.
+NexaVoice is **NexaMart**, a small Indian online shop with AI-first customer support. A customer signs in, shops a 60-product catalogue priced in rupees, places an order and watches it move **placed → on the way → delivered**. While an order is still *placed* its items can be changed — by the customer on the page, or by the AI agent when they ask.
 
 Support is one click away from the shopping page: **chat** or a **voice call** (Agora Conversational AI Engine — STT → LLM → TTS in Agora Cloud), in **Hindi, English or Hinglish**. The agent reads the customer's real orders from PostgreSQL and — only with explicit confirmation — changes them, and it escalates to a **human agent dashboard** that shows only live calls and chats and receives a handoff summary with the customer's profile, orders and what was already said. For voice, the human joins the *same* Agora channel and the AI hands over and leaves.
 
@@ -19,7 +19,7 @@ Built on the Agora Next.js quickstart (voice visualizer via [Agent UIKit](https:
 | `/support-agent`             | Human    | Live dashboard: ongoing calls/chats, escalation queue, handoff summary + customer details  |
 | `/support-agent/cases/[id]`  | Human    | Case workspace: transcript, join the customer's call (AI leaves), chat reply, resolve      |
 
-Everything the app shows lives in **PostgreSQL**: clients, the fixed 50-product catalogue ([`lib/shop/catalog-data.ts`](lib/shop/catalog-data.ts) → `Product` rows), carts, orders and the support store. Sign-in creates or matches a client by mobile number; the login page offers three ready-made demo customers (Rahul Sharma 9876543210 · Delhi, Priya Nair 9123456780 · Bengaluru, Amit Verma 9988776655 · Lucknow) and any new customer shops the same catalogue.
+Everything the app shows lives in **PostgreSQL**: clients, the fixed 60-product catalogue ([`lib/shop/catalog-data.ts`](lib/shop/catalog-data.ts) → `Product` rows), carts, orders and the support store. Sign-in creates or matches a client by mobile number; the login page offers three ready-made demo customers (Rahul Sharma 9876543210 · Delhi, Priya Nair 9123456780 · Bengaluru, Amit Verma 9988776655 · Lucknow) and any new customer shops the same catalogue.
 
 ## Prerequisites
 
@@ -166,7 +166,7 @@ Defined in [`env.local.example`](env.local.example).
 | ---------------------------- | :------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `NEXT_PUBLIC_AGORA_APP_ID`   |    ✅    | Agora Console → Project → App ID. Type **Config**, targeted at **Production + Preview**, then **redeploy** — a `NEXT_PUBLIC_*` value is inlined at build time, so an existing deployment keeps the old one. Alias: `AGORA_APP_ID` (server-side only — the browser then gets the App ID at runtime from `/api/generate-agora-token`). |
 | `NEXT_AGORA_APP_CERTIFICATE` |    ✅    | Agora Console → Project → App Certificate. **Server-side only.** Alias: `AGORA_APP_CERTIFICATE`.                                                                         |
-| `DATABASE_URL`               |    ✅    | PostgreSQL connection string. Holds clients, the 50-product catalogue, carts, orders and the mirrored support store. Without it the shopping page is disabled and conversation state is per-instance (fine for a quick look, broken on Vercel). |
+| `DATABASE_URL`               |    ✅    | PostgreSQL connection string. Holds clients, the 60-product catalogue, carts, orders and the mirrored support store. Without it the shopping page is disabled and conversation state is per-instance (fine for a quick look, broken on Vercel). |
 | `NEXAVOICE_STORE`            |    –     | `memory` \| `postgres`. Auto-detected: `postgres` when `DATABASE_URL` exists, otherwise `memory`. |
 | `NEXAVOICE_STATE_KEY`        |    –     | Row id of the mirrored support store (default `nexavoice`); override to isolate a test store. |
 | `ORDER_PLACED_SECONDS`       |    –     | How long a new order stays **Placed** — and therefore editable — before it goes out for delivery (default `120`). |
@@ -192,12 +192,13 @@ The agent pipeline in [`lib/agent-config.ts`](lib/agent-config.ts) uses Agora-ma
 
 ### The catalogue and the demo data
 
-The shop is deliberately fixed: **50 products** (electronics, kitchen, grocery,
-fashion, beauty, home, sports, stationery), all priced in rupees, defined once in
-[`lib/shop/catalog-data.ts`](lib/shop/catalog-data.ts) and written to the `Product`
-table by `pnpm seed`. Every customer — the three demo ones and anybody who signs
-up — shops from exactly that list, so an agent tool call can always be matched to a
-real product.
+The shop is deliberately fixed: **60 products** (electronics, kitchen, grocery,
+fashion, beauty, home, sports, stationery, medicine), all priced in rupees, defined
+once in [`lib/shop/catalog-data.ts`](lib/shop/catalog-data.ts) and written to the
+`Product` table by `pnpm seed`. Every customer — the three demo ones and anybody who
+signs up — shops from exactly that list, so an agent tool call can always be matched
+to a real product. The 10 medicine products carry a short caution note that is
+displayed on their card.
 
 `pnpm seed` is idempotent (products are upserted by SKU) and safe to re-run after a
 deploy; it never touches customers, carts or orders. There are no demo orders: the
@@ -259,7 +260,7 @@ The browser fetches a combined RTC + RTM token (`buildTokenWithRtm`) from this a
 
 - browser voice client (Next.js App Router) with RTC audio plus RTM transcript/state events
 - Agora Conversational AI agent tuned as **Nexa**, a NexaMart shopping-support assistant (Hindi/English/Hinglish)
-- a **shopping page**: 50-product catalogue in rupees, cart, checkout, and orders that move `placed → on the way → delivered` on their own
+- a **shopping page**: 60-product catalogue in rupees, cart, checkout, and orders that move `placed → on the way → delivered` on their own
 - **controlled backend actions**: read the signed-in customer's orders → add / remove items, change the address, cancel — only after they confirm, only while the order is still *placed*, all rules enforced server-side and audited
 - text chat sharing the same tools, conversation state and escalation path
 - **human agent dashboard** (SSE + polling) showing only conversations that are still live, an escalation queue, and a handoff summary carrying the customer's profile, their orders and the tail of the transcript
@@ -322,7 +323,7 @@ Other vendors (STT/TTS) can be swapped in [`lib/agent-config.ts`](lib/agent-conf
 - `lib/agent-config.ts`, `lib/agent-prompt.ts`, `lib/agent-tools.ts` — agent pipeline, system prompt, tool schemas / REST tool wiring
 - `lib/agora-server.ts` — server-side Agora client (`stopAgent`, `speakAsAgent`, auth headers)
 - `lib/support/{types,store,tools,persist}.ts` — conversation/case model, store + events + heartbeat sweep, guarded `executeTool` + handoff summary, PostgreSQL mirror
-- `lib/shop/{catalog-data,service,http}.ts` — the 50 products, the Prisma shop service (catalogue, cart, orders, status machine) and the client-identity helper
+- `lib/shop/{catalog-data,service,http}.ts` — the 60 products, the Prisma shop service (catalogue, cart, orders, status machine) and the client-identity helper
 - `prisma/schema.prisma`, `scripts/db-push.mjs`, `scripts/seed-catalog.ts`, `scripts/dev-db.mjs` — database schema, offline `db push`, catalogue seed, zero-install PostgreSQL
 - `lib/chat-agent.ts` — chat turn (LLM or rule-based)
 - `lib/api.ts` — browser API client

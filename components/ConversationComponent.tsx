@@ -627,7 +627,7 @@ export default function ConversationComponent({
       }
       controls={
         <div
-          className="mx-auto flex w-fit items-center gap-3 rounded-full border border-border bg-card/80 px-4 py-2 backdrop-blur-md"
+          className="mx-auto flex w-fit max-w-[95%] flex-wrap items-center justify-center gap-2 rounded-2xl border border-border bg-card/80 px-3 py-2 backdrop-blur-md"
           role="group"
           aria-label="Audio controls"
         >
@@ -643,17 +643,23 @@ export default function ConversationComponent({
               disabledColor="hsl(var(--destructive))"
             />
           </div>
+
           <MicrophoneSelector localMicrophoneTrack={localMicrophoneTrack} />
+
+          <span className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
+
           {agoraData.conversationId && (
             <button
               type="button"
               onClick={() => void handleRequestHuman()}
               disabled={!canEscalate}
-              className="flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex h-10 items-center gap-2 rounded-full border border-border px-4 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
               aria-label="Talk to a human agent"
             >
-              <Headset className="h-3.5 w-3.5" />
-              {(backendConversation?.state ?? 'AI_HANDLING') === 'AI_HANDLING' ? 'Talk to a human' : 'Human requested'}
+              <Headset className="h-4 w-4" />
+              {(backendConversation?.state ?? 'AI_HANDLING') === 'AI_HANDLING'
+                ? 'Talk to a human'
+                : 'Human requested'}
             </button>
           )}
         </div>

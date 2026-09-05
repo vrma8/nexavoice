@@ -30,7 +30,7 @@ To exercise the serverless state path locally, run `pnpm build && pnpm start` ag
 ## Reset the Data
 
 - `pnpm db:reset` drops and recreates the schema (development only), then `pnpm seed` to reload the catalogue.
-- `pnpm seed` alone is idempotent: it upserts the 50 products by SKU and leaves clients, carts and orders untouched.
+- `pnpm seed` alone is idempotent: it upserts the 60 products by SKU and leaves clients, carts and orders untouched.
 - The dashboard needs no fixture — it shows live conversations only, so it is empty until somebody actually shops and asks for support.
 
 ## Change Agent Behavior

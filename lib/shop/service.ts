@@ -7,7 +7,7 @@
  * business rules below hold for a human clicking in the UI *and* for the AI
  * agent calling a tool:
  *
- *   • a client can only buy the 50 catalogue products (`ensureCatalog`);
+ *   • a client can only buy the 60 catalogue products (`ensureCatalog`);
  *   • orders are always scoped to the signed-in client id — no cross-client reads;
  *   • an order's items may only change while it is still `PLACED`;
  *   • status moves PLACED → ON_THE_WAY → DELIVERED on a timer (`syncOrderStatuses`),
@@ -35,14 +35,50 @@ function seconds(name: string, fallback: number): number {
   return Number.isFinite(raw) && raw > 0 ? raw * 1000 : fallback * 1000;
 }
 
-/** How long an order stays editable / cancellable in PLACED. */
+/** How long an order stays editable / cancellable in PLACED (before any edit). */
 export function placedWindowMs(): number {
   return seconds('ORDER_PLACED_SECONDS', 120);
+}
+
+/**
+ * How long the order then counts down to the NEXT stage (ON_THE_WAY) once the
+ * customer/agent has started editing it while it is still PLACED. Editing resets
+ * the timer, so you get a full minute to finish making changes before the order
+ * leaves the editable stage.
+ */
+export function placedEditWindowMs(): number {
+  return seconds('ORDER_EDIT_SECONDS', 60);
 }
 
 /** How long the order then stays ON_THE_WAY before it is DELIVERED. */
 export function transitWindowMs(): number {
   return seconds('ORDER_TRANSIT_SECONDS', 180);
+}
+
+/**
+ * The timestamp at which the current status should advance to the next one.
+ *
+ * `statusUpdatedAt` is the anchor: it equals `placedAt` on creation and is moved
+ * forward whenever the order is edited (PLACED) or changes status, so we can
+ * detect "the customer started changing the order" purely from the row. An edit
+ * while PLACED restarts the countdown to `placedEditWindowMs()` (default 1 min).
+ */
+function nextStatusChangeAt(row: {
+  status: string;
+  placedAt: Date;
+  statusUpdatedAt: Date;
+}): number {
+  const status = row.status as OrderStatus;
+  const placedAt = row.placedAt.getTime();
+  const statusUpdatedAt = row.statusUpdatedAt.getTime();
+  if (status === 'PLACED') {
+    const edited = statusUpdatedAt > placedAt;
+    return statusUpdatedAt + (edited ? placedEditWindowMs() : placedWindowMs());
+  }
+  if (status === 'ON_THE_WAY') {
+    return statusUpdatedAt + transitWindowMs();
+  }
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +95,8 @@ export interface ProductView {
   emoji: string;
   imageUrl?: string;
   rating: number;
+  /** Short safety note shown on the card (e.g. medicines); empty otherwise. */
+  caution?: string;
 }
 
 export interface CartLineView {
@@ -131,7 +169,7 @@ export function formatInr(value: number): string {
 let catalogEnsured = false;
 
 /**
- * Writes the 50 fixed products once. Idempotent (upsert by sku) so two cold
+ * Writes the 60 fixed products once. Idempotent (upsert by sku) so two cold
  * serverless instances cannot double the catalogue, and safe to call on every
  * request — after the first success it is a no-op for the process.
  */
@@ -181,6 +219,7 @@ function toProductView(row: {
   emoji: string;
   imageUrl?: string | null;
   rating: number;
+  caution?: string;
 }): ProductView {
   return {
     id: row.id,
@@ -192,6 +231,7 @@ function toProductView(row: {
     emoji: row.emoji,
     imageUrl: row.imageUrl ?? undefined,
     rating: row.rating,
+    caution: row.caution || undefined,
   };
 }
 
@@ -280,6 +320,17 @@ const SEARCH_ALIASES: Record<string, string> = {
   'इतिहास': 'history',
   'खिलौना': 'toy blocks', 'toys': 'toy blocks', 'गुड्डी': 'toy',
   'डायपर': 'diapers', 'नैपी': 'diapers', 'diaper': 'diapers',
+  // Medicine
+  'पैरासिटामोल': 'paracetamol', 'paracetamol': 'paracetamol', 'dolo': 'paracetamol', 'पेरासिटामोल': 'paracetamol',
+  'इबुप्रोफेन': 'ibuprofen', 'ibuprofen': 'ibuprofen', 'brufen': 'ibuprofen',
+  'कफ सिरप': 'cough syrup', 'खांसी': 'cough syrup', 'cough': 'cough syrup', 'सिरप': 'cough syrup', 'syrup': 'cough syrup',
+  'एसिडिटी': 'antacid', 'एंटासिड': 'antacid', 'antacid': 'antacid', 'digene': 'antacid', 'गैस': 'antacid', 'acidity': 'antacid',
+  'मल्टीविटामिन': 'multivitamin', 'multivitamin': 'multivitamin', 'विटामिन': 'multivitamin', 'vitamin': 'multivitamin',
+  'सिटीरिज़िन': 'cetirizine', 'cetirizine': 'cetirizine', 'एलर्जी': 'cetirizine', 'allergy': 'cetirizine', 'एंटीहिस्टामिन': 'cetirizine',
+  'ओआरएस': 'ors', 'ors': 'ors', 'इलेक्ट्रोलाइट': 'ors', 'निर्जलीकरण': 'ors',
+  'एंटीसेप्टिक': 'antiseptic', 'antiseptic': 'antiseptic', 'dettol': 'antiseptic', 'पट्टी': 'antiseptic', 'चोट': 'antiseptic',
+  'सैनिटाइज़र': 'hand sanitizer', 'sanitizer': 'hand sanitizer', 'सैनिटाइजर': 'hand sanitizer', 'साफ': 'hand sanitizer',
+  'थर्मामीटर': 'thermometer', 'thermometer': 'thermometer', 'बुखार': 'thermometer', 'पारा': 'thermometer',
 };
 
 /** Keyword search over the catalogue (used by the UI filter and the AI tool). */
@@ -437,12 +488,7 @@ export function toOrderView(row: OrderRow): OrderView {
   const status = row.status as OrderStatus;
   const now = Date.now();
   const placedAt = row.placedAt.getTime();
-  const nextChangeAt =
-    status === 'PLACED'
-      ? placedAt + placedWindowMs()
-      : status === 'ON_THE_WAY'
-        ? placedAt + placedWindowMs() + transitWindowMs()
-        : 0;
+  const nextChangeAt = nextStatusChangeAt(row);
   return {
     id: row.id,
     code: row.code,
@@ -486,10 +532,19 @@ export async function syncOrderStatuses(clientId?: string): Promise<void> {
     },
   });
   for (const row of open) {
-    const placedAt = row.placedAt.getTime();
-    const shipAt = placedAt + placedWindowMs();
-    const deliverAt = shipAt + transitWindowMs();
     const history = historyOf(row);
+    const placedAt = row.placedAt.getTime();
+    const statusUpdatedAt = row.statusUpdatedAt.getTime();
+    // PLACED orders ship when the current (possibly reset) countdown elapses;
+    // ON_THE_WAY orders ship at their original placed + placed-window edge.
+    const shipAt =
+      row.status === 'ON_THE_WAY' ? placedAt + placedWindowMs() : nextStatusChangeAt(row);
+    // Delivery is always ship + transit-window, so an edit that restarts the
+    // PLACED countdown also pushes the estimated delivery out.
+    const deliverAt =
+      row.status === 'ON_THE_WAY'
+        ? statusUpdatedAt + transitWindowMs()
+        : shipAt + transitWindowMs();
 
     if (now >= deliverAt) {
       if (row.status === 'PLACED') history.push({ at: shipAt, event: 'Picked up by courier — on the way' });
@@ -623,13 +678,25 @@ async function loadEditableOrder(clientId: string, codeInput: string) {
   return found;
 }
 
+/**
+ * Recomputes an order's total and timeline, and — while it is still PLACED —
+ * restarts the status countdown. Editing the order "stops" the existing timer
+ * and starts a fresh `placedEditWindowMs()` (default 1 minute) before it moves
+ * to the next stage, so the customer/agent has a full minute to finish changing
+ * the items instead of racing a timer that was already half over.
+ */
 async function recalcOrder(orderId: string, event: string): Promise<OrderView> {
   const row = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, include: ORDER_INCLUDE });
+  const now = Date.now();
   const total = row.items.reduce((sum, item) => sum + item.priceInr * item.qty, 0);
-  const history = [...historyOf(row), { at: Date.now(), event }];
+  const history = [...historyOf(row), { at: now, event }];
+  const restarted = row.status === 'PLACED';
+  // statusUpdatedAt is the anchor for the countdown; moving it to `now` resets it.
+  const statusUpdatedAt = restarted ? new Date(now) : row.statusUpdatedAt;
+  const expectedDelivery = restarted ? new Date(now + placedEditWindowMs() + transitWindowMs()) : row.expectedDelivery;
   const updated = await prisma.order.update({
     where: { id: orderId },
-    data: { totalInr: total, history },
+    data: { totalInr: total, history, statusUpdatedAt, expectedDelivery },
     include: ORDER_INCLUDE,
   });
   return toOrderView(updated as OrderRow);
@@ -774,10 +841,14 @@ export async function updateOrderAddress(
     return fail('INVALID_ADDRESS', 'The new address is too short. Collect house/flat, street, city and PIN code.');
   }
   const now = Date.now();
+  // Changing the address is an edit too — restart the PLACED countdown so the
+  // customer gets a fresh minute before the order moves to the next stage.
   const updated = await prisma.order.update({
     where: { id: found.data.id },
     data: {
       shippingAddress: address,
+      statusUpdatedAt: new Date(now),
+      expectedDelivery: new Date(now + placedEditWindowMs() + transitWindowMs()),
       history: [...found.data.history, { at: now, event: 'Delivery address updated' }],
     },
     include: ORDER_INCLUDE,
