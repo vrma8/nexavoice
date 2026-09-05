@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { RtcTokenBuilder, RtcRole } from 'agora-token';
+import { getAgoraCredentials } from '@/lib/agora-server';
 
 const EXPIRATION_TIME_IN_SECONDS = 3600;
 
@@ -23,14 +24,19 @@ function generateChannelName(): string {
 }
 
 export async function GET(request: NextRequest) {
-  const appId = process.env.NEXT_PUBLIC_AGORA_APP_ID;
-  const appCertificate = process.env.NEXT_AGORA_APP_CERTIFICATE;
+  let appId: string | undefined;
+  let appCertificate: string | undefined;
+  try {
+    ({ appId, appCertificate } = getAgoraCredentials());
+  } catch {
+    // appId/appCertificate stay undefined; the branch below reports which names to set.
+  }
 
   if (!appId || !appCertificate) {
     return NextResponse.json(
       {
         error: 'Agora credentials are not set',
-        hint: `Set ${appId ? '' : 'NEXT_PUBLIC_AGORA_APP_ID '}${appCertificate ? '' : 'NEXT_AGORA_APP_CERTIFICATE '}in Vercel → Project Settings → Environment Variables (Production), then redeploy so the build sees them.`,
+        hint: `Set ${appId ? '' : 'NEXT_PUBLIC_AGORA_APP_ID (or AGORA_APP_ID) '}${appCertificate ? '' : 'NEXT_AGORA_APP_CERTIFICATE (or AGORA_APP_CERTIFICATE) '}in Vercel → Project Settings → Environment Variables (Production + Preview), then redeploy so the build sees them.`,
       },
       { status: 500 },
     );

@@ -28,10 +28,12 @@ agora project doctor --deep
 
 ## Required Environment Variables
 
-- `NEXT_PUBLIC_AGORA_APP_ID`: Agora project App ID.
-- `NEXT_AGORA_APP_CERTIFICATE`: Agora App Certificate (server only).
+- `NEXT_PUBLIC_AGORA_APP_ID`: Agora project App ID. Alias: `AGORA_APP_ID` (server-side only; the browser then gets the App ID at runtime from `/api/generate-agora-token`).
+- `NEXT_AGORA_APP_CERTIFICATE`: Agora App Certificate (server only). Alias: `AGORA_APP_CERTIFICATE`.
 
 The base `.env.local` contract contains only these Agora credentials; chat, dashboard and the voice agent (without backend tools) work with them alone.
+
+Names that look related but are **never read**: `AGORA_PROJECT_ID`, `AGORA_PROJECT_NAME`, `AGORA_ENABLED_FEATURES`, `AGORA_FEATURE_RTC/RTM/CONVOAI` (Agora CLI / template metadata). Enabling Conversational AI is a console action (`agora project doctor --deep` verifies), not an env var. `/api/health` (`agora.credentialSources`) lists any of these that are set.
 
 ## NexaVoice Optional Variables
 
@@ -40,6 +42,9 @@ The base `.env.local` contract contains only these Agora credentials; chat, dash
   must match the project's service area (Asia-Pacific, including India, is `AP`). Anything
   else logs a warning once and falls back to `US`, because a wrong region surfaces as an
   agent that never starts rather than a clear error.
+- `AGORA_REGION`: fallback for `AGORA_AREA` using the Agora CLI's naming (`US`/`EU`/`AP`/`CN`
+  map directly; the CLI's `global` routes through the US gateway). Read only when
+  `AGORA_AREA` is unset.
 - `AGENT_LANGUAGE` (`en-IN` default), `AGENT_STT_LANGUAGE` (`multi`), `AGENT_TTS_VOICE_ID`.
 - `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` (+ `NEXT_LLM_MODEL`): BYOK LLM for the chat agent and the custom-LLM voice path. Without them chat falls back to the rule-based agent.
 
@@ -127,11 +132,17 @@ Vercel:
   complete a second turn.
 - Set `NEXAVOICE_SEED=demo` if the deployment should come up with a populated dashboard
   (see `05_workflows.md` → "Populate the Dashboard with Demo Data").
-- Set `AGORA_AREA` when the project is not in the `US` area (`AP` covers India), and
+- Set `AGORA_AREA` when the project is not in the `US` area (`AP` covers India; `AGORA_REGION`
+  with the CLI's `global` value routes through `US`), and
   `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` to replace the rule-based chat agent with the LLM one.
 - Check the deployment with `curl https://<deployment>/api/health` — it reports credential
-  presence, whether the bundle was built with the App ID, tool wiring, the LLM provider and
-  the store backend, and never a secret value.
+  presence, which env names provided them (`agora.credentialSources`, including inert Agora
+  CLI variables that are set), whether the bundle was built with the App ID, tool wiring,
+  the LLM provider and the store backend, and never a secret value. By default it also runs
+  one read-only live round trip to the Conversational AI control plane (`agora.convoai`;
+  skip with `?deep=0`): `ok: true` proves credentials, feature enablement, gateway area and
+  quota in a single shot, and a failure names the broken leg (auth / feature / quota / area)
+  in its `hint`.
 
 ## Setup Change Checklist
 
