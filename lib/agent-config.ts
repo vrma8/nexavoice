@@ -160,7 +160,7 @@ export function buildNexaVoiceAgent({
       silence_config: {
         timeout_ms: 12000,
         action: 'speak',
-        content: 'Kya aap line par hain? Main aapki madad ke liye yahan hoon.',
+        content: 'Are you still there? I am here to help you.',
       },
     },
   })

@@ -91,7 +91,10 @@ export function createChatCompletionsHandler({
       ...(conversation
         ? {
             tools: buildConversationTools(conversation.id),
-            stopWhen: stepCountIs(5),
+            // Enough steps to read the cart/order, search the catalogue, preview
+            // a change and apply it after a yes — all inside one spoken turn, so
+            // the agent never answers with "let me check" and then goes silent.
+            stopWhen: stepCountIs(10),
           }
         : {}),
     });
