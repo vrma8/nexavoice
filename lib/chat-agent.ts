@@ -45,29 +45,49 @@ export async function runChatTurn(conversationId: string): Promise<ChatTurnResul
 }
 
 /**
- * First rule-based turn only: confirm — in the language just used — that this is
- * the language the customer wants. The greeting already asked; this repeats the
- * confirmation once in the conversation itself and marks it settled. An explicit
- * language request ("hindi me baat karo") at any point switches and saves the
- * preference through `set_preferred_language` (see the rule-based turn below).
+ * Until the customer has picked a language, every rule-based reply carries the
+ * English language question. The greeting asks it once; this keeps asking (in
+ * English) until they answer, so the agent never silently settles into Hindi or
+ * Hinglish on its own. An explicit request ("hindi me baat karo") at any point
+ * switches and saves the preference through `set_preferred_language`.
  */
 function withLanguageConfirmation(conversationId: string, reply: string): string {
   const conversation = getConversation(conversationId);
   if (!conversation || conversation.state !== 'AI_HANDLING') return reply;
   if (conversation.context.languageConfirmed || conversation.caseId) return reply;
-  if (listMessages(conversationId).length > 2) return reply; // not the first turn
-  const lang = toLang(conversation.context.language) ?? 'hinglish';
-  updateConversation(conversationId, { context: { languageConfirmed: true } });
-  return `${reply}\n\n${pick(lang, {
-    en: "(I'll continue in English — tell me if you'd prefer Hindi or Hinglish.)",
-    hi: '(मैं हिंदी में बात कर रही हूँ — अगर आप English या Hinglish पसंद करेंगे तो बता दीजिए।)',
-    hinglish: '(Main Hinglish mein baat kar rahi hoon — Hindi ya English prefer karein to bata dijiye.)',
-  })}`;
+  if (listMessages(conversationId).length > 4) return reply; // asked enough
+  return `${reply}\n\n(Which language would you like — English, Hindi or Hinglish?)`;
 }
 
 // ---------------------------------------------------------------------------
 // LLM path
 // ---------------------------------------------------------------------------
+
+/**
+ * A reply that only PROMISES work ("let me check your cart", "ek second, main
+ * dekh kar batati hoon") is a dead end in a request/response chat: the model
+ * cannot send a second message on its own, so the customer waits forever. When
+ * the model produces one of these we run one more step with an explicit nudge
+ * so the tools actually run and the answer comes back in the same turn.
+ */
+const STALL_RE =
+  /\b(let me (just )?(check|look|see|verify|confirm|pull up|take a look)|i('| a)?ll (just )?(check|look|see|verify|confirm|have a look)|i am (checking|looking)|i'm (checking|looking)|give me a (second|moment|minute)|one (second|moment|minute)|hold on|please wait|checking (that|this|your|the)|main (abhi |zara )?(check|dekh|pata)\w* (kar|karke|kar ke)?\s*(rahi|rahe|leti|leta|ke)?|ek (second|minute|min|pal)|zara (dekh|check)|thoda (wait|ruk)|dekh kar batati|check karke batati|get back to you|batati hoon|bata(ta|ti) hu|abhi dekhti|abhi dekhta|looking into (it|this)|working on (it|this))\b|एक (सेकंड|मिनट|पल)|देख(कर| कर) बताती|अभी (देखती|चेक)|जरा (देख|चेक)|थोड़ा (रुक|इंतज़ार)/i;
+
+/** A stall only matters when the model gave nothing else — a promise plus real data is fine. */
+export function isStall(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  if (!STALL_RE.test(trimmed)) return false;
+  // Real content alongside the promise (numbers, a product/order, a question
+  // about a concrete change) means the turn is usable.
+  const hasSubstance = /₹|\bNM-\d|\d{2,}/.test(trimmed) && trimmed.length > 80;
+  return !hasSubstance;
+}
+
+const NO_STALL_REMINDER =
+  'Reminder: you cannot send a follow-up message on your own. Do not reply with a promise to check something — ' +
+  'call the tools you need right now (get_cart_status, list_recent_orders, get_order_status, search_products are free to call), ' +
+  'then give ONE complete answer that already contains the result and, for any change, a clear yes/no confirmation question.';
 
 async function runLlmTurn(conversation: Conversation, apiKey: string, url: string): Promise<string> {
   const openai = createOpenAI({ apiKey, baseURL: url.replace(/\/chat\/completions\/?$/, '') });
@@ -79,21 +99,46 @@ async function runLlmTurn(conversation: Conversation, apiKey: string, url: strin
         ? { role: 'user' as const, content: m.content }
         : { role: 'assistant' as const, content: m.role === 'human_agent' ? `[Human agent] ${m.content}` : m.content },
     );
+  const system = buildSystemPrompt({
+    mode: 'chat',
+    customerName: conversation.context.customer?.name,
+    preferredLanguage: normalizeLanguageName(
+      conversation.context.customer?.preferredLanguage ?? conversation.context.language,
+    ),
+  });
+  const tools = buildConversationTools(conversation.id);
+
   const { text } = await generateText({
     model: openai(modelId),
-    system: buildSystemPrompt({
-      mode: 'chat',
-      customerName: conversation.context.customer?.name,
-      preferredLanguage: normalizeLanguageName(
-        conversation.context.customer?.preferredLanguage ?? conversation.context.language,
-      ),
-    }),
+    system,
     messages: history,
-    tools: buildConversationTools(conversation.id),
-    stopWhen: stepCountIs(6),
+    tools,
+    // Enough steps for the real flows: read the cart, search the catalogue,
+    // preview the change and — after a yes — apply it, all in one turn.
+    stopWhen: stepCountIs(10),
     temperature: 0.4,
   });
-  return text.trim() || 'Sorry, could you say that again?';
+
+  const first = text.trim();
+  if (!isStall(first)) return first || 'Sorry, could you say that again?';
+
+  // The model stalled: run the turn again with the promise on the record and an
+  // explicit instruction to finish the job now.
+  const retry = await generateText({
+    model: openai(modelId),
+    system,
+    messages: [
+      ...history,
+      ...(first ? [{ role: 'assistant' as const, content: first }] : []),
+      { role: 'user' as const, content: NO_STALL_REMINDER },
+    ],
+    tools,
+    stopWhen: stepCountIs(10),
+    temperature: 0.2,
+  });
+  const second = retry.text.trim();
+  if (second && !isStall(second)) return second;
+  return second || first || 'Sorry, could you say that again?';
 }
 
 // ---------------------------------------------------------------------------
@@ -113,14 +158,39 @@ function toLang(stored?: string): Lang | undefined {
   return undefined;
 }
 
-function detectLanguage(text: string, fallback?: string): Lang {
-  if (/[\u0900-\u097F]/.test(text)) return 'hi';
-  if (HINGLISH_HINTS.test(text)) return 'hinglish';
-  if (/^[\s\d+\-()#a-z]{0,12}$/i.test(text)) {
-    const prev = toLang(fallback);
-    if (prev) return prev;
+/**
+ * Which language this turn should be answered in.
+ *
+ * The rule is "English first, then whatever the customer settled on":
+ *  - before the customer has chosen, answer in English — unless they clearly
+ *    wrote Devanagari (then they obviously want Hindi);
+ *  - after a choice is settled, KEEP that language. A single stray word does not
+ *    flip it; only Devanagari script, or a genuinely mixed Hindi-English
+ *    message, moves the conversation (mixed input → Hinglish, mirroring them).
+ */
+export function detectLanguage(text: string, fallback?: string, settled = false): Lang {
+  const stored = toLang(fallback);
+  const devanagari = /[\u0900-\u097F]/.test(text);
+  const romanHindi = HINGLISH_HINTS.test(text);
+  const hasLatinWords = /[a-z]{3,}/i.test(text);
+
+  if (devanagari) return romanHindi && hasLatinWords ? 'hinglish' : 'hi';
+
+  // A short answer ("yes", "haan", "ok theek hai", "NM-10023") is a reply, not a
+  // language switch — keep whatever the conversation already settled on.
+  const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+  if (settled && stored && wordCount <= 3) return stored;
+
+  if (!settled) {
+    // English-first: until the customer answers the language question, a saved
+    // preference is NOT enough to leave English — only their own Hindi words are.
+    return romanHindi ? 'hinglish' : 'en';
   }
-  return 'en';
+
+  // Settled: stick to the saved language; a mixed message mirrors into Hinglish.
+  if (stored === 'en') return romanHindi ? 'hinglish' : 'en';
+  if (stored === 'hi') return romanHindi && hasLatinWords ? 'hinglish' : 'hi';
+  return stored ?? (romanHindi ? 'hinglish' : 'en');
 }
 
 // An explicit language request: a language NAME plus a switch-ish word ("hindi
@@ -145,7 +215,7 @@ function pick(lang: Lang, copy: Copy): string {
   return copy[lang];
 }
 
-const RE = {
+export const RE = {
   human:
     /\b(talk|speak|connect|transfer|need|want)\s+(me\s+)?(to|with)?\s*(a|an|some)?\s*(human|real|live|support|customer[- ]care|executive|representative|agent|manager|person)\b|\b(human|live)\s+(agent|support|executive)\b|\bescalate\b|\b(insaan|insan|aadmi|human|agent|manager|executive)\s+(se|sa|ki)\s+baat\b|\bbaat\s+(karao|karwao)\b|इंसान\s+से\s+बात|एजेंट\s+से\s+बात|किसी\s+से\s+बात/i,
   add: /\b(add|include|bhi (chahiye|dal|add)|dal do|daal do|daalo|dalo|jod|jodo|add kar|order me[in]? (add|dal))\b|जोड़|डाल|और चाहिए/i,
@@ -155,6 +225,12 @@ const RE = {
   status: /\b(status|kahan|kaha|where|track|tracking|deliver|delivery|kab|when|aayega|pahunch|update|my order|orders)\b|कहाँ|कब|स्टेटस|ऑर्डर|डिलीवरी/i,
   products: /\b(product|catalogue|catalog|show me|dikha|kitne ka|price|kitna|available|buy|kharid)\b|कीमत|दिखाओ|खरीद/i,
   cart: /\b(cart|basket)\b|कार्ट|टोकरी/i,
+  // "replace X with Y", "X ki jagah Y", "X ko Y se badal do", "change X to Y".
+  replace: /\b(replace|swap|exchange|badal|badlo|badal do|badal dijiye|change .* (to|with|se)|instead of|ki jagah|ke badle|ke bajay)\b|बदल|जगह|बजाय/i,
+  // "place my order", "order kar do", "checkout", "buy it now".
+  placeOrder: /\b(place (the |my |an )?order|order (kar do|kardo|karo|kar dijiye|place)|checkout|check out|buy (it |this )?now|confirm (the |my )?order|purchase (it|now)|order laga do)\b|ऑर्डर कर दो|ऑर्डर कर दीजिए|ऑर्डर लगा दो|खरीद लो/i,
+  // "empty my cart", "clear the cart", "cart khali kar do".
+  clearCart: /\b(empty (the |my )?(cart|basket)|clear (the |my )?(cart|basket)|cart (khali|khaali) (kar|kardo|kar do)|remove everything|sab hata do|sab kuch hata do)\b|कार्ट खाली|सब हटा/i,
   // Two alternations each: the ASCII half needs the trailing \b, but `\b` never
   // matches after Devanagari (its characters are not `\w`), so the Devanagari
   // half is anchored at the start only — otherwise "हाँ" would never confirm.
@@ -220,7 +296,7 @@ const DEV_STOPWORDS = new Set([
 ]);
 
 /** Strips the command words so what is left is (mostly) the product the customer named. */
-function extractProductPhrase(text: string): string {
+export function extractProductPhrase(text: string): string {
   return text
     .replace(/\bnm\s*-?\s*\d{4,6}\b/gi, ' ')
     .replace(
@@ -235,6 +311,29 @@ function extractProductPhrase(text: string): string {
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * Splits a replace request into the two product phrases.
+ * Handles "replace X with Y", "change X to Y", "X ki jagah Y", "X ke badle Y",
+ * "X ko Y se badal do" and the Devanagari equivalents.
+ */
+export function extractReplacePair(text: string): { from: string; to: string } | null {
+  const patterns: Array<{ re: RegExp; from: 1 | 2; to: 1 | 2 }> = [
+    { re: /(?:replace|swap|exchange|change)\s+(.+?)\s+(?:with|for|to|by|se)\s+(.+)/i, from: 1, to: 2 },
+    { re: /(.+?)\s+(?:ki jagah|ke badle|ke bajay|ki jgah)\s+(?:par\s+|pe\s+)?(.+)/i, from: 1, to: 2 },
+    { re: /(.+?)\s+ko\s+(.+?)\s+(?:se|me|mein)?\s*badal\s*(?:do|dijiye|den)?/i, from: 1, to: 2 },
+    { re: /(?:instead of)\s+(.+?)[, ]+\s*(?:add|send|bhejo|chahiye|de do)?\s*(.+)/i, from: 1, to: 2 },
+    { re: /(.+?)\s+(?:की जगह|के बदले|के बजाय)\s+(.+)/, from: 1, to: 2 },
+  ];
+  for (const { re, from, to } of patterns) {
+    const m = text.match(re);
+    if (!m) continue;
+    const a = extractProductPhrase(m[from] ?? '');
+    const b = extractProductPhrase(m[to] ?? '');
+    if (a && b) return { from: a, to: b };
+  }
+  return null;
 }
 
 function describeOrder(lang: Lang, o: AgentOrder): string {
@@ -296,7 +395,11 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
   // PIN codes are understood — and stored — the same way whichever language or
   // script the customer typed them in.
   const text = spokenNumbersToDigits(last?.content?.trim() ?? '');
-  const lang = detectLanguage(text, conversation.context.language);
+  const lang = detectLanguage(
+    text,
+    conversation.context.language ?? conversation.context.customer?.preferredLanguage,
+    Boolean(conversation.context.languageConfirmed),
+  );
   updateConversation(conversation.id, {
     context: { language: lang === 'hi' ? 'hindi' : lang === 'hinglish' ? 'hinglish' : 'english' },
   });
@@ -371,6 +474,19 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
         });
       }
       note(`new delivery address: ${text}`);
+      // The address is collected for two different actions: changing an existing
+      // order's address, and supplying one for a brand-new order.
+      if (pending.tool === 'place_order') {
+        setCtx({ pendingAction: { ...pending, args: { ...pending.args, shipping_address: text }, stage: 'confirm' } });
+        const cart = await call('get_cart_status');
+        const lines = ((cart.result.cart as AgentCartLine[]) ?? []).filter(Boolean);
+        const items = lines.map((l) => `${l.qty} x ${l.product}`).join(', ');
+        return pick(lang, {
+          en: `Delivering ${items} (₹${cart.result.total_inr}) to "${text}". Should I place the order? (yes / no)`,
+          hi: `${items} (₹${cart.result.total_inr}) "${text}" पर भेजूँगी। ऑर्डर कर दूँ? (हाँ / नहीं)`,
+          hinglish: `${items} (₹${cart.result.total_inr}) "${text}" par bhejungi. Order kar doon? (haan / nahi)`,
+        });
+      }
       setCtx({ pendingAction: { ...pending, args: { ...pending.args, new_address: text }, stage: 'confirm' } });
       return pick(lang, {
         en: `New address for ${pending.args.order_id}: "${text}". Should I update it? (yes / no)`,
@@ -445,29 +561,42 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
   // "cart" wins over the order flows: the cart is what the customer is about to
   // order, and cart changes go straight to their account (CartItem rows).
   const wantsCart = RE.cart.test(text);
-  const intent = wantsCart
-    ? RE.add.test(text)
-      ? 'cart_add'
-      : RE.remove.test(text)
-        ? 'cart_remove'
-        : 'cart_status'
-    : RE.add.test(text)
-      ? 'order_edit_add'
-      : RE.remove.test(text)
-        ? 'order_edit_remove'
-        : RE.cancel.test(text)
-          ? 'cancellation'
-          : RE.address.test(text)
-            ? 'address_change'
-            : RE.status.test(text)
-              ? 'order_status'
-              : RE.products.test(text)
-                ? 'product_search'
-                : null;
+  const mentionsOrder = /\b(order|orders)\b|ऑर्डर/i.test(text) || extractOrderCode(text) !== null;
+  const intent = RE.placeOrder.test(text)
+    ? 'place_order'
+    : RE.clearCart.test(text)
+      ? 'cart_clear'
+      : RE.replace.test(text)
+        ? // A replace targets the cart unless the customer clearly named an order.
+          mentionsOrder && !wantsCart
+          ? 'order_replace'
+          : 'cart_replace'
+        : wantsCart
+          ? RE.add.test(text)
+            ? 'cart_add'
+            : RE.remove.test(text)
+              ? 'cart_remove'
+              : 'cart_status'
+          : RE.add.test(text)
+            ? 'order_edit_add'
+            : RE.remove.test(text)
+              ? 'order_edit_remove'
+              : RE.cancel.test(text)
+                ? 'cancellation'
+                : RE.address.test(text)
+                  ? 'address_change'
+                  : RE.status.test(text)
+                    ? 'order_status'
+                    : RE.products.test(text)
+                      ? 'product_search'
+                      : null;
   if (intent) setCtx({ intent, misunderstandings: 0 });
 
   const needsOrders =
-    intent !== null && !['product_search', 'cart_add', 'cart_remove', 'cart_status'].includes(intent);
+    intent !== null &&
+    !['product_search', 'cart_add', 'cart_remove', 'cart_status', 'cart_replace', 'cart_clear', 'place_order'].includes(
+      intent,
+    );
   const orders = needsOrders ? await loadOrders() : [];
   const editable = orders.filter((o) => o.can_edit_items);
   const explicitCode = extractOrderCode(text);
@@ -591,6 +720,176 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
                 .join(', ')}.`
             : pick(lang, { en: 'The cart is empty.', hi: 'कार्ट खाली है।', hinglish: 'Cart khaali hai.' })
         }`;
+      }
+      return `${outcome.result.message}`;
+    }
+
+    case 'cart_replace': {
+      const current = await call('get_cart_status');
+      const lines = ((current.result.cart as AgentCartLine[]) ?? []).filter(Boolean);
+      const cartText = lines.map((l) => `${l.qty} x ${l.product}`).join(', ');
+      if (lines.length === 0) {
+        return pick(lang, {
+          en: 'Your cart is empty right now, so there is nothing to replace. Tell me what you would like to add.',
+          hi: 'आपका कार्ट अभी खाली है, इसलिए बदलने के लिए कुछ नहीं है। बताइए क्या जोड़ूँ?',
+          hinglish: 'Aapka cart abhi khaali hai, isliye replace karne ke liye kuch nahi hai. Bataiye kya add karoon?',
+        });
+      }
+      const pair = extractReplacePair(text);
+      if (!pair) {
+        return `${pick(lang, { en: 'Your cart has:', hi: 'आपके कार्ट में है:', hinglish: 'Aapke cart mein hai:' })} ${cartText}. ${pick(
+          lang,
+          {
+            en: 'Which product should I replace, and what should I put in its place?',
+            hi: 'किस प्रोडक्ट को बदलूँ, और उसकी जगह क्या डालूँ?',
+            hinglish: 'Kaunsa product replace karoon, aur uski jagah kya daaloon?',
+          },
+        )}`;
+      }
+      const qty = extractQty(text);
+      const outcome = await call('replace_cart_item', {
+        old_product: pair.from,
+        new_product: pair.to,
+        ...(qty ? { quantity: qty } : {}),
+      });
+      if (outcome.ok) return `${outcome.result.message}\n${describeCart(lang, outcome.result)}`;
+      if (outcome.result.error === 'CONFIRMATION_REQUIRED') {
+        const preview = outcome.result.preview as Record<string, unknown>;
+        const removing = preview.removing as Record<string, unknown>;
+        const adding = preview.adding as Record<string, unknown>;
+        setCtx({
+          pendingAction: {
+            tool: 'replace_cart_item',
+            args: {
+              old_product: String(removing.sku ?? pair.from),
+              new_product: String(adding.sku ?? pair.to),
+              ...(qty ? { quantity: qty } : {}),
+            },
+            stage: 'confirm',
+          },
+        });
+        note(`wants to replace ${removing.product} with ${adding.product} in the cart`);
+        return pick(lang, {
+          en: `Yes, I can do that. Your cart has ${removing.qty} x ${removing.product}. I will replace it with ${adding.qty} x ${adding.product} (₹${adding.unit_price_inr} each), making the cart total ₹${preview.new_total_inr}. Should I go ahead? (yes / no)`,
+          hi: `जी हाँ, यह हो सकता है। आपके कार्ट में ${removing.qty} x ${removing.product} है। मैं इसे ${adding.qty} x ${adding.product} (₹${adding.unit_price_inr} प्रति) से बदल दूँगी, कार्ट का कुल ₹${preview.new_total_inr} हो जाएगा। आगे बढ़ूँ? (हाँ / नहीं)`,
+          hinglish: `Ji haan, ho jayega. Aapke cart mein ${removing.qty} x ${removing.product} hai. Main ise ${adding.qty} x ${adding.product} (₹${adding.unit_price_inr} each) se replace kar doongi, cart total ₹${preview.new_total_inr} ho jayega. Aage badhoon? (haan / nahi)`,
+        });
+      }
+      if (outcome.result.error === 'NOT_IN_CART') {
+        return `${pick(lang, {
+          en: `I checked your cart and "${pair.from}" is not in it.`,
+          hi: `मैंने आपका कार्ट देखा — उसमें "${pair.from}" नहीं है।`,
+          hinglish: `Maine aapka cart check kiya — usmein "${pair.from}" nahi hai.`,
+        })} ${pick(lang, { en: 'It has:', hi: 'उसमें है:', hinglish: 'Usmein hai:' })} ${cartText}. ${pick(lang, {
+          en: `Should I add ${pair.to} instead, or replace one of these?`,
+          hi: `क्या ${pair.to} जोड़ दूँ, या इनमें से कोई बदलूँ?`,
+          hinglish: `Kya ${pair.to} add kar doon, ya inmein se koi replace karoon?`,
+        })}`;
+      }
+      return `${outcome.result.message}`;
+    }
+
+    case 'cart_clear': {
+      const outcome = await call('clear_cart');
+      if (outcome.ok) return `${outcome.result.message}`;
+      if (outcome.result.error === 'CONFIRMATION_REQUIRED') {
+        const preview = outcome.result.preview as Record<string, unknown>;
+        const removing = ((preview.removing as string[]) ?? []).join(', ');
+        setCtx({ pendingAction: { tool: 'clear_cart', args: {}, stage: 'confirm' } });
+        note('wants to empty the cart');
+        return pick(lang, {
+          en: `Your cart has ${removing} (₹${preview.current_total_inr}). Emptying it removes everything. Should I go ahead? (yes / no)`,
+          hi: `आपके कार्ट में ${removing} (₹${preview.current_total_inr}) है। खाली करने पर सब हट जाएगा। आगे बढ़ूँ? (हाँ / नहीं)`,
+          hinglish: `Aapke cart mein ${removing} (₹${preview.current_total_inr}) hai. Khali karne par sab hat jayega. Aage badhoon? (haan / nahi)`,
+        });
+      }
+      return `${outcome.result.message}`;
+    }
+
+    case 'place_order': {
+      const outcome = await call('place_order');
+      if (outcome.ok) return `${outcome.result.message}`;
+      if (outcome.result.error === 'CONFIRMATION_REQUIRED') {
+        const preview = outcome.result.preview as Record<string, unknown>;
+        const items = ((preview.items as string[]) ?? []).join(', ');
+        setCtx({ pendingAction: { tool: 'place_order', args: {}, stage: 'confirm' } });
+        note(`wants to place an order for ₹${preview.total_inr}`);
+        return pick(lang, {
+          en: `Yes, I can place it. Your cart: ${items} — total ₹${preview.total_inr}, delivering to ${preview.shipping_address}, payment ${preview.payment_method}. Should I place the order? (yes / no)`,
+          hi: `जी हाँ, ऑर्डर कर सकती हूँ। आपका कार्ट: ${items} — कुल ₹${preview.total_inr}, डिलीवरी ${preview.shipping_address} पर, भुगतान ${preview.payment_method}. ऑर्डर कर दूँ? (हाँ / नहीं)`,
+          hinglish: `Ji haan, order kar sakti hoon. Aapka cart: ${items} — total ₹${preview.total_inr}, delivery ${preview.shipping_address} par, payment ${preview.payment_method}. Order kar doon? (haan / nahi)`,
+        });
+      }
+      if (outcome.result.error === 'CART_EMPTY') {
+        return pick(lang, {
+          en: 'Your cart is empty, so there is nothing to order yet. Tell me what to add — for example "add a kettle to my cart".',
+          hi: 'आपका कार्ट खाली है, इसलिए अभी ऑर्डर करने को कुछ नहीं है। बताइए क्या जोड़ूँ — जैसे "कार्ट में केतली डालो"।',
+          hinglish: 'Aapka cart khaali hai, isliye abhi order karne ko kuch nahi hai. Bataiye kya add karoon — jaise "cart mein kettle daalo".',
+        });
+      }
+      if (outcome.result.error === 'ADDRESS_REQUIRED') {
+        setCtx({ pendingAction: { tool: 'place_order', args: {}, stage: 'collect_address' } });
+        return pick(lang, {
+          en: 'I can place the order — I just need the delivery address. Please type it in full (house/flat, area, city, 6-digit PIN).',
+          hi: 'ऑर्डर कर सकती हूँ — बस डिलीवरी का पता चाहिए। कृपया पूरा पता लिखें (मकान/फ्लैट, क्षेत्र, शहर, 6 अंकों का पिन)।',
+          hinglish: 'Order kar sakti hoon — bas delivery address chahiye. Please poora address likhiye (house/flat, area, city, 6-digit PIN).',
+        });
+      }
+      return `${outcome.result.message}`;
+    }
+
+    case 'order_replace': {
+      const order = resolveOrder(true);
+      if (!order) {
+        return editable.length === 0
+          ? pick(lang, {
+              en: 'None of your orders is in the PLACED stage anymore, so its items cannot be changed. I can put the new product in your cart instead — should I?',
+              hi: 'आपका कोई ऑर्डर अब "Placed" चरण में नहीं है, इसलिए आइटम नहीं बदले जा सकते। नया प्रोडक्ट कार्ट में डाल दूँ?',
+              hinglish: 'Aapka koi order ab "Placed" stage mein nahi hai, isliye items change nahi ho sakte. Naya product cart mein daal doon?',
+            })
+          : listOrdersText(lang, editable);
+      }
+      const pair = extractReplacePair(text);
+      if (!pair) {
+        return `${pick(lang, {
+          en: `${order.order_id} contains: ${order.items.join(', ')}. Which item should I replace, and with what?`,
+          hi: `${order.order_id} में हैं: ${order.items.join(', ')}. किसे बदलूँ, और किससे?`,
+          hinglish: `${order.order_id} mein hain: ${order.items.join(', ')}. Kise replace karoon, aur kis se?`,
+        })}`;
+      }
+      const qty = extractQty(text);
+      const outcome = await call('replace_item_in_order', {
+        order_id: order.order_id,
+        old_product: pair.from,
+        new_product: pair.to,
+        ...(qty ? { quantity: qty } : {}),
+      });
+      if (outcome.ok) {
+        const updated = outcome.result.order as AgentOrder | undefined;
+        return `${outcome.result.message}${updated ? `\n${describeOrder(lang, updated)}` : ''}`;
+      }
+      if (outcome.result.error === 'CONFIRMATION_REQUIRED') {
+        const preview = outcome.result.preview as Record<string, unknown>;
+        const removing = preview.removing as Record<string, unknown>;
+        const adding = preview.adding as Record<string, unknown>;
+        setCtx({
+          pendingAction: {
+            tool: 'replace_item_in_order',
+            args: {
+              order_id: order.order_id,
+              old_product: String(removing.sku ?? pair.from),
+              new_product: String(adding.sku ?? pair.to),
+              ...(qty ? { quantity: qty } : {}),
+            },
+            stage: 'confirm',
+          },
+        });
+        note(`wants to replace ${removing.product} with ${adding.product} in ${order.order_id}`);
+        return pick(lang, {
+          en: `Yes, I can do that. ${order.order_id} has ${removing.qty} x ${removing.product}. I will replace it with ${adding.qty} x ${adding.product} (₹${adding.unit_price_inr} each), new order total ₹${preview.new_total_inr}. Should I go ahead? (yes / no)`,
+          hi: `जी हाँ, हो सकता है। ${order.order_id} में ${removing.qty} x ${removing.product} है। इसे ${adding.qty} x ${adding.product} (₹${adding.unit_price_inr} प्रति) से बदल दूँगी, ऑर्डर का नया कुल ₹${preview.new_total_inr}. आगे बढ़ूँ? (हाँ / नहीं)`,
+          hinglish: `Ji haan, ho jayega. ${order.order_id} mein ${removing.qty} x ${removing.product} hai. Ise ${adding.qty} x ${adding.product} (₹${adding.unit_price_inr} each) se replace kar doongi, naya order total ₹${preview.new_total_inr}. Aage badhoon? (haan / nahi)`,
+        });
       }
       return `${outcome.result.message}`;
     }

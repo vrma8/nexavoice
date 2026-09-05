@@ -39,8 +39,13 @@ export const TOOL_NAMES = [
   'get_cart_status',
   'add_item_to_cart',
   'remove_item_from_cart',
+  'set_cart_item_quantity',
+  'replace_cart_item',
+  'clear_cart',
+  'place_order',
   'add_item_to_order',
   'remove_item_from_order',
+  'replace_item_in_order',
   'cancel_order',
   'update_shipping_address',
   'set_preferred_language',
@@ -113,6 +118,74 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         confirmed: CONFIRMED_PROP,
       },
       required: ['product'],
+    },
+    write: true,
+  },
+  {
+    name: 'set_cart_item_quantity',
+    description:
+      "Set the exact quantity of a product already in the customer's cart (0 removes the line). Use it when the customer says \"make it 3\" or \"only 1 kettle\".",
+    parameters: {
+      type: 'object',
+      properties: {
+        product: { type: 'string', description: 'Product SKU or title as it appears in the cart.' },
+        quantity: { type: 'number', description: 'The final quantity the cart line should have (0 removes it).' },
+        confirmed: CONFIRMED_PROP,
+      },
+      required: ['product', 'quantity'],
+    },
+    write: true,
+  },
+  {
+    name: 'replace_cart_item',
+    description:
+      'Swap one product in the cart for another catalogue product in a single step, keeping the quantity. Use this whenever the customer says "replace X with Y", "X ki jagah Y", "change X to Y" about their cart. It verifies X is actually in the cart, previews both the removal and the addition with the new total, and only applies both changes together once confirmed=true.',
+    parameters: {
+      type: 'object',
+      properties: {
+        old_product: { type: 'string', description: 'Product currently in the cart (SKU or title).' },
+        new_product: { type: 'string', description: 'Catalogue product to put in its place (SKU or title).' },
+        quantity: { type: 'number', description: 'Quantity of the new product. Defaults to the quantity of the old line.' },
+        confirmed: CONFIRMED_PROP,
+      },
+      required: ['old_product', 'new_product'],
+    },
+    write: true,
+  },
+  {
+    name: 'clear_cart',
+    description: "Empty the customer's whole shopping cart. Always confirm first — this cannot be undone.",
+    parameters: { type: 'object', properties: { confirmed: CONFIRMED_PROP } },
+    write: true,
+  },
+  {
+    name: 'place_order',
+    description:
+      'Place an order from everything currently in the cart. Use it when the customer says "place my order", "order kar do", "checkout". Preview first: it returns the items, the total, the delivery address and the payment method, then call again with confirmed=true after the customer says yes. The cart is emptied and a new order number (NM-…) is returned.',
+    parameters: {
+      type: 'object',
+      properties: {
+        shipping_address: { type: 'string', description: "Full delivery address. Omit to use the address saved on the customer's account." },
+        payment_method: { type: 'string', description: 'COD | UPI | CARD (default COD).' },
+        confirmed: CONFIRMED_PROP,
+      },
+    },
+    write: true,
+  },
+  {
+    name: 'replace_item_in_order',
+    description:
+      'Swap one product for another in an order that is still in the PLACED stage, in a single step. Use it for "replace X with Y in my order". Previews both sides with the new order total; applies both changes only when confirmed=true.',
+    parameters: {
+      type: 'object',
+      properties: {
+        order_id: { type: 'string', description: 'Order number like NM-10023.' },
+        old_product: { type: 'string', description: 'Product currently in the order (SKU or title).' },
+        new_product: { type: 'string', description: 'Catalogue product to put in its place.' },
+        quantity: { type: 'number', description: 'Quantity of the new product. Defaults to the quantity of the old line.' },
+        confirmed: CONFIRMED_PROP,
+      },
+      required: ['order_id', 'old_product', 'new_product'],
     },
     write: true,
   },
@@ -379,6 +452,15 @@ function sanitize(args: ToolArgs): Record<string, unknown> {
   return clean;
 }
 
+/** The cart shape every cart tool returns, so the model always sees the live cart. */
+function cartResult(cart: shop.CartView): Record<string, unknown> {
+  return {
+    cart: cart.lines.map((l) => ({ product: l.title, sku: l.sku, qty: l.qty, total_inr: l.lineTotalInr })),
+    total_inr: cart.totalInr,
+    item_count: cart.itemCount,
+  };
+}
+
 function customerIdOf(conversation: Conversation): string | null {
   return conversation.context.customer?.id ?? null;
 }
@@ -563,6 +645,287 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
           message: newQty === 0 ? `Removed ${product.title} from the cart.` : `Reduced ${product.title} to ${newQty}.`,
         },
         summary: `Removed ${qty} x ${product.title} from cart`,
+      };
+    }
+
+    case 'set_cart_item_quantity': {
+      if (!clientId) return noCustomer();
+      const productRef = str(args, 'product');
+      const target = Math.max(0, Math.floor(num(args, 'quantity') ?? -1));
+      if (!Number.isFinite(target) || (num(args, 'quantity') ?? -1) < 0) {
+        return {
+          ok: false,
+          result: { error: 'INVALID_QUANTITY', message: 'Ask the customer for the exact quantity they want (0 removes the item).' },
+          summary: 'Invalid quantity',
+        };
+      }
+      const product = await shop.findProduct(productRef);
+      if (!product) {
+        return {
+          ok: false,
+          result: { error: 'PRODUCT_NOT_FOUND', message: `Could not find "${productRef}" in the catalogue.` },
+          summary: `Product "${productRef}" not in catalogue`,
+        };
+      }
+      const before = await shop.getCart(clientId);
+      const line = before.lines.find((l) => l.productId === product.id);
+      if (!line && target > 0) {
+        // Nothing to change — treat it as an add so the customer is not dead-ended.
+        if (!bool(args, 'confirmed')) {
+          return needsConfirmation(`add ${target} x ${product.title} to the cart`, {
+            product: product.title,
+            sku: product.sku,
+            unit_price_inr: product.priceInr,
+            quantity: target,
+            new_total_inr: before.totalInr + product.priceInr * target,
+            note: 'The product is not in the cart yet, so this will add it.',
+          });
+        }
+        const cart = await shop.addToCart(clientId, product.id, target);
+        return {
+          ok: true,
+          result: { ...cartResult(cart), message: `Added ${target} x ${product.title} to the cart.` },
+          summary: `Added ${target} x ${product.title} to cart`,
+        };
+      }
+      if (!line) {
+        return {
+          ok: false,
+          result: { error: 'NOT_IN_CART', message: `${product.title} is not in the cart.` },
+          summary: `${product.title} not in cart`,
+        };
+      }
+      if (!bool(args, 'confirmed')) {
+        return needsConfirmation(`set ${product.title} to ${target} in the cart`, {
+          product: product.title,
+          sku: product.sku,
+          current_qty: line.qty,
+          new_qty: target,
+          new_total_inr: before.totalInr + product.priceInr * (target - line.qty),
+        });
+      }
+      const cart = await shop.setCartQty(clientId, product.id, target);
+      return {
+        ok: true,
+        result: {
+          ...cartResult(cart),
+          message: target === 0 ? `Removed ${product.title} from the cart.` : `${product.title} is now ${target} in the cart.`,
+        },
+        summary: `Set ${product.title} to ${target} in cart`,
+      };
+    }
+
+    case 'replace_cart_item': {
+      if (!clientId) return noCustomer();
+      const oldRef = str(args, 'old_product');
+      const newRef = str(args, 'new_product');
+      const oldProduct = await shop.findProduct(oldRef);
+      const newProduct = await shop.findProduct(newRef);
+      if (!newProduct) {
+        return {
+          ok: false,
+          result: {
+            error: 'PRODUCT_NOT_FOUND',
+            message: `"${newRef}" is not in the NexaMart catalogue. Use search_products and offer the closest match.`,
+          },
+          summary: `Replacement product "${newRef}" not in catalogue`,
+        };
+      }
+      const before = await shop.getCart(clientId);
+      const oldLine = oldProduct ? before.lines.find((l) => l.productId === oldProduct.id) : undefined;
+      if (!oldLine) {
+        return {
+          ok: false,
+          result: {
+            error: 'NOT_IN_CART',
+            message: `"${oldRef}" is not in the cart, so it cannot be replaced. Tell the customer what the cart actually contains and ask what they want to do.`,
+            ...cartResult(before),
+          },
+          summary: `Cannot replace "${oldRef}" — not in cart`,
+        };
+      }
+      const qty = Math.max(1, Math.floor(num(args, 'quantity') ?? oldLine.qty));
+      const newTotal = before.totalInr - oldLine.lineTotalInr + newProduct.priceInr * qty;
+      if (!bool(args, 'confirmed')) {
+        return needsConfirmation(`replace ${oldLine.title} with ${newProduct.title} in the cart`, {
+          removing: { product: oldLine.title, sku: oldLine.sku, qty: oldLine.qty, amount_inr: oldLine.lineTotalInr },
+          adding: { product: newProduct.title, sku: newProduct.sku, qty, unit_price_inr: newProduct.priceInr, amount_inr: newProduct.priceInr * qty },
+          current_total_inr: before.totalInr,
+          new_total_inr: newTotal,
+        });
+      }
+      await shop.setCartQty(clientId, oldLine.productId, 0);
+      const cart = await shop.addToCart(clientId, newProduct.id, qty);
+      return {
+        ok: true,
+        result: {
+          ...cartResult(cart),
+          message: `Replaced ${oldLine.qty} x ${oldLine.title} with ${qty} x ${newProduct.title}. New cart total ${shop.formatInr(cart.totalInr)}.`,
+        },
+        summary: `Replaced ${oldLine.title} with ${qty} x ${newProduct.title} in cart`,
+      };
+    }
+
+    case 'clear_cart': {
+      if (!clientId) return noCustomer();
+      const before = await shop.getCart(clientId);
+      if (before.lines.length === 0) {
+        return {
+          ok: true,
+          result: { ...cartResult(before), message: 'The cart is already empty.' },
+          summary: 'Cart already empty',
+        };
+      }
+      if (!bool(args, 'confirmed')) {
+        return needsConfirmation('empty the cart', {
+          removing: before.lines.map((l) => `${l.qty} x ${l.title}`),
+          current_total_inr: before.totalInr,
+          new_total_inr: 0,
+        });
+      }
+      await shop.clearCart(clientId);
+      return {
+        ok: true,
+        result: { cart: [], total_inr: 0, item_count: 0, message: 'The cart is now empty.' },
+        summary: `Cleared cart (${before.itemCount} items)`,
+      };
+    }
+
+    case 'place_order': {
+      if (!clientId) return noCustomer();
+      const profile = conversation.context.customer;
+      const address = str(args, 'shipping_address') || profile?.address || '';
+      const payment = (str(args, 'payment_method') || 'COD').toUpperCase();
+      const cart = await shop.getCart(clientId);
+      if (cart.lines.length === 0) {
+        return {
+          ok: false,
+          result: {
+            error: 'CART_EMPTY',
+            message: 'The cart is empty, so no order can be placed. Offer to add the products the customer wants first.',
+          },
+          summary: 'Place order refused: cart empty',
+        };
+      }
+      if (address.trim().length < 10) {
+        return {
+          ok: false,
+          result: {
+            error: 'ADDRESS_REQUIRED',
+            message:
+              'No delivery address is saved on the account. Ask the customer for the complete address (house/flat, area, city, 6-digit PIN) and call place_order again with shipping_address.',
+          },
+          summary: 'Place order needs an address',
+        };
+      }
+      if (!bool(args, 'confirmed')) {
+        return needsConfirmation('place the order', {
+          items: cart.lines.map((l) => `${l.qty} x ${l.title} (${shop.formatInr(l.lineTotalInr)})`),
+          total_inr: cart.totalInr,
+          shipping_address: address,
+          payment_method: payment,
+        });
+      }
+      const result = await shop.placeOrder(clientId, { shippingAddress: address, paymentMethod: payment });
+      if (!result.ok) {
+        return { ok: false, result: result.error, summary: `Place order refused: ${result.error.code}` };
+      }
+      trackOrder(conversation, result.data.code);
+      return {
+        ok: true,
+        result: {
+          order: shop.summarizeOrderForAgent(result.data),
+          message: `Order ${result.data.code} placed for ${shop.formatInr(result.data.totalInr)}, delivering to ${result.data.shippingAddress}. It can still be changed or cancelled while it is in the PLACED stage.`,
+        },
+        summary: `Placed order ${result.data.code} (${shop.formatInr(result.data.totalInr)})`,
+      };
+    }
+
+    case 'replace_item_in_order': {
+      if (!clientId) return noCustomer();
+      const orderId = str(args, 'order_id');
+      const oldRef = str(args, 'old_product');
+      const newRef = str(args, 'new_product');
+      const newProduct = await shop.findProduct(newRef);
+      if (!newProduct) {
+        return {
+          ok: false,
+          result: {
+            error: 'PRODUCT_NOT_FOUND',
+            message: `"${newRef}" is not in the NexaMart catalogue. Use search_products and offer the closest match.`,
+          },
+          summary: `Replacement product "${newRef}" not in catalogue`,
+        };
+      }
+      const found = await shop.getOrderForClient(clientId, orderId);
+      if (!found.ok) {
+        return { ok: false, result: found.error, summary: `Order ${orderId} not found` };
+      }
+      if (!found.data.editable) {
+        return {
+          ok: false,
+          result: {
+            error: 'NOT_EDITABLE',
+            message: `Order ${found.data.code} is already "${found.data.statusText.toLowerCase()}", so its items can no longer be changed. Say so honestly and offer a human agent.`,
+          },
+          summary: `Order ${found.data.code} not editable`,
+        };
+      }
+      const needle = oldRef.toLowerCase();
+      const oldLine =
+        found.data.items.find((i) => i.sku.toLowerCase() === needle) ??
+        found.data.items.find((i) => i.title.toLowerCase() === needle) ??
+        found.data.items.find((i) => needle.length > 2 && i.title.toLowerCase().includes(needle));
+      if (!oldLine) {
+        return {
+          ok: false,
+          result: {
+            error: 'ITEM_NOT_IN_ORDER',
+            message: `Order ${found.data.code} does not contain "${oldRef}". It has: ${found.data.items
+              .map((i) => `${i.qty} x ${i.title}`)
+              .join(', ')}.`,
+            order: shop.summarizeOrderForAgent(found.data),
+          },
+          summary: `Cannot replace "${oldRef}" — not in ${found.data.code}`,
+        };
+      }
+      const qty = Math.max(1, Math.floor(num(args, 'quantity') ?? oldLine.qty));
+      if (!bool(args, 'confirmed')) {
+        return needsConfirmation(`replace ${oldLine.title} with ${newProduct.title} in ${found.data.code}`, {
+          order_id: found.data.code,
+          removing: { product: oldLine.title, sku: oldLine.sku, qty: oldLine.qty },
+          adding: { product: newProduct.title, sku: newProduct.sku, qty, unit_price_inr: newProduct.priceInr },
+          current_total_inr: found.data.totalInr,
+          new_total_inr: found.data.totalInr - oldLine.priceInr * oldLine.qty + newProduct.priceInr * qty,
+        });
+      }
+      // Add first: an order must always keep at least one item, so adding the
+      // replacement before removing the old line never trips the LAST_ITEM rule.
+      const added = await shop.addItemToOrder(clientId, found.data.code, newProduct.sku, qty);
+      if (!added.ok) {
+        return { ok: false, result: added.error, summary: `Replace in ${found.data.code} refused: ${added.error.code}` };
+      }
+      const removed = await shop.removeItemFromOrder(clientId, found.data.code, oldLine.sku);
+      if (!removed.ok) {
+        // Roll the addition back so the order is never left in a half-changed state.
+        await shop.removeItemFromOrder(clientId, found.data.code, newProduct.sku, qty);
+        return {
+          ok: false,
+          result: {
+            ...removed.error,
+            message: `${removed.error.message} Nothing was changed on ${found.data.code}.`,
+          },
+          summary: `Replace in ${found.data.code} rolled back: ${removed.error.code}`,
+        };
+      }
+      trackOrder(conversation, removed.data.code);
+      return {
+        ok: true,
+        result: {
+          order: shop.summarizeOrderForAgent(removed.data),
+          message: `Replaced ${oldLine.qty} x ${oldLine.title} with ${qty} x ${newProduct.title} in ${removed.data.code}. New order total ${shop.formatInr(removed.data.totalInr)}.`,
+        },
+        summary: `Replaced ${oldLine.title} with ${qty} x ${newProduct.title} in ${removed.data.code}`,
       };
     }
 
