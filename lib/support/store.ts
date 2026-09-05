@@ -502,13 +502,26 @@ export function resolveCase(id: string, note?: string): SupportCase | null {
   supportCase.updatedAt = supportCase.resolvedAt;
   supportCase.resolutionNote = note;
   const conversation = store.conversations.get(supportCase.conversationId);
+  let finalConversationSnapshot = conversation;
   if (conversation) {
     conversation.state = 'RESOLVED';
     conversation.endedAt = Date.now();
     conversation.updatedAt = conversation.endedAt;
+    // Snapshot the final state before deleting
+    finalConversationSnapshot = { ...conversation };
+    
+    // Garbage collection: case is resolved, so we can delete the conversation data
+    deleteConversation(conversation.id);
   }
   emit({ conversationId: supportCase.conversationId, type: 'case.resolved', detail: note });
   return supportCase;
+}
+
+export function deleteConversation(id: string): void {
+  const store = db();
+  store.conversations.delete(id);
+  store.messages.delete(id);
+  markDirty();
 }
 
 export function closeConversation(id: string, detail?: string): Conversation | null {
@@ -517,6 +530,9 @@ export function closeConversation(id: string, detail?: string): Conversation | n
   if (conversation.state !== 'RESOLVED') conversation.state = 'CLOSED';
   conversation.endedAt = Date.now();
   conversation.updatedAt = conversation.endedAt;
+  
+  let shouldDelete = true;
+  
   if (conversation.caseId) {
     const supportCase = db().cases.get(conversation.caseId);
     if (supportCase && (supportCase.status === 'WAITING_FOR_HUMAN' || supportCase.status === 'HUMAN_HANDLING')) {
@@ -524,10 +540,18 @@ export function closeConversation(id: string, detail?: string): Conversation | n
       // so the human agent knows to call back instead of joining the channel.
       supportCase.customerLeftAt = Date.now();
       supportCase.updatedAt = supportCase.customerLeftAt;
+      shouldDelete = false; // Keep it because the human agent is still working on the case
     }
   }
+
+  const finalSnapshot = { ...conversation };
+
+  if (shouldDelete) {
+    deleteConversation(id);
+  }
+
   emit({ conversationId: id, type: 'conversation.closed', detail });
-  return conversation;
+  return finalSnapshot;
 }
 
 /** Dashboard snapshot: everything the human UI needs in one round trip. */
