@@ -218,6 +218,70 @@ export async function findProduct(reference: string): Promise<ProductView | null
   return matches[0] ?? null;
 }
 
+/**
+ * Hindi / Hinglish shopping words → the English catalogue terms they mean.
+ * Catalogue titles are English, but customers ask in their own language
+ * ("केतली", "ketli", "हेडफोन"); every matched word is replaced by its English
+ * search terms before scoring, so the agent finds the product either way.
+ */
+const SEARCH_ALIASES: Record<string, string> = {
+  // Home & Kitchen
+  'केतली': 'kettle', 'केटली': 'kettle', 'ketli': 'kettle',
+  'मिक्सर': 'mixer grinder', 'ग्राइंडर': 'mixer grinder', 'mixi': 'mixer grinder',
+  'तवा': 'tawa', 'tava': 'tawa',
+  'कुकर': 'pressure cooker', 'प्रेशर कुकर': 'pressure cooker', 'cooker': 'pressure cooker',
+  'बोतल': 'water bottle', 'botal': 'water bottle',
+  'चादर': 'bedsheet', 'बेडशीट': 'bedsheet', 'chadar': 'bedsheet',
+  'लैंप': 'lamp', 'दीपक': 'lamp', 'lamp': 'lamp',
+  'वैक्यूम': 'vacuum cleaner', 'vacuum': 'vacuum cleaner',
+  'एयर फ्रायर': 'air fryer', 'airfryer': 'air fryer',
+  'डिब्बा': 'storage container', 'कंटेनर': 'storage container', 'container': 'storage container',
+  'बरतन': 'storage container', 'kadai': 'tawa', 'कढ़ाई': 'tawa',
+  // Electronics
+  'हेडफोन': 'headphones', 'हेडफ़ोन': 'headphones', 'headphone': 'headphones',
+  'ईयरबड्स': 'earbuds', 'एयरबड्स': 'earbuds', 'earbud': 'earbuds',
+  'चार्जर': 'charger', 'चारजर': 'charger',
+  'पावरबैंक': 'power bank', 'powerbank': 'power bank',
+  'घड़ी': 'watch', 'ghadi': 'watch', 'स्मार्टवॉच': 'smart watch', 'वॉच': 'smart watch',
+  'माउस': 'mouse', 'कीबोर्ड': 'keyboard', 'कीबোর্ड': 'keyboard',
+  'स्पीकर': 'speaker', 'speaker': 'speaker',
+  'वेबकैम': 'webcam', 'कैमरा': 'webcam',
+  'टीवी': 'tv', 'टेलीविजन': 'tv', 'tv': 'tv',
+  // Fashion
+  'जूते': 'shoes', 'जूता': 'shoes', 'joote': 'shoes', 'joota': 'shoes',
+  'जुराबें': 'socks', 'जुराबी': 'socks', 'socks': 'socks',
+  'साड़ी': 'saree', 'sadi': 'saree', 'sadii': 'saree',
+  'जीन्स': 'jeans', 'जींस': 'jeans', 'jeans': 'jeans',
+  'कुर्ता': 'kurta', 'kurta': 'kurta', 'कुर्ती': 'kurti', 'kurti': 'kurti',
+  'बटुआ': 'wallet', 'batua': 'wallet', 'वॉलेट': 'wallet',
+  'चश्मा': 'sunglasses', 'chashma': 'sunglasses', 'सनग्लास': 'sunglasses',
+  // Grocery
+  'चावल': 'rice', 'chawal': 'rice', 'rice': 'rice',
+  'दाल': 'dal', 'dal': 'dal',
+  'तेल': 'oil', 'tel': 'oil',
+  'चाय': 'tea', 'chai': 'tea', 'tea': 'tea',
+  'कॉफी': 'coffee', 'coffee': 'coffee',
+  'मेवा': 'dry fruits', 'ड्राई फ्रूट्स': 'dry fruits', 'dryfruit': 'dry fruits',
+  'आटा': 'atta flour', 'atta': 'atta flour', 'flour': 'atta flour',
+  // Beauty
+  'फेसवॉश': 'face wash', 'facewash': 'face wash',
+  'हेयर ऑइल': 'hair oil',
+  'सनस्क्रीन': 'sunscreen', 'sunscreen': 'sunscreen',
+  'ट्रिमर': 'trimmer', 'trimmer': 'trimmer',
+  'लिपस्टिक': 'lipstick', 'lipstick': 'lipstick',
+  // Sports / Books / Toys
+  'योगा मैट': 'yoga mat', 'yogamat': 'yoga mat',
+  'डंबल': 'dumbbell', 'dumbbell': 'dumbbell',
+  'बैट': 'cricket bat', 'क्रिकेट बैट': 'cricket bat',
+  'बैडमिंटन': 'badminton racket', 'रैकेट': 'badminton racket',
+  'नोटबुक': 'notebook', 'कॉपी': 'notebook', 'copy': 'notebook',
+  'पेन': 'pen', 'कलम': 'pen', 'kalam': 'pen',
+  'किताब': 'book', 'kitaab': 'book', 'book': 'book',
+  'इतिहास': 'history',
+  'खिलौना': 'toy blocks', 'toys': 'toy blocks', 'गुड्डी': 'toy',
+  'डायपर': 'diapers', 'नैपी': 'diapers', 'diaper': 'diapers',
+};
+
 /** Keyword search over the catalogue (used by the UI filter and the AI tool). */
 export async function searchProducts(
   query: string,
@@ -225,10 +289,14 @@ export async function searchProducts(
   opts: { maxPriceInr?: number; category?: string } = {},
 ): Promise<ProductView[]> {
   await ensureCatalog();
+  // Split on non-letters (Unicode — Devanagari included; \p{M} keeps matras
+  // attached to their word, "केतली" must not shred into consonants), translate
+  // Hindi/Hinglish words to their catalogue terms, then drop single-letter noise.
   const words = String(query ?? '')
     .toLowerCase()
-    .split(/[^a-z0-9]+/i)
-    .filter((w) => w.length > 2);
+    .split(/[^\p{L}\p{N}\p{M}]+/u)
+    .flatMap((w) => (SEARCH_ALIASES[w] ?? w).split(' '))
+    .filter((w) => w.length > 1);
 
   const rows = await prisma.product.findMany({
     where: {
@@ -316,6 +384,26 @@ export async function setCartQty(clientId: string, productId: string, qty: numbe
 
 export async function clearCart(clientId: string): Promise<void> {
   await prisma.cartItem.deleteMany({ where: { clientId } });
+}
+
+// ---------------------------------------------------------------------------
+// Client preferences
+// ---------------------------------------------------------------------------
+
+export const SUPPORTED_LANGUAGES = ['hindi', 'english', 'hinglish'] as const;
+
+/**
+ * Saves the language the customer confirmed with the agent on `Client.preferredLanguage`,
+ * so the NEXT chat or call starts in it (the greeting in lib/agent-prompt.ts reads it).
+ */
+export async function setPreferredLanguage(
+  clientId: string,
+  language: (typeof SUPPORTED_LANGUAGES)[number],
+): Promise<void> {
+  if (!SUPPORTED_LANGUAGES.includes(language)) {
+    throw new Error(`Unsupported language "${language}"`);
+  }
+  await prisma.client.update({ where: { id: clientId }, data: { preferredLanguage: language } });
 }
 
 // ---------------------------------------------------------------------------

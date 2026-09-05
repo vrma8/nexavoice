@@ -34,7 +34,9 @@ The sections below (Start Here, Patterns, Anti-Patterns, etc.) remain the canoni
 - **PostgreSQL via Prisma is required** (`DATABASE_URL`, `prisma/schema.prisma`): `Client`, `Product`, `CartItem`, `Order`/`OrderItem` and the mirrored `StoreState` row. `pnpm dev:db` runs a zero-install PostgreSQL (PGlite over TCP) for local work, `pnpm db:push` creates the tables, `pnpm seed` (`scripts/seed-catalog.ts`) upserts the fixed 50-product catalogue from `lib/shop/catalog-data.ts`.
 - Shop domain in `lib/shop` (`catalog-data.ts` the fixed catalogue, `service.ts` all Prisma reads/writes + the order status machine, `http.ts` the `x-nexavoice-client-id` identity helper). Support domain in `lib/support` (conversation/case store, guarded `executeTool`, handoff summary). The support store is an in-memory cache on `globalThis` mirrored into one JSONB row so state survives across serverless instances — `lib/support/persist.ts` + `snapshot.ts` own that layer.
 - Default agent config (`lib/agent-config.ts`): Agora-managed Deepgram STT (`multi`), OpenAI `gpt-4o-mini`, MiniMax TTS; NexaMart system prompt in `lib/agent-prompt.ts`; inline REST tools from `lib/agent-tools.ts`. `/api/health` reports the deployment self-check. `.env.local` needs only Agora credentials — `AGENT_TOOLS_BASE_URL`/`AGENT_TOOLS_SECRET` are optional now (tool origin comes from the request URL, the secret is derived from the App Certificate).
-- Chat: `lib/chat-agent.ts` — LLM (`ai` + `@ai-sdk/openai`) when `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` are set, otherwise a rule-based EN/HI/Hinglish agent over the same tools.
+- Chat: `lib/chat-agent.ts` — LLM (`ai` + `@ai-sdk/openai`) when `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` are set, otherwise a rule-based EN/HI/Hinglish agent over the same tools (cart add/remove/status included).
+- Language preference: the agent confirms it at the start of every chat and call (the greeting is built from `Client.preferredLanguage`) and `set_preferred_language` saves a confirmed choice back to PostgreSQL, so the next conversation starts in it.
+- Numbers in text: `lib/numbers.ts` (`spokenNumbersToDigits`) renders spoken numbers as digits in every transcript/chat surface — phone numbers, PIN codes, order codes and amounts always look like numbers.
 - Human dashboard: `components/SupportDashboard.tsx` (SSE + 3s poll of `/api/dashboard`), `components/CaseWorkspace.tsx` (+ `HumanVoiceBridge.tsx` joins the customer's RTC channel as uid `654321`, then `POST /api/cases/:id/takeover` makes the AI hand over and leave).
 
 ## Supported Modes
@@ -74,7 +76,7 @@ The sections below (Start Here, Patterns, Anti-Patterns, etc.) remain the canoni
 - `app/api/generate-agora-token/route.ts`: issues RTC + RTM tokens for the browser user.
 - `app/api/invite-agent/route.ts`: registers the VOICE conversation and starts the managed agent session (returns `conversation_id`).
 - `lib/agent-config.ts`: agent pipeline (STT/LLM/TTS, turn detection, `turnDetection.language` from `AGENT_LANGUAGE`, RTM + tools flags); `injectRestTools` attaches `llm.tools` because `OpenAI.toConfig()` has no `tools` option yet.
-- `lib/agent-prompt.ts`: NexaMart system prompt (voice + chat variants), greeting, failure message.
+- `lib/agent-prompt.ts`: NexaMart system prompt (voice + chat variants), language-aware greetings that confirm the saved preference, `normalizeLanguageName`, failure message.
 - `lib/agent-tools.ts`: tool JSON schemas shared by voice/chat + Agora inline REST tool builder (`{{args.x}}`, `{{template_variables.nv_conversation_id|nv_tool_token}}`).
 - `app/api/agent-tools/[tool]/route.ts`: engine → backend tool endpoint (`x-nexavoice-tool-token`, `?conversation_id=`).
 - `app/api/stop-conversation/route.ts`: stops the agent session and closes the conversation.

@@ -12,7 +12,7 @@ import {
   sendMessage,
 } from "@/lib/api";
 import type { Conversation, ConversationMessage, SupportCase } from "@/lib/support/types";
-import { CHAT_GREETING } from "@/lib/agent-prompt";
+import { buildChatGreeting } from "@/lib/agent-prompt";
 import { getClientSession } from "@/lib/session";
 
 type Message = {
@@ -20,8 +20,6 @@ type Message = {
   role: "user" | "ai" | "human_agent" | "system";
   content: string;
 };
-
-const GREETING: Message = { id: "greeting", role: "ai", content: CHAT_GREETING };
 
 const POLL_MS = 2500;
 
@@ -32,21 +30,50 @@ const POLL_MS = 2500;
  * who it is talking to without asking, and it is *terminated* when this
  * component unmounts or the tab goes away — that is what keeps the support
  * dashboard showing live chats only.
+ *
+ * `active` mirrors the dock's expanded/minimized state: whenever the panel
+ * becomes visible (first open, or restored from the minimized pill) the cursor
+ * is dropped straight into the message box so the customer can just type.
  */
 export default function ClientChat({
   onOrdersMayHaveChanged,
+  active = true,
 }: {
   onOrdersMayHaveChanged?: () => void;
+  active?: boolean;
 } = {}) {
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [supportCase, setSupportCase] = useState<SupportCase | null>(null);
-  const [messages, setMessages] = useState<Message[]>([GREETING]);
+  // First bubble: greets in the language saved on the account and confirms the
+  // preference ("Aapki pasand Hinglish hai — main Hinglish mein hi baat karoon?").
+  const [messages, setMessages] = useState<Message[]>(() => {
+    const session = getClientSession();
+    return [
+      {
+        id: "greeting",
+        role: "ai",
+        content: buildChatGreeting(session?.preferredLanguage, session?.name),
+      },
+    ];
+  });
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const seenIds = useRef<Set<string>>(new Set());
   const lastSyncRef = useRef(0);
+
+  // Put the cursor in the message box as soon as the customer can type: right
+  // after the conversation is ready, and every time the dock is restored from
+  // its minimized pill.
+  const canType =
+    Boolean(conversation) && conversation?.state !== "RESOLVED" && conversation?.state !== "CLOSED";
+  useEffect(() => {
+    if (!active || !canType) return;
+    const focus = window.setTimeout(() => inputRef.current?.focus(), 60);
+    return () => window.clearTimeout(focus);
+  }, [active, canType]);
 
   // Create the backend conversation once, bound to the signed-in client record.
   useEffect(() => {
@@ -302,6 +329,7 @@ export default function ClientChat({
 
         <div className="flex gap-2 items-end">
           <input
+            ref={inputRef}
             type="text"
             className="flex-1 bg-zinc-800 border border-zinc-700 text-white rounded-2xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm resize-none placeholder:text-zinc-500 disabled:opacity-50"
             placeholder={

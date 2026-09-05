@@ -415,10 +415,17 @@ export default function ShoppingPage() {
           client={client}
           onClose={() => {
             setDock(null);
+            // A finished conversation may have changed orders AND the cart.
             void refreshOrders(client.id).catch(() => {});
+            void refreshCart(client.id).catch(() => {});
           }}
           onSwitch={(next) => setDock(next)}
-          onOrdersMayHaveChanged={() => void refreshOrders(client.id).catch(() => {})}
+          onOrdersMayHaveChanged={() => {
+            // The agent may have added/removed a cart line or changed an order —
+            // pull both immediately (the 4s poll below is only the fallback).
+            void refreshOrders(client.id).catch(() => {});
+            void refreshCart(client.id).catch(() => {});
+          }}
         />
       )}
     </div>

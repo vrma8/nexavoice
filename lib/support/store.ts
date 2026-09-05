@@ -10,6 +10,7 @@
  * exported functions.
  */
 import { randomUUID } from 'crypto';
+import { normalizeLanguageName } from '../agent-prompt';
 import {
   message as describeError,
   resolvePersistence,
@@ -271,6 +272,9 @@ export interface CreateConversationInput {
 
 export function createConversation(input: CreateConversationInput): Conversation {
   const now = Date.now();
+  // Start in the language saved on the client's account (set at login or by a
+  // previous set_preferred_language call) — the agent confirms it on turn one.
+  const preferredLanguage = normalizeLanguageName(input.customer?.preferredLanguage);
   const conversation: Conversation = {
     id: input.id ?? `conv_${randomUUID().replace(/-/g, '').slice(0, 16)}`,
     mode: input.mode,
@@ -286,6 +290,7 @@ export function createConversation(input: CreateConversationInput): Conversation
       notes: [],
       customerName: input.customerName,
       customer: input.customer,
+      language: preferredLanguage,
     },
     toolAudit: [],
     lastActivityAt: now,

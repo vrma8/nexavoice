@@ -48,10 +48,11 @@ types/               Shared TypeScript route/component contracts
 
 - `agora.ts`: default constants (`DEFAULT_AGENT_UID` = 123456, `DEFAULT_HUMAN_UID` = 654321).
 - `agora-server.ts`: server-side `AgoraClient` factory (`AGORA_AREA`), `stopAgent`, `speakAsAgent`, ConvoAI auth headers.
-- `agent-config.ts` / `agent-prompt.ts` / `agent-tools.ts`: agent pipeline, NexaMart system prompt, tool schemas + Agora inline REST tool wiring.
-- `conversation.ts`: transcript normalization, spacing cleanup, timestamp normalization, visualizer state mapping.
+- `agent-config.ts` / `agent-prompt.ts` / `agent-tools.ts`: agent pipeline, NexaMart system prompt + language-aware greetings (the greeting confirms the customer's saved `preferredLanguage`), tool schemas + Agora inline REST tool wiring.
+- `conversation.ts`: transcript normalization, spacing cleanup, spoken-number → digit conversion (`normalizeTranscriptText`), timestamp normalization, visualizer state mapping.
+- `numbers.ts`: `spokenNumbersToDigits()` — renders spoken numbers (English / Hindi / Hinglish words, Devanagari digits) as digits in transcripts and chat, so phone numbers, PIN codes and amounts always look like numbers; lone romanised words ("kar do") are deliberately left alone.
 - `chat-completions.ts`: dependency-injected custom-LLM SSE handler with tool loop; keeping it outside the route module preserves Next.js route-export constraints.
-- `chat-agent.ts`: chat turn — LLM (`ai` SDK) when configured, else rule-based EN/HI/Hinglish agent over `executeTool`.
+- `chat-agent.ts`: chat turn — LLM (`ai` SDK) when configured, else rule-based EN/HI/Hinglish agent over `executeTool` (cart add/remove/status, order status/edits, cancel, address, explicit language switches via `set_preferred_language`, escalation).
 - `support/types.ts`, `support/store.ts`, `support/tools.ts`: conversation/case model, in-memory store + event bus + dashboard snapshot, guarded tool execution + handoff summary.
 - `support/persist.ts`, `support/snapshot.ts`, `support/route-store.ts`: durable mirror — PostgreSQL (`StoreState` JSONB row) or memory, the versioned snapshot + merge rules, and the `withStore()` hydrate/flush bracket every support route uses.
 - `support/store.ts` also owns liveness: `heartbeatConversation()`, `STALE_AFTER_MS` (30s) and `sweepStaleConversations()`, called from `getDashboardSnapshot()`/`hydrateStore()` so the dashboard can only ever show live conversations.
