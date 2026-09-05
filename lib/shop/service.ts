@@ -139,8 +139,18 @@ export async function ensureCatalog(): Promise<void> {
   if (catalogEnsured) return;
   const count = await prisma.product.count();
   if (count >= CATALOG.length) {
-    catalogEnsured = true;
-    return;
+    // Rows exist — but they may predate a catalogue change (e.g. the product
+    // photos moving from placeholders to the real images in /public/products).
+    // Re-sync only when the stored artwork no longer matches the seed source.
+    const stale = await prisma.product.count({
+      where: {
+        OR: [{ imageUrl: null }, { NOT: { imageUrl: { startsWith: '/products/' } } }],
+      },
+    });
+    if (stale === 0) {
+      catalogEnsured = true;
+      return;
+    }
   }
   for (const product of CATALOG) {
     await prisma.product.upsert({
@@ -169,6 +179,7 @@ function toProductView(row: {
   description: string;
   priceInr: number;
   emoji: string;
+  imageUrl?: string | null;
   rating: number;
 }): ProductView {
   return {
@@ -179,6 +190,7 @@ function toProductView(row: {
     description: row.description,
     priceInr: row.priceInr,
     emoji: row.emoji,
+    imageUrl: row.imageUrl ?? undefined,
     rating: row.rating,
   };
 }
