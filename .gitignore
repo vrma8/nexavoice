@@ -1,0 +1,94 @@
+# ============================================================
+# NexaVoice — Next.js 16 + Prisma 7 + pnpm
+# Package manager: pnpm  (pnpm-lock.yaml is the canonical lockfile)
+# ============================================================
+# ---------- Dependencies ----------
+node_modules/
+.pnp/
+.pnp.js
+.pnpm-store/
+# Non-canonical lockfiles — this repo uses pnpm, do not commit these
+package-lock.json
+yarn.lock
+bun.lockb
+# ---------- Next.js ----------
+.next/
+out/
+build/
+dist/
+# Regenerated automatically by `next dev` / `next build`
+next-env.d.ts
+# ---------- Env / secrets — NEVER commit real values ----------
+.env
+.env.*
+# Template with placeholder values only — this one SHOULD be committed
+!env.local.example
+!.env.example
+# Certificates / private keys
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+# ---------- Prisma 7 ----------
+# Generated client (rebuilt by `postinstall: prisma generate`)
+generated/
+# Local file-based DBs, if ever used (server DB is Postgres,
+# local dev DB is PGlite under .data/)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+# Local PGlite dev database (`pnpm dev:db`)
+.data/
+# ---------- Logs & diagnostics ----------
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+# ---------- Caches & temp files ----------
+.cache/
+.parcel-cache/
+.turbo/
+.npm/
+.eslintcache
+.stylelintcache
+*.tsbuildinfo
+*.patch
+.rpt2_cache/
+.rts2_cache_*/
+# ---------- Testing / coverage ----------
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+playwright/.cache/
+# ---------- Deployment ----------
+.vercel/
+.netlify/
+.fly/
+# ---------- OS ----------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+# ---------- IDE / editors ----------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.swo
+*~
+# ---------- Scratch / playground (never commit) ----------
+scratch.*
