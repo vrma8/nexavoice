@@ -1,0 +1,358 @@
+"use client";
+
+import { useState, Suspense, useEffect, useCallback } from "react";
+import dynamic from "next/dynamic";
+import type { RTMClient } from "agora-rtm";
+import type {
+  AgoraTokenData,
+  ClientStartRequest,
+  AgentResponse,
+  AgoraRenewalTokens,
+  StopConversationRequest,
+} from "@/types/conversation";
+import { endConversation, mirrorVoiceState, sendHeartbeat } from "@/lib/api";
+import { MISSING_APP_ID_MESSAGE, resolveAppId } from "@/lib/agora";
+import { getClientSession } from "@/lib/session";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { LoadingSkeleton } from "./LoadingSkeleton";
+import { Button } from "@/components/ui/button";
+import { Phone, Loader2, Lock } from "lucide-react";
+
+// Dynamically import the ConversationComponent with SSR disabled
+const ConversationComponent = dynamic(() => import("./ConversationComponent"), {
+  ssr: false,
+});
+
+const AgoraProvider = dynamic(() => import("./AgoraProvider"), { ssr: false });
+
+/** Why the AI agent could not be invited, shown verbatim instead of a generic banner. */
+interface AgentJoinError {
+  message: string;
+  hint?: string;
+}
+
+/** Non-blocking warning that the agent in this call has no backend tools. */
+const TOOLS_DISABLED_WARNING = {
+  message: "This call can't reach your cart or orders",
+  hint:
+    "The deployment has no public https URL for the agent's tools, so the assistant cannot check or change anything on your account in this call — use the chat instead, or expose the app publicly (Vercel URL / ngrok) and AGENT_TOOLS_BASE_URL.",
+};
+
+/**
+ * Reads a JSON error body from one of this app's API routes. Route handlers return
+ * `{ error, hint }`, and those two fields are the difference between "Failed to
+ * start call" and an actionable message when a deployment is misconfigured.
+ */
+async function readErrorBody(
+  response: Response
+): Promise<{ message: string; hint?: string }> {
+  const body = (await response.json().catch(() => null)) as
+    | { error?: string; details?: string; hint?: string }
+    | null;
+  const message =
+    body?.error ??
+    body?.details ??
+    `Request failed with status ${response.status}`;
+  return { message, hint: body?.hint };
+}
+
+/**
+ * Voice call with the AI agent, started from the shopping page.
+ *
+ * `onCallEnded` lets the host (the agent dock) close itself and refresh the
+ * orders, because the AI may have changed one during the call.
+ */
+export default function VoiceAgentCall({ onCallEnded }: { onCallEnded?: () => void } = {}) {
+  const [showConversation, setShowConversation] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [agoraData, setAgoraData] = useState<AgoraTokenData | null>(null);
+  const [rtmClient, setRtmClient] = useState<RTMClient | null>(null);
+  const [agentJoinError, setAgentJoinError] = useState<AgentJoinError | null>(null);
+
+  // Preload heavy modules on mount
+  useEffect(() => {
+    import("agora-rtc-react").catch(() => {});
+    import("agora-rtm").catch(() => {});
+  }, []);
+
+  // While the call is up, tell the backend the customer is still on the page,
+  // and end the conversation the moment the tab goes away — the agent dashboard
+  // must never show a call nobody is on.
+  const conversationId = agoraData?.conversationId;
+  useEffect(() => {
+    if (!conversationId || !showConversation) return;
+    void sendHeartbeat(conversationId);
+    const beat = setInterval(() => void sendHeartbeat(conversationId), 8000);
+    const leave = () => endConversation(conversationId, true);
+    window.addEventListener("pagehide", leave);
+    return () => {
+      clearInterval(beat);
+      window.removeEventListener("pagehide", leave);
+    };
+  }, [conversationId, showConversation]);
+
+  const handleStartCall = async () => {
+    setIsLoading(true);
+    setError(null);
+    setAgentJoinError(null);
+    // Held in a local, not state: React has not applied setState by the time the
+    // catch below runs, so reading state here would always see the previous value.
+    let rtmFailure: string | null = null;
+
+    try {
+      // 1. Fetch RTC token + channel (and the App ID, so the browser never depends
+      //    on a build-time-inlined NEXT_PUBLIC_AGORA_APP_ID).
+      const agoraResponse = await fetch("/api/generate-agora-token");
+      const responseData = await agoraResponse.json();
+
+      if (!agoraResponse.ok) {
+        const detail = await readErrorBody(agoraResponse);
+        throw new Error(detail.hint ? `${detail.message} ${detail.hint}` : detail.message);
+      }
+
+      const appId = resolveAppId(responseData.appId);
+      if (!appId) {
+        throw new Error(MISSING_APP_ID_MESSAGE);
+      }
+
+      // 2. Run agent invite and RTM setup in parallel
+      const session = getClientSession();
+      const [agentData, rtm] = await Promise.all([
+        // 2a. Start the AI agent
+        fetch("/api/invite-agent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            requester_id: responseData.uid,
+            channel_name: responseData.channel,
+            client_id: session?.id,
+            customer_name: session?.name,
+          } as ClientStartRequest),
+        })
+          .then(async (res) => {
+            if (!res.ok) {
+              const detail = await readErrorBody(res);
+              console.error("[voice] invite-agent failed:", detail.message);
+              setAgentJoinError({ message: detail.message, hint: detail.hint });
+              return null;
+            }
+            return res.json() as Promise<AgentResponse>;
+          })
+          .catch((err) => {
+            console.error("Failed to start conversation with agent:", err);
+            setAgentJoinError({
+              message:
+                err instanceof Error ? err.message : "Could not reach /api/invite-agent.",
+            });
+            return null;
+          }),
+
+        // 2b. Set up RTM
+        (async () => {
+          const { default: AgoraRTM } = await import("agora-rtm");
+          const rtm: RTMClient = new AgoraRTM.RTM(appId, String(responseData.uid));
+          await rtm.login({ token: responseData.token });
+          await rtm.subscribe(responseData.channel);
+          return rtm;
+        })().catch((err) => {
+          // Transcripts and agent state ride on RTM, but a failed login must not
+          // abort the call — audio still works, and the UI is told why it is quiet.
+          const message = err instanceof Error ? err.message : String(err);
+          console.error("[voice] RTM setup failed:", message);
+          rtmFailure = message;
+          return null;
+        }),
+      ]);
+
+      if (!rtm) {
+        throw new Error(
+          `Could not open the Agora RTM channel that carries transcripts and agent state${
+            rtmFailure ? `: ${rtmFailure}` : "."
+          } Check that the App ID and certificate belong to the same Agora project, and that RTM is enabled for it.`,
+        );
+      }
+
+      setRtmClient(rtm);
+      setAgoraData({
+        ...responseData,
+        appId,
+        agentId: agentData?.agent_id,
+        conversationId: agentData?.conversation_id,
+        toolsEnabled: agentData?.tools_enabled ?? true,
+      });
+      setShowConversation(true);
+    } catch (err) {
+      // The previous copy blamed the microphone for every failure, which sent
+      // people hunting for a permission problem when the real one was server-side.
+      const message = err instanceof Error ? err.message : String(err);
+      setError(
+        /permission|denied|notallowed|getUserMedia|device/i.test(message)
+          ? "Microphone access is blocked. Allow the microphone for this site, then try again."
+          : message,
+      );
+      console.error("Error starting voice call:", err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleTokenWillExpire = useCallback(
+    async (uid: string): Promise<AgoraRenewalTokens> => {
+      const channel = agoraData?.channel;
+      if (!channel) throw new Error("Missing channel for token renewal");
+
+      const [rtcResponse, rtmResponse] = await Promise.all([
+        fetch(`/api/generate-agora-token?channel=${channel}&uid=${uid}`),
+        fetch(`/api/generate-agora-token?channel=${channel}&uid=${agoraData.uid}`),
+      ]);
+      const [rtcData, rtmData] = await Promise.all([
+        rtcResponse.json(),
+        rtmResponse.json(),
+      ]);
+
+      if (!rtcResponse.ok || !rtmResponse.ok) {
+        throw new Error("Failed to generate renewal tokens");
+      }
+
+      return { rtcToken: rtcData.token, rtmToken: rtmData.token };
+    },
+    [agoraData]
+  );
+
+  const handleEndConversation = async () => {
+    if (agoraData?.agentId) {
+      try {
+        await fetch("/api/stop-conversation", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agent_id: agoraData.agentId,
+            conversation_id: agoraData.conversationId,
+          } as StopConversationRequest),
+        });
+      } catch (error) {
+        console.error("Error stopping agent:", error);
+      }
+    } else if (agoraData?.conversationId) {
+      await mirrorVoiceState(agoraData.conversationId, { close: true });
+    }
+
+    rtmClient?.logout().catch((err) => console.error("RTM logout error:", err));
+    setRtmClient(null);
+    setShowConversation(false);
+    onCallEnded?.();
+  };
+
+  if (showConversation && agoraData && rtmClient) {
+    return (
+      <div className="flex flex-col h-full absolute inset-0">
+        {agentJoinError && (
+          <div
+            className="p-3 bg-red-900/30 text-red-300 text-sm text-center space-y-1"
+            role="alert"
+          >
+            <div className="font-medium text-red-200">
+              The AI agent could not join this call: {agentJoinError.message}
+            </div>
+            {agentJoinError.hint && (
+              <div className="text-xs text-red-300/80">{agentJoinError.hint}</div>
+            )}
+            <div className="text-xs text-zinc-400">
+              Deployment self-check:{" "}
+              <a href="/api/health" target="_blank" rel="noreferrer" className="underline">
+                /api/health
+              </a>{" "}
+              · run <code>agora project doctor --deep</code> for credentials and feature enablement.
+            </div>
+          </div>
+        )}
+
+        {!agoraData.toolsEnabled && (
+          <div
+            className="p-3 bg-amber-900/30 text-amber-300 text-sm text-center space-y-1"
+            role="status"
+          >
+            <div className="font-medium text-amber-200">
+              {TOOLS_DISABLED_WARNING.message}
+            </div>
+            <div className="text-xs text-amber-300/80">{TOOLS_DISABLED_WARNING.hint}</div>
+          </div>
+        )}
+
+        <Suspense fallback={<LoadingSkeleton />}>
+          <ErrorBoundary>
+            <AgoraProvider>
+              <ConversationComponent
+                agoraData={agoraData}
+                rtmClient={rtmClient}
+                onTokenWillExpire={handleTokenWillExpire}
+                onEndConversation={handleEndConversation}
+              />
+            </AgoraProvider>
+          </ErrorBoundary>
+        </Suspense>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center overflow-y-auto px-6 py-8">
+      <div className="flex w-full max-w-sm flex-1 flex-col items-center justify-start pt-6 text-center">
+        {/* Avatar */}
+        <div className="relative mb-5">
+          <div className="flex h-28 w-28 items-center justify-center rounded-full border-4 border-blue-500 bg-zinc-800 shadow-lg shadow-blue-900/40">
+            <span className="absolute inset-0 rounded-full bg-blue-500/10"></span>
+            <Phone className="h-12 w-12 text-blue-400" />
+          </div>
+          <span className="absolute -bottom-1 -right-1 flex h-7 w-7 items-center justify-center rounded-full border-2 border-zinc-950 bg-green-500">
+            <span className="h-2 w-2 rounded-full bg-zinc-950"></span>
+          </span>
+        </div>
+
+        <h2 className="text-2xl font-semibold text-white">Talk to Nexa</h2>
+        <p className="mt-2 text-sm leading-relaxed text-zinc-400">
+          Speak in Hindi, English, or Hinglish — check an order, cancel, change an address,
+          or ask for a human agent.
+        </p>
+      </div>
+
+      {error && (
+        <div className="mt-5 w-full max-w-sm rounded-lg border border-red-800 bg-red-950/40 px-4 py-3 text-center text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
+      {/* Primary action + reassurance */}
+      <div className="mt-auto flex w-full max-w-sm flex-col items-center gap-3 pb-2 pt-8">
+        <Button
+          className="h-14 w-full rounded-full bg-green-600 text-lg font-semibold text-white shadow-lg shadow-green-900/40 transition-all hover:bg-green-700"
+          onClick={handleStartCall}
+          disabled={isLoading}
+        >
+          {isLoading ? (
+            <>
+              <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+              Connecting…
+            </>
+          ) : (
+            <>
+              <Phone className="mr-2 h-5 w-5" />
+              Start Call
+            </>
+          )}
+        </Button>
+
+        <ul className="flex w-full flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[11px] text-zinc-500">
+          <li className="flex items-center gap-1"><Lock className="h-3 w-3" /> Private</li>
+          <li className="text-zinc-700">•</li>
+          <li>Clear audio</li>
+          <li className="text-zinc-700">•</li>
+          <li>No app needed</li>
+        </ul>
+
+        <p className="text-center text-xs text-zinc-600">Powered by Agora Conversational AI</p>
+      </div>
+    </div>
+  );
+}

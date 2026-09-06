@@ -1,0 +1,73 @@
+> **When to Read This:** Load this when changing how a conversation session starts, renews, or stops, especially across `VoiceAgentCall`, `ConversationComponent`, and `app/api/*` routes.
+
+# Conversation Lifecycle
+
+## Overview
+
+This quickstart orchestrates one user session across four coupled systems:
+
+- Next.js browser UI state.
+- Agora RTC media transport.
+- Agora RTM data transport.
+- Agora managed agent backend lifecycle.
+
+The correctness target is single-init, predictable teardown, and no leaked RTM/RTC resources.
+
+## Detailed Start Sequence
+
+1. User clicks start in `VoiceAgentCall`.
+2. `VoiceAgentCall.handleStartCall` calls `GET /api/generate-agora-token` (the response also carries the App ID the browser must join with).
+3. In parallel:
+- `POST /api/invite-agent` starts managed agent session.
+- RTM client is created, logs in with token, subscribes to channel.
+4. On success, `agoraData` + `rtmClient` are stored and `ConversationComponent` mounts.
+5. `useJoin` and `useLocalMicrophoneTrack` remain gated by `isReady` StrictMode guard.
+6. After join success, `AgoraVoiceAI.init()` binds RTC+RTM engines and subscribes messages.
+7. UI renders visualizer, transcript, and metrics panels.
+
+## StrictMode Safety Contract
+
+- `isReady` flips `true` only after the fake-unmount cycle finishes.
+- First fake mount timer is synchronously cancelled; second real mount timer survives.
+- This keeps join and track init single-run in development.
+
+Breaking this guard causes duplicate client/track/toolkit initialization patterns that are hard to recover from.
+
+## Token Renewal Flow
+
+- Renewal callback receives actual joined RTC UID.
+- Two renewal calls are made in parallel:
+- RTC renewal for current joined UID.
+- RTM renewal for original login UID.
+- Both target same channel.
+- Result returns `rtcToken` + `rtmToken` to caller.
+
+## Teardown Sequence
+
+1. If `agentId` exists, call `POST /api/stop-conversation`.
+2. Stop route calls `client.stopAgent(agent_id)` and treats already-stopping states as success.
+3. Frontend logs out RTM client and clears RTM state.
+4. `showConversation` reset unmounts conversation view.
+5. `agora-rtc-react` hook ownership handles leave/unpublish/track cleanup after unmount.
+6. Toolkit cleanup path unsubscribes and destroys `AgoraVoiceAI` singleton.
+
+## Two-Sided Ending (handover)
+
+- Customer ends (close button, tab close, sign-out, sweep): `closeConversation` → `CLOSED` + `endedBy: 'customer'`; an open case is flagged `customerLeftAt`. The human `CaseWorkspace` poll sees it, auto-leaves the voice bridge (when in a call) and disables the reply box.
+- Human resolves: `resolveCase` → `RESOLVED` + `endedBy: 'human'`; the conversation + transcript are kept (the case page needs them). Customer polls see `RESOLVED` and `useConversationSync` exposes `ended` → `ConversationComponent` calls `onEndConversation` (hang up, close the dock).
+- Human leaves the call without resolving: `POST /api/cases/:id/leave` → `humanLeaveCase` marks `humanLeftAt` and closes the conversation → the customer side ends too; the case stays in the queue flagged 'agent left'.
+- Never delete the conversation in `resolveCase` — `pruneSnapshot` TTLs finished conversations (24 h) while the case + transcript remain readable.
+
+## Failure Modes and Recovery
+
+- Invite failure is non-fatal to render path: UI still mounts and shows warning.
+- RTM bootstrap failure is fatal to start path because transcript pipeline depends on it.
+- Stop failures are logged, but UI teardown still continues.
+
+## Cross-File Dependencies
+
+- `components/VoiceAgentCall.tsx`: bootstrap orchestration, RTM setup and renewal callback.
+- `components/ConversationComponent.tsx`: join/toolkit/mic runtime behavior.
+- `app/api/generate-agora-token/route.ts`: RTM-capable token minting.
+- `app/api/invite-agent/route.ts`: agent pipeline config.
+- `app/api/stop-conversation/route.ts`: idempotent stop semantics.

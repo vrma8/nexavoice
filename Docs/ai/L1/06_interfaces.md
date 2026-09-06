@@ -1,0 +1,175 @@
+# 06 Interfaces
+
+> Contracts at repo boundaries: API routes, env vars, runtime events, and shared TypeScript payloads.
+
+## HTTP Route Contracts
+
+### `GET /api/generate-agora-token`
+
+Query params:
+
+- `uid` optional; invalid/zero resolves to random RTM-safe UID.
+- `channel` optional; defaults to `quickstart-<uid>` when the client already holds a
+  conversation id, so a token refresh reuses the channel the agent is in instead of
+  minting a new one (`nv-<id>`, `ai-conversation-<ts>-<rand>` for a fresh request).
+
+Success response:
+
+```json
+{ "appId": "…", "token": "...", "uid": "1234", "channel": "ai-conversation-...", "expiresAt": 1730000000000 }
+```
+
+`appId` is resolved server-side (`NEXT_PUBLIC_AGORA_APP_ID` → `AGORA_APP_ID` →
+`VITE_`/`REACT_APP_` aliases) by `resolveAppId()` in `lib/agora.ts` and is the App ID the
+client must join with — the same value signs the token, so the pair cannot drift. It is
+what lets the app work when `NEXT_PUBLIC_AGORA_APP_ID` is configured for Runtime only: a
+`NEXT_PUBLIC_*` var is inlined into the bundle at build time. `expiresAt` is
+`issuedAt + 3600` expressed in **milliseconds**; renewal itself is event-driven
+(`token-privilege-will-expire`), so the field is for display and debugging.
+
+Failure response: `{ "error": string, "details"?: string }` — `503` while
+`NEXT_AGORA_APP_CERTIFICATE` is missing (the `details` name the variable and the Vercel
+environment that must be ticked) instead of a token signed with `undefined`, `500`
+otherwise.
+
+### `POST /api/invite-agent`
+
+Body (`ClientStartRequest`):
+
+```json
+{ "requester_id": "1234", "channel_name": "ai-conversation-..." }
+```
+
+Success (`AgentResponse`):
+
+```json
+{ "agent_id": "...", "create_ts": 1710000000, "state": "RUNNING", "conversation_id": "conv_…", "tools_enabled": true }
+```
+
+Registers (or reuses, keyed by channel) a `VOICE` conversation in the support store. `tools_enabled` is `false` when `AGENT_TOOLS_SECRET`/`AGENT_TOOLS_BASE_URL` are missing. Validation failures return `400`; server failures return `500`.
+
+### `POST /api/stop-conversation`
+
+Body (`StopConversationRequest`): `{ "agent_id": "...", "conversation_id"?: "conv_…" }`. When `conversation_id` is given the conversation is closed (`CLOSED`, or left `RESOLVED`); an open case is flagged `customerLeftAt`.
+
+Responses:
+
+- `{ "success": true }`
+- `{ "success": true, "state": "already-stopping" }` for idempotent stop state
+- `{ "error": string }` on failure
+
+### `POST /api/chat/completions`
+
+OpenAI-compatible SSE proxy used as the Agora **custom LLM** when `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` are set. Runs the NexaVoice tools server-side (`lib/chat-completions.ts`), scoped by header `x-nexavoice-conversation-id` (set on `llm.headers` by `lib/agent-config.ts`). Always streams `data: {...}` chunks ending with `data: [DONE]`. Requires `NEXT_LLM_API_KEY` and `NEXT_LLM_URL` (500 otherwise); invalid JSON → 400. **Medical gate:** when the last message is a medical request, the handler streams the refusal (first request) or the escalation reply (from the second request, creating the case) WITHOUT calling the model — `streamText` never runs.
+
+### `POST /api/agent-tools/[tool]?conversation_id=…` (engine → backend)
+
+Headers: `x-nexavoice-tool-token: <tool secret>` (401 otherwise) — `AGENT_TOOLS_SECRET`,
+or a value derived from `NEXT_AGORA_APP_CERTIFICATE` when that variable is unset. Body: tool args (+ optional `tool_call_id`, echoed back). Tools: `get_customer_context`, `search_products`, `list_recent_orders`, `get_order_status`, `get_cart_status`, `add_item_to_cart`, `remove_item_from_cart`, `set_cart_item_quantity`, `replace_cart_item`, `clear_cart`, `place_order`, `add_item_to_order`, `remove_item_from_order`, `replace_item_in_order`, `cancel_order`, `update_shipping_address`, `set_preferred_language`, `escalate_to_human` (404 for anything else). Response: `{ ok, tool, tool_call_id?, ...result }`; guardrail errors come back as `ok: false` with `error` ∈ `NO_SIGNED_IN_CUSTOMER | CONFIRMATION_REQUIRED | HANDED_OFF | PRODUCT_NOT_FOUND | NOT_IN_CART | NOT_EDITABLE | ITEM_NOT_IN_ORDER | ORDER_NOT_FOUND | ORDER_LOCKED | NOT_CANCELLABLE | ALREADY_CANCELLED | LAST_ITEM | CART_EMPTY | ADDRESS_REQUIRED | INVALID_ADDRESS | INVALID_QUANTITY | UNSUPPORTED_LANGUAGE | TOOL_FAILED | DATABASE_UNAVAILABLE | MEDICAL_ADVICE_REFUSED | ESCALATION_FAILED` (never HTTP 4xx, so the LLM can recover). Medical searches also return `ok: true` with `error: MEDICAL_ESCALATED` from the second request on, alongside the created case.
+
+`DATABASE_UNAVAILABLE` (PostgreSQL unreachable — `isDatabaseUnavailableError()` in `lib/db.ts`) carries a message that orders the model to apologise once and NEVER invent products, prices or order data; the generic `TOOL_FAILED` is for every other failure. Every tool call also records the intent it reveals on `conversation.context.intent` (`TOOL_INTENT` in `lib/support/tools.ts`), so handoffs name the real intent even when the model forgets to pass one.
+
+### Conversations
+
+- `POST /api/conversations` `{ mode: "CHAT" | "VOICE" }` → `201 { conversation }`.
+- `GET /api/conversations?active=1` → `{ conversations }`.
+- `GET /api/conversations/:id?since=<ms>` → `{ conversation, messages, case, now }` (messages with `createdAt > since`).
+- `PATCH /api/conversations/:id` `{ agentState?, transcript?: [{ role: "user"|"ai"|"human_agent", content, turnId? }], close?, humanUid? }` → `{ conversation }`. Voice client mirrors transcript/agent state here; `turnId` upserts. Post-handover speech captions go through `POST /api/conversations/:id/messages` instead (role `user` on the customer, `human_agent` on the human side).
+- `POST /api/conversations/:id/messages` `{ content, role?: "user" | "human_agent" }` → `{ message, reply, conversation, case, degraded? }`. Customer message while `AI_HANDLING` runs the AI turn (`reply` = AI message); while a human handles the chat `reply` is `null`; `409` once `RESOLVED`/`CLOSED`. The same endpoint stores the human agent's live speech captions (`role: human_agent`).
+- `POST /api/escalation/request` `{ conversation_id, reason? }` → `{ success, caseId, case, conversation }`. The same path as the `escalate_to_human` tool. It is driven by the AI tool layer / the rule-based agent — there is no customer-facing button.
+
+### Cases & dashboard
+
+- `GET /api/cases?status=A,B` → `{ cases }` (newest first).
+- `GET /api/cases/:id` → `{ case, conversation, messages, now }`.
+- `POST /api/cases/:id/accept` `{ agentName }` → `{ case, conversation, voice }`; for voice cases `voice` = `{ appId, token, uid: "654321", channel, agentUid: "123456" }` (RTC+RTM token via `buildTokenWithRtm`, 1 h), else `null`. Idempotent. The agent's uid is returned rather than recomputed in the browser, and the App ID comes from the server for the same reason as the token route.
+
+Timestamp units: every timestamp an API route returns (including `expiresAt`) is Unix **milliseconds**. `RtcTokenBuilder` is the only place Agora's seconds unit is used, and it never crosses the wire.
+- `POST /api/cases/:id/takeover` `{ humanUid? }` → `{ ok, aiStopped, announcement: "spoken"|"skipped"|"failed", conversation }`. AI speaks the handover line (`agents.speak`, INTERRUPT), waits ~4.5 s, then `stopAgent`; conversation → `HUMAN_HANDLING`, `agentState: "left"`.
+- `POST /api/cases/:id/resolve` `{ note?, humanLeft? }` → `{ case, conversation }` (`RESOLVED`, `endedBy: 'human'`; the conversation + transcript are kept for the case page).
+- `POST /api/cases/:id/leave` (empty body) → `{ case, conversation }`. The human left without resolving: marks `humanLeftAt`, closes the conversation (`endedBy: 'human'`) so the customer's call/chat ends too. The case stays visible with an 'agent left' flag.
+- `GET /api/dashboard` → `{ now, liveCalls, activeChats, waitingCases, handlingCases, recentResolved, recentEvents }` (no-store).
+- `GET /api/dashboard/events` → SSE: `ready { now, backlog }`, `conversation <ConversationEvent>`, `ping` every 20 s, auto-close after 5 min (`SSE_MAX_LIFE_MS`) with client reconnect — a never-ending stream is incompatible with serverless function limits, hence `export const dynamic = 'force-dynamic'`.
+- `GET /api/health` → always HTTP 200 with `{ status: "ok" | "degraded" | "error", agora, agent, store, database, checkedAt }` — `status` is `"degraded"` when the database probe fails:
+  - `agora`: `{ appIdConfigured, appId (masked: first 6 + last 4 chars), appCertificateConfigured, credentialSources, publicAppIdInlined, area, error, convoai }` — `publicAppIdInlined: false` means the browser bundle was built without the App ID. `credentialSources: { appId, appCertificate, inertVarsSet }` names the env vars that actually provided each credential and lists set-but-never-read Agora CLI variables (`AGORA_PROJECT_ID`, `AGORA_FEATURE_*`, `AGORA_ENABLED_FEATURES`). `convoai` is the result of one read-only live `GET /v2/projects/{appid}/agents` round trip (`{ ok, area, latencyMs?, agents? { running, starting, total }, error?, hint?, statusCode? }`) unless skipped with `?deep=0`; a failed probe also flips `status` to `"degraded"`.
+  - `agent`: `{ llm: "custom" | "agora-managed", tools: { enabled, baseUrl, secretSource: "AGENT_TOOLS_SECRET" | "derived-from-app-certificate" | null }, interactionLanguage, sttLanguage, ttsVoice }`.
+  - `store`: `{ backend, target, ready }` — `postgres` when `DATABASE_URL` is set, otherwise `memory` (per-instance).
+  - `store`: `getStoreSyncStatus()` (`backend`, `revision`, `remoteRev`, `lastSyncAt`, `lastError`, …) plus `conversations` and a `note` naming the fix when `backend: "none"`.
+  - `database`: `{ ok, configured, latencyMs?, products?, clients?, error?, connectivity?, hint? }` — one live `count()` round trip through Prisma (`checkDatabase()` in `lib/db.ts`, 5s cache). `products < 60` means the catalogue is not seeded; `connectivity: true` with `ok: false` means the server was reached but the query failed (run `pnpm db:push && pnpm seed`); `connectivity: false` means the server could not be reached at all (paused Supabase project, wrong region/port, blocked network).
+
+  Public and safe to open in a browser: booleans, masked ids and non-secret config only — never a certificate, token, or secret value.
+- Shop (all require the signed-in client via the `x-nexavoice-client-id` header, or `?clientId=`; 503 when `DATABASE_URL` is unset, 401 when the client is unknown):
+  - `GET /api/shop/products` → `{ products }` — the fixed 60-product catalogue.
+  - `GET|POST|PATCH|DELETE /api/shop/cart` → `{ cart }` — read, add (`{ productId, qty }`), set quantity, clear.
+  - `GET /api/shop/orders` → `{ orders }`; `POST /api/shop/orders` `{ shippingAddress, paymentMethod }` → `{ order, orders, cart }` (also saves the address on the client).
+  - `GET /api/shop/orders/:code` → `{ order }`; `PATCH /api/shop/orders/:code` `{ action: 'add_item'|'remove_item'|'set_qty'|'address'|'cancel', … }` → `{ order, orders }`, rejected with `ORDER_LOCKED`/`NOT_CANCELLABLE` once the order is no longer `PLACED`.
+
+### Handoff summary (`SupportCase.handoff`, v1.md §24)
+
+```json
+{ "conversation_id": "conv_…", "mode": "voice", "language": "hinglish", "client_name": "Rahul Sharma", "intent": "cancellation", "summary": "…", "information_collected": [], "actions_taken": [], "reason_for_escalation": "…", "confidence": 0.7, "missing_information": [], "customer_profile": { … }, "orders": [ … ], "cart": { "items": [ "1 x Yoga Mat 6mm (NM-SP-047)" ], "total_inr": 699 }, "transcript_excerpt": [ "Customer: …", "AI: …" ] }
+```
+
+`orders` and `cart` are read live from PostgreSQL at escalation time (best-effort — a database outage degrades to the model-written summary), `actions_taken` is the tool audit tail, and `intent` falls back to `conversation.context.intent` when the model does not pass one.
+
+## Event/Data Interfaces
+
+- RTM transcript/state/metrics/errors consumed through `AgoraVoiceAI` event emitter.
+- Raw RTM `message` event parsed as fallback for `message.error` and `message.sal_status` payloads.
+- `AGENT_METRICS` payloads displayed by `QuickstartPipelineMetrics`.
+
+## Environment Contract
+
+Required:
+
+- `NEXT_PUBLIC_AGORA_APP_ID`
+- `NEXT_AGORA_APP_CERTIFICATE`
+
+Aliases accepted in their place (server-side only; resolved in `lib/agora-server.ts`, never read `process.env` for these in routes): `AGORA_APP_ID`, `AGORA_APP_CERTIFICATE`. Never read at all: `AGORA_PROJECT_ID`, `AGORA_PROJECT_NAME`, `AGORA_ENABLED_FEATURES`, `AGORA_FEATURE_RTC/RTM/CONVOAI`.
+
+Voice tools (both required for the engine to call the backend): `AGENT_TOOLS_BASE_URL` (public https origin; falls back to `VERCEL_URL`), `AGENT_TOOLS_SECRET` (≥ 8 chars).
+
+Optional: `AGORA_AREA` (`US`|`EU`|`AP`|`CN`; unknown values warn and fall back to `US`; when unset, `AGORA_REGION` is honoured with `global` → `US`), `AGENT_LANGUAGE` (`en-IN` default; `hi-IN`, `bn-IN`, `ta-IN`, `te-IN`, `gu-IN`, `kn-IN`, `en-US`), `AGENT_STT_LANGUAGE` (`multi`), `AGENT_TTS_VOICE_ID`, `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` (+ `NEXT_LLM_MODEL`) for BYOK LLM (chat agent + custom-LLM voice path).
+
+## Test Coverage for Interfaces
+
+- `scripts/verify-api-contracts.ts` asserts token generation, input validation, env failures, SSE framing, tool guardrails (`CUSTOMER_NOT_VERIFIED`, `CONFIRMATION_REQUIRED`, `HANDED_OFF`, cross-customer isolation, business rules), the REST tool endpoint auth, the agent `toProperties()` wire shape (REST tools, template variables, `asr.params.language = multi`, `enable_tools`/`enable_rtm`), and the chat → escalation → dashboard → accept flow.
+- `scripts/test-voice-tools.ts` (`pnpm run test:voice-tools`, needs the dev server + database) replays the exact REST calls the Agora engine makes during a call: customer context, catalogue search (incl. Hindi/Hinglish and the medical exclusion), cart add/replace, `place_order`, editing a PLACED order, escalation with handoff assertions (intent, actions, orders, cart, transcript), and the post-handoff tool lock.
+- `scripts/test-db-unavailable.ts` (`pnpm run test:db-unavailable`) points `DATABASE_URL` at a closed port and asserts every shop tool returns `DATABASE_UNAVAILABLE` with the never-invent instruction instead of `TOOL_FAILED`.
+
+## Shared Client-Side Interfaces
+
+From `types/conversation.ts` (high-use):
+
+- `AgoraTokenData`: token bootstrap payload consumed by `VoiceAgentCall` (includes `appId`, `token`, `uid`, `channel`, `expiresAt`, `agentId`, `conversationId`, `toolsEnabled`). `appId` comes from the server — the client must not decide the App ID from a build-time env var — and `expiresAt` is the server's view of when the token dies (milliseconds), reported rather than scheduled against. `toolsEnabled` (copied from `invite-agent`'s `tools_enabled`) shows the in-call amber banner when the session has no backend tools.
+- `lib/agora.ts`: browser-safe constants (`AGENT_UID = '123456'`, `HUMAN_UID = '654321'`), `resolveAppId()`, and the missing-App-ID message used by both voice surfaces.
+- `lib/support/snapshot.ts`: `StoreSnapshot` (`version: 1`) — the only shape the durable mirror carries; every persisted field is listed there.
+- `lib/support/types.ts`: `Conversation`, `ConversationMessage`, `SupportCase`, `HandoffSummary`, `ConversationEvent` shared by API routes, dashboard and chat.
+- `AgoraRenewalTokens`: renewal callback result (`rtcToken`, `rtmToken`).
+- `ConversationComponentProps`: runtime dependencies for in-call component.
+
+## Interface Invariants
+
+- Token payload must always include `token`, `uid`, `channel`.
+- Invite route requires both `requester_id` and `channel_name`.
+- Stop route requires `agent_id`; missing should never be tolerated silently.
+- Token route should always return UID as string for downstream compatibility.
+- Tool endpoint never executes a write without `confirmed: true`, never outside the conversation's signed-in client, and never after escalation (`HANDED_OFF`).
+- Human agent RTC uid is always `654321` (`DEFAULT_HUMAN_UID`); the customer client uses it to detect a human joining.
+
+## Event Interface Notes
+
+- Metrics stream entries are append-only in component state, capped to recent window.
+- Connection issue records carry `source`, `agentUserId`, code/message, timestamp.
+- SAL and signaling fallback payloads are parsed defensively because message schema can vary.
+
+## Backward Compatibility Guidance
+
+- If route response shape changes, update both client consumers and contract tests in same change.
+- If adding fields, keep existing fields stable to avoid quickstart consumer breakage.
+- Reflect interface changes in README and L1 docs to keep sample copyable.
+
+## Related Deep Dives
+
+- [conversation_lifecycle.md](L2/conversation_lifecycle.md) — How route contracts are used in sequence.
+- [transcript_pipeline.md](L2/transcript_pipeline.md) — Event-level contract mapping.
