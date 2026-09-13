@@ -4,17 +4,6 @@ import { getAgoraCredentials } from '@/lib/agora-server';
 
 const EXPIRATION_TIME_IN_SECONDS = 3600;
 
-/**
- * GET /api/generate-agora-token[?uid=&channel=]
- * Issues one combined RTC + RTM token (see `buildTokenWithRtm`) and, when no
- * channel is supplied, mints a fresh one.
- *
- * The response also carries `appId`: the browser needs the App ID for `join()` and
- * for the RTM client, and a build-time inlined `NEXT_PUBLIC_AGORA_APP_ID` is a
- * Vercel footgun — if the variable is not marked for build, the client bundle gets
- * `undefined`, the RTC join fails, and the voice call "never connects" while every
- * server route keeps working. Reading it here makes the deployment self-sufficient.
- */
 export const dynamic = 'force-dynamic';
 
 function generateChannelName(): string {
@@ -45,8 +34,6 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const uidStr = searchParams.get('uid');
   const parsedUid = uidStr ? parseInt(uidStr, 10) : Number.NaN;
-  // uid 0 means "any unoccupied uid" in RTC, but RTM and the agent's
-  // remoteUids filter both need a real, stable id — so assign one instead.
   const uid = Number.isNaN(parsedUid) || parsedUid <= 0
     ? Math.floor(Math.random() * 9_999_000) + 1000
     : parsedUid;
@@ -66,16 +53,26 @@ export async function GET(request: NextRequest) {
       expirationTime,
     );
 
+    if (!token) {
+      return NextResponse.json(
+        {
+          error: 'Agora token generation produced an empty token',
+          hint:
+            'The credentials look malformed — Agora App IDs are exactly 32 characters and App Certificates are 32-character hex strings. ' +
+            'Check NEXT_PUBLIC_AGORA_APP_ID (or AGORA_APP_ID) and NEXT_AGORA_APP_CERTIFICATE (or AGORA_APP_CERTIFICATE) in ' +
+            'Vercel → Project Settings → Environment Variables (Production + Preview), then redeploy.',
+          appIdLength: appId.length,
+          appCertificateLength: appCertificate.length,
+        },
+        { status: 500 },
+      );
+    }
+
     return NextResponse.json({
       token,
       uid: uid.toString(),
       channel: channelName,
       appId,
-      /**
-       * Unix **milliseconds**, to match every other timestamp this API returns — the
-       * builder above is the only place Agora's seconds unit applies. Renewal itself is
-       * event-driven (`token-privilege-will-expire`); this is for display/debugging.
-       */
       expiresAt: expirationTime * 1000,
     });
   } catch (error) {

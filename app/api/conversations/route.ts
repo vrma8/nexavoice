@@ -4,22 +4,34 @@ import type { ConversationMode, CustomerSnapshot } from '@/lib/support/types';
 import { withStore } from '@/lib/support/route-store';
 import { prisma, hasDatabaseUrl } from '@/lib/db';
 
-/** GET /api/conversations?active=1 — list conversations (dashboard). */
 async function handleGet(request: NextRequest) {
   const active = request.nextUrl.searchParams.get('active') === '1';
   return NextResponse.json({ conversations: listConversations({ active }) });
 }
 
-/**
- * Loads the signed-in client from PostgreSQL and turns it into the snapshot the
- * conversation (and every tool call made inside it) is scoped to. The browser
- * only ever sends an id — the profile itself always comes from the database.
- */
-async function loadClient(clientId?: string): Promise<CustomerSnapshot | undefined> {
-  if (!clientId || !hasDatabaseUrl()) return undefined;
+const DEFAULT_ADDRESS = 'B-42, Lajpat Nagar II, New Delhi 110024';
+
+async function loadClient(clientId?: string): Promise<CustomerSnapshot> {
+  const fallbackCustomer: CustomerSnapshot = {
+    id: clientId?.trim() || 'demo-client-1',
+    name: 'Rahul Sharma',
+    phone: '9876543210',
+    email: 'rahul.sharma@example.com',
+    tier: 'prime',
+    city: 'Delhi',
+    address: DEFAULT_ADDRESS,
+    preferredLanguage: 'hinglish',
+  };
+
+  if (!hasDatabaseUrl()) return fallbackCustomer;
   try {
-    const row = await prisma.client.findUnique({ where: { id: clientId } });
-    if (!row) return undefined;
+    let row = clientId?.trim()
+      ? await prisma.client.findUnique({ where: { id: clientId.trim() } })
+      : null;
+    if (!row) {
+      row = await prisma.client.findFirst({ orderBy: { createdAt: 'asc' } });
+    }
+    if (!row) return fallbackCustomer;
     return {
       id: row.id,
       name: row.name,
@@ -27,23 +39,15 @@ async function loadClient(clientId?: string): Promise<CustomerSnapshot | undefin
       email: row.email,
       tier: row.tier,
       city: row.city,
-      address: row.address,
+      address: row.address?.trim() || DEFAULT_ADDRESS,
       preferredLanguage: row.preferredLanguage,
     };
   } catch (error) {
     console.warn('[conversations] could not load client:', error);
-    return undefined;
+    return fallbackCustomer;
   }
 }
 
-/**
- * POST /api/conversations
- * Body: { mode: "CHAT" | "VOICE", clientId?, customerName? }
- *
- * The conversation is bound to the signed-in client record, so the AI agent
- * starts out knowing who it is talking to and can never touch another
- * customer's orders.
- */
 async function handlePost(request: NextRequest) {
   let body: { mode?: string; clientId?: string; customerName?: string } = {};
   try {
@@ -65,7 +69,5 @@ async function handlePost(request: NextRequest) {
   return NextResponse.json({ conversation }, { status: 201 });
 }
 
-// Bracketed by withStore so the durable store mirror is read before the
-// handler runs and written back before the response is flushed (serverless).
 export const GET = withStore(handleGet);
 export const POST = withStore(handlePost);

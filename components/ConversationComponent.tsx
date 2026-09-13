@@ -21,15 +21,15 @@ import {
   type UserTranscription,
   type AgentTranscription,
 } from 'agora-agent-client-toolkit';
-import { AgentVisualizer } from 'agora-agent-uikit';
-import { MicButtonWithVisualizer } from 'agora-agent-uikit/rtc';
-import { DEFAULT_AGENT_UID, MISSING_APP_ID_MESSAGE, resolveAppId } from '@/lib/agora';
+import { DEFAULT_AGENT_UID, DEFAULT_HUMAN_UID, MISSING_APP_ID_MESSAGE, resolveAppId } from '@/lib/agora';
 import {
   getCurrentInProgressMessage,
   getMessageList,
-  mapAgentVisualizerState,
   normalizeTimestampMs,
   normalizeTranscript,
+  resolveCallDisplayState,
+  type CallDisplayState,
+  type TranscriptMessage,
 } from '@/lib/conversation';
 import { MicrophoneSelector } from './MicrophoneSelector';
 import {
@@ -37,29 +37,25 @@ import {
   type ConnectionIssue,
 } from './ConversationErrorCard';
 import { ConnectionStatusPanel } from './ConnectionStatusPanel';
-import { QuickstartConversationLayout } from './QuickstartConversationLayout';
-import {
-  QuickstartPipelineMetrics,
-  type QuickstartAgentMetric,
-} from './QuickstartPipelineMetrics';
-import { QuickstartTranscriptPanel } from './QuickstartTranscriptPanel';
 import { HandoffBanner } from './HandoffBanner';
 import { useConversationSync } from './useConversationSync';
-import { DEFAULT_HUMAN_UID } from '@/lib/agora';
-import { sendMessage } from '@/lib/api';
-import { useSpeechRecognition } from '@/hooks/use-speech-recognition';
-import { AudioLines, Mic, MicOff } from 'lucide-react';
+import { requestEscalation } from '@/lib/api';
+import { Headset, Loader2, Mic, MicOff, PhoneOff, Sparkles } from 'lucide-react';
 import type { ConversationComponentProps } from '@/types/conversation';
 
-// Cap the displayed issues list to avoid overwhelming the UI during a cascade of errors.
 const MAX_CONNECTION_ISSUES = 6;
+
+export type AgentMetric = {
+  type: string;
+  name: string;
+  value: number;
+  timestamp: number;
+};
 
 type AgoraRtcWithParameters = typeof AgoraRTC & {
   setParameter?: (key: string, value: unknown) => void;
 };
 
-// Payload shape for signaling-level errors forwarded by the agent over RTM.
-// The `module` field identifies which backend subsystem (LLM / ASR / TTS) raised the error.
 type RtmMessageErrorPayload = {
   object: 'message.error';
   module?: string;
@@ -68,15 +64,12 @@ type RtmMessageErrorPayload = {
   send_ts?: number;
 };
 
-// Payload shape for SAL (Session Abstraction Layer) registration status messages.
-// VP_REGISTER_FAIL and VP_REGISTER_DUPLICATE indicate RTM channel subscription problems.
 type RtmSalStatusPayload = {
   object: 'message.sal_status';
   status?: string;
   timestamp?: number;
 };
 
-// Type guard for RTM signaling-level error payloads (object: 'message.error').
 function isRtmMessageErrorPayload(
   value: unknown,
 ): value is RtmMessageErrorPayload {
@@ -87,7 +80,6 @@ function isRtmMessageErrorPayload(
   );
 }
 
-// Type guard for RTM SAL status payloads (object: 'message.sal_status').
 function isRtmSalStatusPayload(value: unknown): value is RtmSalStatusPayload {
   return (
     !!value &&
@@ -101,6 +93,8 @@ export default function ConversationComponent({
   rtmClient,
   onTokenWillExpire,
   onEndConversation,
+  onConversationSnapshot,
+  toolsEnabled = true,
 }: ConversationComponentProps) {
   const client = useRTCClient();
   const remoteUsers = useRemoteUsers();
@@ -108,18 +102,15 @@ export default function ConversationComponent({
   const [isAgentConnected, setIsAgentConnected] = useState(false);
   const [isConnectionDetailsOpen, setIsConnectionDetailsOpen] = useState(false);
 
-  // Tracks granular RTC connection state for the status dot.
-  // Agora states: DISCONNECTED | CONNECTING | CONNECTED | DISCONNECTING | RECONNECTING
   const [connectionState, setConnectionState] = useState<string>('CONNECTING');
   const agentUID = String(DEFAULT_AGENT_UID);
   const [joinedUID, setJoinedUID] = useState<UID>(0);
 
-  // Transcript + agent state — managed with AgoraVoiceAI (see effect below).
   const [rawTranscript, setRawTranscript] = useState<
     TranscriptHelperItem<Partial<UserTranscription | AgentTranscription>>[]
   >([]);
   const [agentState, setAgentState] = useState<AgentState | null>(null);
-  const [agentMetrics, setAgentMetrics] = useState<QuickstartAgentMetric[]>([]);
+  const [agentMetrics, setAgentMetrics] = useState<AgentMetric[]>([]);
   const [connectionIssues, setConnectionIssues] = useState<ConnectionIssue[]>(
     [],
   );
@@ -137,17 +128,12 @@ export default function ConversationComponent({
     });
   }, []);
 
-  // Auto-open details panel as soon as a new issue is recorded.
   useEffect(() => {
     if (connectionIssues.length > 0) {
       setIsConnectionDetailsOpen(true);
     }
   }, [connectionIssues.length]);
 
-  // StrictMode guard: delay `useJoin`'s ready flag until after the fake-unmount
-  // cycle completes. React StrictMode fires cleanup synchronously before any
-  // setTimeout callback, so the first (fake) mount's timeout is always cancelled.
-  // Only the real second mount's timeout fires, meaning useJoin joins exactly once.
   const [isReady, setIsReady] = useState(false);
   useEffect(() => {
     let cancelled = false;
@@ -161,9 +147,6 @@ export default function ConversationComponent({
     };
   }, []);
 
-  // App ID comes from /api/generate-agora-token when available: a build-time
-  // NEXT_PUBLIC_ value can be missing from the bundle even though the server routes
-  // are configured, which otherwise shows up as a call that never connects.
   const appId = resolveAppId(agoraData.appId);
 
   const {
@@ -180,8 +163,6 @@ export default function ConversationComponent({
     isReady && Boolean(appId),
   );
 
-  // Surface RTC join failures in the status panel — useJoin swallows them into its
-  // return value, and without this a bad token or App ID looks like silence.
   useEffect(() => {
     if (!joinError) return;
     addConnectionIssue({
@@ -207,9 +188,6 @@ export default function ConversationComponent({
     }
   }, [appId, addConnectionIssue, agentUID]);
 
-  // The agent joins shortly after the customer. No peer with its uid after this
-  // window means /api/invite-agent failed (feature not enabled, quota, bad area),
-  // so say so instead of leaving a spinner up.
   useEffect(() => {
     if (!isReady || !joinSuccess || isAgentConnected) return;
     const timer = setTimeout(() => {
@@ -235,18 +213,14 @@ export default function ConversationComponent({
     agoraData.channel,
   ]);
 
-  // Create mic track only after the StrictMode fake-unmount cycle completes (isReady).
-  // Passing `true` here creates two tracks in StrictMode — the first publishes, then
-  // StrictMode cleanup closes it and the second takes over, causing a ~3s audio gap.
-  // isReady uses the same setTimeout(fn,0) pattern as useJoin: StrictMode cleanup fires
-  // synchronously before the timeout, so only the real second mount's timer fires.
-  // Do NOT pass `isEnabled` — that ties track lifetime to mute state and breaks the Web Audio
-  // graph inside MicButtonWithVisualizer. Mute uses track.setEnabled() only.
   const { localMicrophoneTrack } = useLocalMicrophoneTrack(isReady);
 
-  // ENABLE_AUDIO_PTS is a module-level SDK parameter (not on the client instance).
-  // It must be set before publishing audio for transcript timing to be accurate.
   useEffect(() => {
+    try {
+      AgoraRTC.disableLogUpload();
+    } catch {
+      // ignore if unsupported
+    }
     if (!client) return;
     try {
       (AgoraRTC as AgoraRtcWithParameters).setParameter?.(
@@ -258,7 +232,6 @@ export default function ConversationComponent({
     }
   }, [client]);
 
-  // Track the auto-assigned RTC UID for token renewal and agent invite.
   useEffect(() => {
     if (joinSuccess && client) {
       const uid = client.uid;
@@ -268,14 +241,6 @@ export default function ConversationComponent({
     }
   }, [joinSuccess, client]);
 
-  // Initialize AgoraVoiceAI once the channel is joined.
-  //
-  // Gating on `isReady && joinSuccess` is critical for StrictMode safety:
-  //   - `isReady` ensures we are past the initial fake-unmount cycle, so this
-  //     effect only runs on the real mount (not the discarded fake one).
-  //   - Once `isReady` is true, React does NOT double-invoke this effect for
-  //     subsequent state changes (`joinSuccess` becoming true). That means
-  //     AgoraVoiceAI.init() is called exactly once.
   useEffect(() => {
     if (!isReady || !joinSuccess) return;
 
@@ -293,7 +258,6 @@ export default function ConversationComponent({
         if (cancelled) {
           try {
             if (AgoraVoiceAI.getInstance() === ai) {
-              // Tear down only the instance created by this effect run.
               ai.unsubscribe();
               ai.destroy();
             }
@@ -304,7 +268,6 @@ export default function ConversationComponent({
         ai.on(AgoraVoiceAIEvents.TRANSCRIPT_UPDATED, (t) => {
           setRawTranscript([...t]);
         });
-        // Agent state drives the visualizer, independent of RTC audio presence.
         ai.on(AgoraVoiceAIEvents.AGENT_STATE_CHANGED, (_, event) =>
           setAgentState(event.state),
         );
@@ -321,7 +284,6 @@ export default function ConversationComponent({
             timestamp: normalizeTimestampMs(error.timestamp),
           });
         });
-        // SAL status: capture raw RTM messages so message.sal_status surfaces even if higher-level events don't.
         ai.on(
           AgoraVoiceAIEvents.MESSAGE_SAL_STATUS,
           (agentUserId, salStatus) => {
@@ -340,7 +302,6 @@ export default function ConversationComponent({
             }
           },
         );
-        // Agent error: capture raw RTM messages so message.error surfaces even if higher-level events don't.
         ai.on(AgoraVoiceAIEvents.AGENT_ERROR, (agentUserId, error) => {
           addConnectionIssue({
             id: `${Date.now()}-${agentUserId}-agent-error-${error.code}`,
@@ -351,7 +312,6 @@ export default function ConversationComponent({
             timestamp: normalizeTimestampMs(error.timestamp),
           });
         });
-        // subscribeMessage binds the toolkit to both RTC stream messages and RTM payloads.
         ai.subscribeMessage(agoraData.channel);
       } catch (error) {
         if (!cancelled) {
@@ -373,7 +333,6 @@ export default function ConversationComponent({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReady, joinSuccess]);
 
-  // Raw RTM parsing is kept as a fallback for signaling-level errors and SAL status.
   useEffect(() => {
     const handleRtmMessage = (event: {
       message: string | Uint8Array;
@@ -428,72 +387,59 @@ export default function ConversationComponent({
     };
   }, [rtmClient, addConnectionIssue]);
 
-  // The toolkit uses uid="0" for local user speech — remap to actual RTC UID
-  // so the transcript panel renders user messages on the correct side.
-  // Also normalize punctuation spacing for display when upstream text arrives compacted.
   const transcript = useMemo(() => {
     return normalizeTranscript(rawTranscript, String(client.uid));
   }, [rawTranscript, client.uid]);
 
-  // Completed (END + INTERRUPTED) messages shown as history.
-  // INTERRUPTED must be included — if the agent's first turn is cut off,
-  // messageList stays empty and the first interrupted turn is never shown.
   const messageList = useMemo(() => getMessageList(transcript), [transcript]);
 
   const currentInProgressMessage = useMemo(() => {
-    // The live partial turn renders separately from the completed history list.
     return getCurrentInProgressMessage(transcript);
   }, [transcript]);
 
-  // Backend sync: mirrors transcript/state for the human dashboard and polls
-  // for escalation / human takeover (state is owned by the backend).
-  const { conversation: backendConversation, supportCase, ended } = useConversationSync({
+  const { conversation: backendConversation, supportCase } = useConversationSync({
     conversationId: agoraData.conversationId,
     agentUID,
     localUID: String(client.uid),
     messageList,
     agentState,
+    onConversation: onConversationSnapshot,
   });
 
-  // A human support agent joins the same channel with a well-known uid.
   const humanUID = String(DEFAULT_HUMAN_UID);
   const isHumanConnected = useMemo(
     () => remoteUsers.some((user) => user.uid.toString() === humanUID),
     [remoteUsers, humanUID],
   );
+  const conversationState = backendConversation?.state ?? 'AI_HANDLING';
+  const isHumanPhase =
+    isHumanConnected || conversationState === 'HUMAN_HANDLING';
 
-  // Two-sided call: when the human agent resolves or leaves, the backend closes
-  // the conversation and this UI ends the call for the customer too.
-  const peerEndedRef = useRef(false);
-  useEffect(() => {
-    if (!ended || peerEndedRef.current) return;
-    peerEndedRef.current = true;
-    onEndConversation();
-  }, [ended, onEndConversation]);
+  const [isEscalating, setIsEscalating] = useState(false);
+  const [escalationError, setEscalationError] = useState<string | null>(null);
+  const canEscalate =
+    Boolean(agoraData.conversationId) &&
+    !isEscalating &&
+    conversationState === 'AI_HANDLING';
+  const handleRequestHuman = useCallback(async () => {
+    if (!agoraData.conversationId) return;
+    setIsEscalating(true);
+    setEscalationError(null);
+    try {
+      await requestEscalation(
+        agoraData.conversationId,
+        "Customer pressed 'Talk to a human' during the call",
+      );
+    } catch (error) {
+      console.error('Escalation request failed:', error);
+      setEscalationError(
+        error instanceof Error ? error.message : 'Could not reach a human agent queue.',
+      );
+    } finally {
+      setIsEscalating(false);
+    }
+  }, [agoraData.conversationId]);
 
-  // Once the human is actually in the call, the AI pipeline is gone so the
-  // toolkit no longer transcribes the customer. Caption the customer from the
-  // browser and store it on the conversation → the case transcript keeps the
-  // FULL call (customer + AI before handover + customer + human after).
-  const {
-    supported: customerCaptionsSupported,
-    listening: customerCaptionsListening,
-  } = useSpeechRecognition({
-    enabled:
-      isHumanConnected &&
-      Boolean(agoraData.conversationId) &&
-      backendConversation?.state === 'HUMAN_HANDLING' &&
-      isEnabled,
-    language: 'en-IN',
-    onFinal: (text) => {
-      if (!agoraData.conversationId) return;
-      void sendMessage(agoraData.conversationId, text, 'user').catch(() => {
-        // Caption loss must never break the call.
-      });
-    },
-  });
-
-  // Publish local mic once the track exists; usePublish waits for RTC connection.
   usePublish([localMicrophoneTrack]);
 
   useClientEvent(client, 'user-joined', (user) => {
@@ -504,7 +450,6 @@ export default function ConversationComponent({
     if (user.uid.toString() === agentUID) setIsAgentConnected(false);
   });
 
-  // Sync isAgentConnected with remoteUsers (covers cases where user-joined/left are missed)
   useEffect(() => {
     const isAgentInRemoteUsers = remoteUsers.some(
       (user) => user.uid.toString() === agentUID,
@@ -516,13 +461,10 @@ export default function ConversationComponent({
     setConnectionState(curState);
   });
 
-  // `connection-state-change` only fires once the join settles, so while `useJoin`
-  // is still working the panel would otherwise claim "connected" or stay stale.
   const effectiveConnectionState =
     isJoining && !joinSuccess ? 'CONNECTING' : connectionState;
 
   const connectionSeverity = useMemo<'normal' | 'warning' | 'error'>(() => {
-    // RTC transport problems take precedence; otherwise derive severity from captured issues.
     if (
       effectiveConnectionState === 'DISCONNECTED' ||
       effectiveConnectionState === 'DISCONNECTING'
@@ -545,21 +487,45 @@ export default function ConversationComponent({
       : 'warning';
   }, [effectiveConnectionState, connectionIssues]);
 
-  const visualizerState = useMemo(
-    () =>
-      mapAgentVisualizerState(
-        agentState,
-        isAgentConnected,
-        effectiveConnectionState,
-      ),
-    [agentState, isAgentConnected, effectiveConnectionState],
+  const displayState: CallDisplayState = resolveCallDisplayState(
+    agentState,
+    isAgentConnected,
+    effectiveConnectionState,
   );
 
-  /**
-   * Mute/unmute via track.setEnabled() only — usePublish owns publish state.
-   * If we also unpublish in the toggle, usePublish and the button fight each other
-   * and break the MicButtonWithVisualizer Web Audio graph.
-   */
+  const latestLlmMetric = useMemo(() => {
+    const llm = agentMetrics.filter((m) => /llm|mllm/i.test(m.type));
+    return llm.length > 0 ? llm[llm.length - 1] : null;
+  }, [agentMetrics]);
+
+  const statusLine = useMemo(() => {
+    if (isHumanConnected) {
+      return isEnabled
+        ? `You're talking to ${backendConversation?.humanAgentName ?? 'a human support agent'}`
+        : "You're muted — unmute so the agent can hear you";
+    }
+    if (conversationState === 'HUMAN_HANDLING') {
+      return 'A human support agent is joining this call…';
+    }
+    if (!isEnabled) return "You're muted — Nexa can't hear you";
+    switch (displayState) {
+      case 'disconnected':
+        return 'Connection lost — reconnecting…';
+      case 'connecting':
+        return 'Connecting to Nexa…';
+      case 'not-joined':
+        return 'Waiting for Nexa to join…';
+      case 'listening':
+        return 'Listening — go ahead';
+      case 'thinking':
+        return 'Checking that for you…';
+      case 'speaking':
+        return 'Nexa is speaking';
+      default:
+        return 'Ready when you are';
+    }
+  }, [isHumanConnected, conversationState, displayState, isEnabled, backendConversation?.humanAgentName]);
+
   const handleMicToggle = useCallback(async () => {
     const next = !isEnabled;
     const track = localMicrophoneTrack;
@@ -578,7 +544,6 @@ export default function ConversationComponent({
   const handleTokenWillExpire = useCallback(async () => {
     if (!onTokenWillExpire || !joinedUID) return;
     try {
-      // RTC and RTM renew independently, but the quickstart fetches both in one request.
       const { rtcToken, rtmToken } = await onTokenWillExpire(
         joinedUID.toString(),
       );
@@ -596,18 +561,40 @@ export default function ConversationComponent({
   }, [onEndConversation]);
 
   return (
-    <QuickstartConversationLayout
-      title="NexaVoice · NexaMart support"
-      banner={
-        <HandoffBanner
-          state={backendConversation?.state}
-          caseId={supportCase?.id}
-          humanName={backendConversation?.humanAgentName}
-          isHumanConnected={isHumanConnected}
-          isAgentConnected={isAgentConnected}
-        />
-      }
-      statusPanel={
+    <div className="flex h-full min-h-0 flex-col bg-background text-left">
+      {/* Header */}
+      <header className="flex shrink-0 items-center gap-2.5 border-b border-border bg-card/60 px-4 py-3">
+        <VoiceAvatar state={displayState} humanPhase={isHumanPhase} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-sm font-semibold text-foreground">
+              {isHumanPhase ? backendConversation?.humanAgentName ?? 'Support agent' : 'Nexa'}
+            </span>
+            <span
+              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                isHumanPhase
+                  ? 'border-purple-500/30 bg-purple-500/10 text-purple-300'
+                  : 'border-primary/25 bg-primary/10 text-primary'
+              }`}
+            >
+              {isHumanPhase ? 'human agent' : 'AI'}
+            </span>
+            {!isEnabled && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-destructive/30 bg-destructive/10 px-2 py-0.5 text-[10px] font-medium text-red-300">
+                <MicOff className="h-3 w-3" /> muted
+              </span>
+            )}
+          </div>
+          <p className="truncate text-xs text-muted-foreground">{statusLine}</p>
+        </div>
+        {latestLlmMetric && (
+          <span
+            className="hidden shrink-0 rounded-md border border-border px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground sm:block"
+            title={`${latestLlmMetric.name} — last LLM stage latency`}
+          >
+            {Math.round(latestLlmMetric.value)}ms
+          </span>
+        )}
         <ConnectionStatusPanel
           connectionState={effectiveConnectionState}
           connectionSeverity={connectionSeverity}
@@ -615,79 +602,290 @@ export default function ConversationComponent({
           isOpen={isConnectionDetailsOpen}
           onToggle={() => setIsConnectionDetailsOpen((open) => !open)}
         />
-      }
-      pipelineMetrics={<QuickstartPipelineMetrics metrics={agentMetrics} />}
-      transcriptPanel={
-        <QuickstartTranscriptPanel
+        <button
+          type="button"
+          onClick={handleEndConversation}
+          className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-destructive/40 bg-destructive/10 px-2.5 text-xs font-medium text-red-300 transition-colors hover:bg-destructive/20"
+          aria-label="End the call"
+          title="End the call"
+        >
+          <PhoneOff className="h-3.5 w-3.5" />
+          <span className="hidden sm:inline">End</span>
+        </button>
+      </header>
+
+      {/* Escalation / takeover banner */}
+      <HandoffBanner
+        state={backendConversation?.state}
+        caseId={supportCase?.id}
+        humanName={backendConversation?.humanAgentName}
+        isHumanConnected={isHumanConnected}
+        isAgentConnected={isAgentConnected}
+      />
+
+      {/* Limited-mode notice: tools unreachable means the AI can talk but not act. */}
+      {!toolsEnabled && (
+        <div className="flex items-start gap-2 border-b border-amber-500/20 bg-amber-500/10 px-4 py-2 text-[11px] leading-relaxed text-amber-200" role="status">
+          <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>
+            Limited call mode — this deployment has no public URL for the AI&apos;s
+            order tools, so Nexa can&apos;t look up or change orders on this call. Use
+            the chat tab for full account actions, or ask for a human agent.
+          </span>
+        </div>
+      )}
+
+      {/* Orb + live caption */}
+      <section
+        className="flex shrink-0 flex-col items-center justify-center gap-3 px-4 py-4"
+        aria-label="Call status"
+      >
+        <VoiceOrb state={displayState} muted={!isEnabled} humanPhase={isHumanPhase} />
+        <p className="text-center text-sm font-medium text-foreground" aria-live="polite">
+          {statusLine}
+        </p>
+        <p className="min-h-[1.25rem] max-w-full truncate text-center text-xs text-muted-foreground" aria-live="polite">
+          {currentInProgressMessage?.text?.trim() || '\u00A0'}
+        </p>
+      </section>
+
+      {/* Transcript */}
+      <section
+        className="flex min-h-0 flex-1 flex-col overflow-hidden border-t border-border"
+        aria-label="Live transcript"
+      >
+        <TranscriptList
           messageList={messageList}
-          currentInProgressMessage={currentInProgressMessage}
           agentUID={agentUID}
-          localUID={String(client.uid)}
           humanUID={humanUID}
         />
-      }
-      visualizer={
-        <div
-          className="relative flex h-full min-h-[20rem] w-full max-w-4xl items-center justify-center"
-          role="region"
-          aria-label="AI agent status visualization"
-        >
-          <AgentVisualizer state={visualizerState} size="lg" />
-          {remoteUsers.map((user) => (
-            <div key={user.uid} className="hidden">
-              <RemoteUser user={user} />
-            </div>
-          ))}
-        </div>
-      }
-      controls={
-        <div
-          className="mx-auto flex w-fit max-w-[95%] flex-wrap items-center justify-center gap-2 rounded-2xl border border-border bg-card/80 px-3 py-2 backdrop-blur-md"
-          role="group"
-          aria-label="Audio controls"
-        >
-          <div className="conversation-mic-host flex items-center justify-center">
-            <MicButtonWithVisualizer
-              isEnabled={isEnabled}
-              setIsEnabled={setIsEnabled}
-              track={localMicrophoneTrack}
-              onToggle={handleMicToggle}
-              className="overflow-visible"
-              aria-label={isEnabled ? 'Mute microphone' : 'Unmute microphone'}
-              enabledColor="hsl(var(--primary))"
-              disabledColor="hsl(var(--destructive))"
-            />
-          </div>
+      </section>
 
-          {/* Explicit mute/unmute control, labelled and always visible. */}
+      {/* Controls */}
+      <footer className="shrink-0 border-t border-border bg-card/60 px-3 py-3">
+        {escalationError && (
+          <p className="mb-2 rounded-lg border border-destructive/30 bg-destructive/10 px-2.5 py-1.5 text-center text-[11px] text-red-300">
+            {escalationError}
+          </p>
+        )}
+        <div
+          className="flex items-center justify-center gap-2"
+          role="group"
+          aria-label="Call controls"
+        >
+          {/* Mute / Unmute */}
           <button
             type="button"
             onClick={() => void handleMicToggle()}
             aria-pressed={!isEnabled}
-            aria-label={isEnabled ? 'Mute microphone' : 'Unmute microphone'}
-            className={`flex h-10 items-center gap-2 rounded-full border px-4 text-xs font-medium transition-colors ${
+            aria-label={isEnabled ? 'Mute your microphone' : 'Unmute your microphone'}
+            className={`flex h-11 items-center gap-2 rounded-full border px-4 text-sm font-medium transition-colors ${
               isEnabled
-                ? 'border-border text-foreground hover:border-primary/50'
-                : 'border-destructive/60 bg-destructive/10 text-destructive hover:bg-destructive/20'
+                ? 'border-border bg-secondary text-secondary-foreground hover:border-primary/40 hover:text-foreground'
+                : 'border-destructive/50 bg-destructive/15 text-red-300 hover:bg-destructive/25'
             }`}
           >
-            {isEnabled ? <Mic className="h-4 w-4" /> : <MicOff className="h-4 w-4" />}
+            {isEnabled ? (
+              <Mic className="h-4 w-4" />
+            ) : (
+              <MicOff className="h-4 w-4" />
+            )}
             {isEnabled ? 'Mute' : 'Unmute'}
           </button>
 
           <MicrophoneSelector localMicrophoneTrack={localMicrophoneTrack} />
 
-          {customerCaptionsSupported && backendConversation?.state === 'HUMAN_HANDLING' && (
-            <span className="hidden items-center gap-1.5 text-[10px] text-muted-foreground md:flex">
-              <AudioLines
-                className={`h-3.5 w-3.5 ${customerCaptionsListening ? 'text-purple-400' : 'text-muted-foreground/50'}`}
-              />
-              Live captions {customerCaptionsListening ? 'on' : '…'}
-            </span>
+          {/* Escalate to a human */}
+          {agoraData.conversationId && !isHumanPhase && (
+            <button
+              type="button"
+              onClick={() => void handleRequestHuman()}
+              disabled={!canEscalate}
+              className="flex h-11 items-center gap-2 rounded-full border border-purple-500/30 bg-purple-500/10 px-4 text-sm font-medium text-purple-300 transition-colors hover:bg-purple-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+              aria-label="Talk to a human support agent"
+            >
+              {isEscalating ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Headset className="h-4 w-4" />
+              )}
+              {conversationState === 'AI_HANDLING'
+                ? isEscalating
+                  ? 'Connecting…'
+                  : 'Human'
+                : 'Human notified'}
+            </button>
           )}
         </div>
-      }
-      onEndConversation={handleEndConversation}
-    />
+      </footer>
+
+      {/* Remote audio (AI agent + human agent) plays through hidden receivers. */}
+      <div className="hidden" aria-hidden="true">
+        {remoteUsers.map((user) => (
+          <RemoteUser key={user.uid} user={user} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function VoiceAvatar({
+  state,
+  humanPhase,
+}: {
+  state: CallDisplayState;
+  humanPhase: boolean;
+}) {
+  const ring =
+    humanPhase || state === 'speaking'
+      ? 'border-purple-400/50 bg-purple-500/15'
+      : state === 'thinking'
+        ? 'border-amber-400/50 bg-amber-500/10'
+        : state === 'listening'
+          ? 'border-primary/50 bg-primary/10'
+          : state === 'disconnected'
+            ? 'border-destructive/40 bg-destructive/10'
+            : 'border-border bg-secondary';
+  return (
+    <div
+      className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border ${ring}`}
+      aria-hidden="true"
+    >
+      {humanPhase ? (
+        <Headset className="h-4 w-4 text-purple-300" />
+      ) : (
+        <Mic className={`h-4 w-4 ${state === 'disconnected' ? 'text-red-400' : 'text-primary'}`} />
+      )}
+      {(state === 'listening' || state === 'speaking') && !humanPhase && (
+        <span className="absolute inset-0 animate-ping rounded-full border border-primary/30" style={{ animationDuration: '2.5s' }} />
+      )}
+    </div>
+  );
+}
+
+const ORB_STYLES: Record<
+  CallDisplayState,
+  { core: string; label: string }
+> = {
+  disconnected: { core: 'from-red-500/70 to-red-900', label: 'disconnected' },
+  connecting: { core: 'from-sky-500/70 to-slate-900', label: 'connecting' },
+  'not-joined': { core: 'from-sky-500/60 to-slate-900', label: 'waiting' },
+  listening: { core: 'from-cyan-400/80 to-sky-900', label: 'listening' },
+  thinking: { core: 'from-amber-400/80 to-amber-900', label: 'thinking' },
+  speaking: { core: 'from-purple-400/80 to-violet-900', label: 'speaking' },
+  idle: { core: 'from-sky-500/50 to-slate-900', label: 'ready' },
+};
+
+function VoiceOrb({
+  state,
+  muted,
+  humanPhase,
+}: {
+  state: CallDisplayState;
+  muted: boolean;
+  humanPhase: boolean;
+}) {
+  const style = humanPhase
+    ? { core: 'from-purple-400/80 to-violet-900', label: 'human agent' }
+    : ORB_STYLES[state];
+  const showRings = humanPhase || state === 'listening' || state === 'speaking';
+  const showSpinner = !humanPhase && state === 'thinking';
+
+  return (
+    <div className="relative flex h-28 w-28 items-center justify-center" role="img" aria-label={`Call status: ${style.label}`}>
+      {showRings && (
+        <>
+          <span className={`voice-orb-ring ${muted ? 'voice-orb-ring--muted' : ''}`} style={{ animationDelay: '0s' }} />
+          <span className={`voice-orb-ring ${muted ? 'voice-orb-ring--muted' : ''}`} style={{ animationDelay: '1.1s' }} />
+        </>
+      )}
+      {showSpinner && (
+        <span className="absolute inset-[-6px] animate-spin rounded-full border-2 border-transparent border-t-amber-400/80" />
+      )}
+      <div
+        className={`relative flex h-20 w-20 items-center justify-center rounded-full bg-gradient-to-br ${style.core} ${
+          muted ? 'opacity-40 saturate-50' : ''
+        } shadow-[0_0_36px_-6px_rgba(56,189,248,0.45)] transition-opacity`}
+      >
+        {humanPhase ? (
+          <Headset className="h-7 w-7 text-white/90" />
+        ) : state === 'speaking' ? (
+          <span className="voice-eq" aria-hidden="true">
+            <i /><i /><i /><i /><i />
+          </span>
+        ) : muted ? (
+          <MicOff className="h-7 w-7 text-white/80" />
+        ) : (
+          <Mic className="h-7 w-7 text-white/80" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TranscriptList({
+  messageList,
+  agentUID,
+  humanUID,
+}: {
+  messageList: TranscriptMessage[];
+  agentUID: string;
+  humanUID: string;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const messages = messageList;
+
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [messages.length]);
+
+  return (
+    <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      {messages.length === 0 ? (
+        <p className="py-6 text-center text-xs text-muted-foreground">
+          Start speaking — the conversation appears here.
+        </p>
+      ) : (
+        <ol className="space-y-2.5">
+          {messages.map((message, index) => {
+            const uid = String(message.uid);
+            const isAgent = uid === agentUID;
+            const isHuman = uid === humanUID;
+            const mine = !isAgent && !isHuman;
+            const who = isAgent ? 'Nexa' : isHuman ? 'Agent' : 'You';
+            return (
+              <li
+                key={`${message.turn_id ?? message.uid}-${index}`}
+                className={`flex flex-col ${mine ? 'items-end' : 'items-start'}`}
+              >
+                <div className="mb-0.5 flex items-center gap-2 px-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  <span>{who}</span>
+                  {message.createdAt && (
+                    <span className="font-normal normal-case">
+                      {new Date(message.createdAt).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </span>
+                  )}
+                </div>
+                <div
+                  className={`max-w-[85%] whitespace-pre-wrap rounded-xl border px-3 py-2 text-sm leading-relaxed ${
+                    mine
+                      ? 'border-primary/25 bg-primary/10 text-foreground'
+                      : isHuman
+                        ? 'border-purple-500/25 bg-purple-500/10 text-foreground'
+                        : 'border-border bg-card text-card-foreground'
+                  }`}
+                >
+                  {message.text?.trim() || '…'}
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </div>
   );
 }

@@ -5,14 +5,16 @@ import {
   type TranscriptHelperItem,
   type UserTranscription,
 } from 'agora-agent-client-toolkit';
-import {
-  type AgentVisualizerState,
-  type IMessageListItem,
-} from 'agora-agent-uikit';
 import { spokenNumbersToDigits } from './numbers';
 
-// Fixes compacted punctuation emitted by some TTS/ASR providers where sentence-ending
-// characters run directly into the next word (e.g. "Hello.World" → "Hello. World").
+export interface TranscriptMessage {
+  turn_id?: string | number;
+  uid: number | string;
+  text?: string;
+  status?: string;
+  createdAt?: number;
+}
+
 export function normalizeTranscriptSpacing(text: string): string {
   return text
     .replace(/([.!?])([A-Za-z])/g, '$1 $2')
@@ -21,28 +23,28 @@ export function normalizeTranscriptSpacing(text: string): string {
     .trim();
 }
 
-// Transcript text as the customer reads it: punctuation spacing fixed AND spoken
-// number words rendered as digits ("nine eight seven…" → "987…", "दो हज़ार" →
-// "2,000"), so phone numbers, PIN codes, order codes and amounts always look
-// like numbers in the live transcript — see lib/numbers.ts for the rules.
 export function normalizeTranscriptText(text: string): string {
   return spokenNumbersToDigits(normalizeTranscriptSpacing(text));
 }
 
-// Agora timestamps vary by source: some RTM payloads use Unix-seconds while
-// RTC events use milliseconds. Values already above 1e12 are milliseconds; others need scaling.
 export function normalizeTimestampMs(timestamp: number): number {
   return timestamp > 1e12 ? timestamp : timestamp * 1000;
 }
 
-// Maps the combined (agentState + RTC connection + agent presence) signal to the
-// AgentVisualizer's display states. RTC transport problems take priority over
-// agent-level state to avoid showing "listening" or "talking" during a reconnect.
-export function mapAgentVisualizerState(
-  agentState: AgentState | null,
+export type CallDisplayState =
+  | 'disconnected'
+  | 'connecting'
+  | 'not-joined'
+  | 'listening'
+  | 'thinking'
+  | 'speaking'
+  | 'idle';
+
+export function resolveCallDisplayState(
+  agentState: AgentState | string | null,
   isAgentConnected: boolean,
   connectionState: string,
-): AgentVisualizerState {
+): CallDisplayState {
   if (
     connectionState === 'DISCONNECTED' ||
     connectionState === 'DISCONNECTING'
@@ -54,7 +56,7 @@ export function mapAgentVisualizerState(
     connectionState === 'CONNECTING' ||
     connectionState === 'RECONNECTING'
   ) {
-    return 'joining';
+    return 'connecting';
   }
 
   if (!isAgentConnected) {
@@ -65,28 +67,24 @@ export function mapAgentVisualizerState(
     case 'listening':
       return 'listening';
     case 'thinking':
-      return 'analyzing';
+      return 'thinking';
     case 'speaking':
-      return 'talking';
+      return 'speaking';
     case 'idle':
     case 'silent':
     default:
-      return 'ambient';
+      return 'idle';
   }
 }
 
-// Adapts a toolkit TranscriptHelperItem to the shape expected by agora-agent-uikit.
-// `status` is cast via `unknown` because the two packages define structurally
-// equivalent TurnStatus enums that TypeScript won't narrow across package boundaries.
-// `_time` may arrive in seconds or milliseconds depending on the event source.
 export function toMessageListItem(
   item: TranscriptHelperItem<Partial<UserTranscription | AgentTranscription>>,
-): IMessageListItem {
+): TranscriptMessage {
   return {
     turn_id: item.turn_id,
     uid: Number(item.uid) || 0,
     text: typeof item.text === 'string' ? normalizeTranscriptText(item.text) : '',
-    status: item.status as unknown as IMessageListItem['status'],
+    status: item.status as unknown as TranscriptMessage['status'],
     createdAt:
       typeof item._time === 'number'
         ? normalizeTimestampMs(item._time)
@@ -94,11 +92,6 @@ export function toMessageListItem(
   };
 }
 
-// uid="0" is the toolkit's sentinel for local-user speech. Without remapping it to
-// the actual RTC UID, the transcript panel renders the user's speech on the agent's side.
-// Also normalises punctuation spacing and converts spoken number words to digits
-// (lib/numbers.ts) so all turns display consistently — the mirrored transcript the
-// dashboard and the handoff summary see carries the same digits.
 export function normalizeTranscript(
   transcript: TranscriptHelperItem<Partial<UserTranscription | AgentTranscription>>[],
   localUID: string,
@@ -106,32 +99,22 @@ export function normalizeTranscript(
   return transcript.map((item) => {
     const remappedUID = item.uid === '0' ? localUID : item.uid;
     const normalizedText =
-      typeof item.text === 'string'
-        ? normalizeTranscriptText(item.text)
-        : item.text;
+      typeof item.text === 'string' ? normalizeTranscriptText(item.text) : item.text;
     return { ...item, uid: remappedUID, text: normalizedText };
   });
 }
 
-// Returns completed and interrupted turns for the message history list.
-// IN_PROGRESS turns are intentionally excluded — they are rendered separately
-// as a streaming partial bubble via getCurrentInProgressMessage.
-// INTERRUPTED turns must be included: if the agent's first turn is cut off and
-// omitted, messageList stays empty and the first interrupted turn is never shown.
 export function getMessageList(
   transcript: TranscriptHelperItem<Partial<UserTranscription | AgentTranscription>>[],
-) {
+): TranscriptMessage[] {
   return transcript
     .filter((item) => item.status !== TurnStatus.IN_PROGRESS)
     .map(toMessageListItem);
 }
 
-// Returns the single active in-progress turn, or null when none exists.
-// At most one turn is in-progress at a time. The transcript panel renders this
-// as a live streaming bubble, distinct from the static message history.
 export function getCurrentInProgressMessage(
   transcript: TranscriptHelperItem<Partial<UserTranscription | AgentTranscription>>[],
-) {
+): TranscriptMessage | null {
   const item = transcript.find((entry) => entry.status === TurnStatus.IN_PROGRESS);
   return item ? toMessageListItem(item) : null;
 }

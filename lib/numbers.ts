@@ -1,40 +1,10 @@
-/**
- * Spoken-number → digit normalisation.
- *
- * Deepgram (`multi`) and the LLM sometimes render numbers as words — Hindi and
- * Hinglish turns especially ("नौ आठ सात…", "nine eight seven six five",
- * "two thousand four hundred ninety nine"). Customers expect phone numbers,
- * PIN codes, flat numbers, order codes and amounts to *look* like numbers in
- * the transcript and in chat, so every spoken number is converted to digits:
- *
- *   "my number is nine eight seven six five four three two one zero"
- *     → "my number is 9876543210"
- *   "order N M one zero zero two three"       → "order N M 10023"
- *   "total two thousand four hundred ninety nine rupees" → "total 2,499 rupees"
- *   "flat twelve B, pin one one zero zero two four"       → "flat 12 B, pin 110024"
- *
- * Rules that keep natural language intact:
- *   - A *run* of number words (≥2 adjacent tokens) is always converted:
- *     digit-by-digit runs concatenate ("nine eight seven" → "987"), runs with
- *     tens/scales parse as one cardinal ("forty two" → "42", "two thousand"
- *     → "2,000").
- *   - A single English word ≥10 ("twelve") and any single Devanagari number
- *     word ("दो") convert on their own — they are unambiguously numeric.
- *   - A single low English digit word ("four") converts only next to a number
- *     context ("flat four" → "flat 4", "four items" → "4 items").
- *   - A single romanised Hindi word ("do", "ek", "teen") NEVER converts alone
- *     — "kar do" must stay "kar do" — only inside a run ("ek do teen" → "1 2 3").
- */
 
 type TokenKind = 'unit' | 'ten' | 'scale' | 'repeat';
 
 interface NumberWord {
   kind: TokenKind;
-  /** unit/ten: the value; scale: the multiplier; repeat: how many times. */
   value: number;
-  /** Romanised Hindi words only convert inside a run, never standalone. */
   roman?: boolean;
-  /** Devanagari words always convert, even standalone. */
   deva?: boolean;
 }
 
@@ -49,7 +19,6 @@ function words(
 
 const VOCAB: Record<string, NumberWord> = {};
 
-// --- English ---------------------------------------------------------------
 words([
   ['zero', 0], ['oh', 0], ['one', 1], ['two', 2], ['three', 3], ['four', 4],
   ['five', 5], ['six', 6], ['seven', 7], ['eight', 8], ['nine', 9],
@@ -68,7 +37,6 @@ words([
 ]);
 words([['double', 2, 'repeat'], ['triple', 3, 'repeat']]);
 
-// --- Hindi (Devanagari) — unambiguous, converts even standalone ------------
 words([
   ['शून्य', 0], ['एक', 1], ['दो', 2], ['तीन', 3], ['चार', 4],
   ['पाँच', 5], ['पांच', 5], ['छह', 6], ['छः', 6], ['सात', 7], ['आठ', 8], ['नौ', 9],
@@ -104,7 +72,6 @@ words([
 ], { deva: true });
 words([['डबल', 2, 'repeat', { deva: true }]]);
 
-// --- Romanised Hindi (Hinglish) — run-only, "kar do" must survive ----------
 words([
   ['ek', 1], ['do', 2], ['teen', 3], ['chaar', 4], ['char', 4],
   ['paanch', 5], ['panch', 5], ['chhah', 6], ['cheh', 6], ['saat', 7],
@@ -121,7 +88,6 @@ words([
   ['hazar', 1000, 'scale', { roman: true }],
 ]);
 
-/** Words that make a lone low digit numeric: "flat four", "4 items", "₹ five". */
 const CONTEXT_WORDS = new Set([
   'number', 'no', 'phone', 'mobile', 'contact', 'pin', 'pincode', 'zip', 'code',
   'flat', 'house', 'building', 'floor', 'address', 'sector', 'block', 'lane',
@@ -134,22 +100,16 @@ const CONTEXT_WORDS = new Set([
 
 const DEVANAGARI_DIGITS = /[०-९]/g;
 
-/**
- * Devanagari verbs after which "दो" means *give*, not *two* ("दे दो", "कर दो").
- * A lone low Devanagari digit right after one of these stays a word.
- */
 const DEVA_VERB_GUARDS = new Set([
   'दे', 'कर', 'बोल', 'लिख', 'दिखा', 'बता', 'रख', 'उठा', 'भेज', 'ला', 'ले', 'मिल', 'पकड़', 'चख',
 ]);
 
-/** ०-९ → 0-9 (Devanagari digits render as ASCII everywhere in the UI). */
 export function normalizeDevanagariDigits(text: string): string {
   return text.replace(DEVANAGARI_DIGITS, (ch) => String(ch.charCodeAt(0) - 0x0966));
 }
 
 interface Token {
   raw: string;
-  /** Without surrounding punctuation, lowercased — the vocabulary key. */
   core: string;
   start: number;
   end: number;
@@ -161,8 +121,6 @@ function tokenize(text: string): Token[] {
   const tokens: Token[] = [];
   for (const match of text.matchAll(/\S+/g)) {
     const raw = match[0];
-    // \p{M} (combining marks) must belong to the word: Devanagari matras
-    // ("दो" = द + ो) are marks, and splitting them off breaks the vocab lookup.
     const m = raw.match(/^([^\p{L}\p{N}\p{M}]*)([\p{L}\p{N}\p{M}]+)([^\p{L}\p{N}\p{M}]*)$/u);
     const core = (m ? m[2] : raw).toLowerCase();
     tokens.push({
@@ -177,7 +135,6 @@ function tokenize(text: string): Token[] {
   return tokens;
 }
 
-/** Cardinal parse of a run that contains tens/scales: "two thousand four hundred ninety nine" → 2499. */
 function parseCardinal(run: NumberWord[]): number {
   let total = 0;
   let current = 0;
@@ -201,7 +158,6 @@ function formatCardinal(value: number): string {
   return value >= 1000 ? value.toLocaleString('en-IN') : String(value);
 }
 
-/** Expands "double five" / "triple two" into repeated digit tokens. */
 function expandRepeats(tokens: Token[]): { words: NumberWord[]; hadRepeat: boolean } {
   const words: NumberWord[] = [];
   let hadRepeat = false;
@@ -215,7 +171,7 @@ function expandRepeats(tokens: Token[]): { words: NumberWord[]; hadRepeat: boole
         i++;
         continue;
       }
-      continue; // a dangling "double" carries no number — drop it from the parse
+      continue; 
     }
     words.push(word);
   }
@@ -226,7 +182,6 @@ function hasContextNearby(tokens: Token[], index: number): boolean {
   for (let i = Math.max(0, index - 2); i <= Math.min(tokens.length - 1, index + 2); i++) {
     if (i === index) continue;
     if (CONTEXT_WORDS.has(tokens[i].core)) return true;
-    // "₹500" / "NM-10023" style glued symbols count as context too.
     if (/[₹]/.test(tokens[i].raw)) return true;
   }
   return false;
@@ -241,44 +196,36 @@ function convertRun(tokens: Token[], run: number[], all: Token[]): string | null
   if (run.length === 1) {
     const word = vocab[0];
     const index = run[0];
-    if (word.roman) return null; // "kar do", "ek minute" — never touch a lone romanised word
+    if (word.roman) return null; 
     if (word.deva) {
-      // Devanagari words are numeric, except "दो" (= give) right after a verb.
       if (word.kind === 'unit' && index > 0 && DEVA_VERB_GUARDS.has(all[index - 1].core)) {
         return null;
       }
       return String(word.value);
     }
     if (word.kind === 'repeat') return null;
-    if (word.kind === 'ten') return String(word.value); // twelve → 12, twenty → 20
+    if (word.kind === 'ten') return String(word.value); 
     if (word.kind === 'scale') return hasContextNearby(all, index) ? formatCardinal(word.value) : null;
-    return hasContextNearby(all, index) ? String(word.value) : null; // lone "four" needs context
+    return hasContextNearby(all, index) ? String(word.value) : null; 
   }
 
   if (hasScaleOrTen || hadRepeat) {
     if (hadRepeat && !hasScaleOrTen) {
-      // "double five double one" → digit string, not a cardinal sum
       return words.filter((w) => w.kind === 'unit').map((w) => w.value).join('');
     }
     return formatCardinal(parseCardinal(words));
   }
 
-  // All plain units: a spoken digit string ("nine eight seven…").
   const digits = words.map((w) => String(w.value));
   return digits.length >= 3 ? digits.join('') : digits.join(' ');
 }
 
-/**
- * Converts spoken numbers (English, Hindi, Hinglish) in `text` to digits.
- * Pure and idempotent — text already written in digits is returned unchanged.
- */
 export function spokenNumbersToDigits(text: string): string {
   if (!text) return text;
   const withDigits = normalizeDevanagariDigits(text);
   const tokens = tokenize(withDigits);
   if (tokens.length === 0) return withDigits;
 
-  // Maximal runs of adjacent number-word tokens.
   const runs: number[][] = [];
   let current: number[] = [];
   tokens.forEach((token, i) => {

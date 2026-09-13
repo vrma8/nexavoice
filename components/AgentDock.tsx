@@ -1,41 +1,25 @@
 "use client";
 
 import { useState } from "react";
-import { MessageSquare, Minus, Phone, X } from "lucide-react";
+import { MessageSquare, Mic, Minus, Phone, X } from "lucide-react";
 import ClientChat from "@/components/ClientChat";
 import VoiceAgentCall from "@/components/VoiceAgentCall";
 import type { ClientSession } from "@/lib/session";
 
-/**
- * The agent dock — chat or call with NexaVoice support without leaving the
- * shopping page.
- *
- * Everything below the header is the existing conversation stack (the chat
- * component, or the Agora voice call with its transcript, handoff banner and
- * human takeover), so once the customer is connected the flow continues exactly
- * as it did before.
- *
- * Two ways to put the dock away:
- *   - **Minimize** (−): the panel collapses to a floating pill while the chat or
- *     call keeps running underneath (the components stay mounted — the voice
- *     call stays connected, the chat conversation stays alive). Reopening the
- *     pill restores the same conversation and drops the cursor straight into
- *     the message box.
- *   - **Close** (✕): ends the conversation, which is what keeps the human agent
- *     dashboard free of abandoned sessions.
- */
 export default function AgentDock({
   mode,
   client,
   onClose,
   onSwitch,
   onOrdersMayHaveChanged,
+  onConversationSnapshot,
 }: {
   mode: "chat" | "voice";
   client: ClientSession;
   onClose: () => void;
   onSwitch: (mode: "chat" | "voice") => void;
   onOrdersMayHaveChanged: () => void;
+  onConversationSnapshot?: (conversation: unknown) => void;
 }) {
   const [minimized, setMinimized] = useState(false);
 
@@ -44,45 +28,45 @@ export default function AgentDock({
       {/* Click-away shade on small screens — minimizes (keeps the conversation running) */}
       {!minimized && (
         <div
-          className="fixed inset-0 z-40 bg-black/60 backdrop-blur-sm lg:hidden"
+          className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm lg:hidden"
           onClick={() => setMinimized(true)}
         />
       )}
 
       {/* Minimized pill: the conversation is still live behind it */}
       {minimized && (
-        <div className="fixed bottom-5 right-5 z-50 flex items-center gap-0.5 rounded-full border border-zinc-700 bg-zinc-900 py-1 pl-1.5 pr-1 shadow-2xl">
+        <div className="fixed bottom-5 right-5 z-50 flex items-center gap-0.5 rounded-full border border-[hsl(222_25%_18%)] bg-[hsl(222_35%_9%)] py-1 pl-1.5 pr-1 shadow-2xl">
           <button
             onClick={() => setMinimized(false)}
-            className="flex items-center gap-2 rounded-full px-2.5 py-1.5 text-sm font-medium text-zinc-100 hover:bg-zinc-800"
+            className="flex items-center gap-2 rounded-full px-2.5 py-1.5 text-sm font-medium text-white transition-colors hover:bg-[hsl(222_35%_13%)]"
             title={mode === "chat" ? "Open the chat" : "Open the call"}
             aria-label={mode === "chat" ? "Open the chat" : "Open the call"}
           >
             <span className="relative flex h-2 w-2" aria-hidden>
               <span
                 className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 ${
-                  mode === "chat" ? "bg-blue-400" : "bg-green-400"
+                  mode === "chat" ? "bg-[hsl(191_100%_55%)]" : "bg-[hsl(142_70%_55%)]"
                 }`}
               />
               <span
                 className={`relative inline-flex h-2 w-2 rounded-full ${
-                  mode === "chat" ? "bg-blue-500" : "bg-green-500"
+                  mode === "chat" ? "bg-[hsl(191_100%_55%)]" : "bg-[hsl(142_70%_55%)]"
                 }`}
               />
             </span>
             {mode === "chat" ? (
-              <MessageSquare className="h-4 w-4 text-blue-400" />
+              <MessageSquare className="h-4 w-4 text-[hsl(191_100%_55%)]" />
             ) : (
-              <Phone className="h-4 w-4 text-green-400" />
+              <Phone className="h-4 w-4 text-[hsl(142_70%_55%)]" />
             )}
             <span className="max-w-[9.5rem] truncate">
               {mode === "chat" ? "Chat with Nexa" : "Call with Nexa"}
             </span>
-            <span className="text-[10px] uppercase tracking-wide text-zinc-500">live</span>
+            <span className="text-[10px] tracking-wide text-[hsl(220_10%_40%)] uppercase">live</span>
           </button>
           <button
             onClick={onClose}
-            className="rounded-full p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+            className="rounded-full p-1.5 text-[hsl(220_10%_40%)] transition-colors hover:bg-[hsl(222_35%_13%)] hover:text-white"
             title="End and close"
             aria-label="End and close the conversation"
           >
@@ -93,23 +77,29 @@ export default function AgentDock({
 
       {/* The panel stays mounted while minimized so the chat/call keeps running. */}
       <aside
-        className={`fixed bottom-0 right-0 z-50 flex h-[85vh] w-full flex-col overflow-hidden rounded-t-2xl border border-zinc-800 bg-zinc-950 shadow-2xl sm:bottom-4 sm:right-4 sm:h-[640px] sm:w-[420px] sm:rounded-2xl ${
+        className={`fixed bottom-0 right-0 z-50 flex h-[85vh] w-full flex-col overflow-hidden rounded-t-2xl border border-[hsl(222_25%_18%)] bg-[hsl(222_40%_6%)] shadow-2xl transition-all sm:bottom-4 sm:right-4 sm:h-[600px] sm:w-[420px] sm:rounded-2xl ${
           minimized ? "invisible pointer-events-none opacity-0" : ""
         }`}
         aria-hidden={minimized}
       >
-        <header className="flex items-center gap-2 border-b border-zinc-800 bg-zinc-900 px-3 py-2.5">
+        <header className="flex items-center gap-3 border-b border-[hsl(222_25%_15%)] bg-[hsl(222_40%_7%)] px-4 py-3">
+          <div className="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-xl border border-[hsl(191_100%_50%_/_0.15)] bg-[hsl(191_100%_50%_/_0.1)]">
+            <Mic className="h-4 w-4 text-[hsl(191_100%_55%)]" />
+            <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-[hsl(191_100%_55%)] animate-pulse" />
+          </div>
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold">NexaVoice support</p>
-            <p className="truncate text-[11px] text-zinc-500">
+            <p className="text-sm font-semibold text-white">NexaVoice support</p>
+            <p className="text-[11px] text-[hsl(220_10%_40%)]">
               {client.name} · {mode === "chat" ? "chat with Nexa" : "voice call with Nexa"}
             </p>
           </div>
           <div className="ml-auto flex items-center gap-1">
             <button
               onClick={() => onSwitch("chat")}
-              className={`rounded-md p-1.5 ${
-                mode === "chat" ? "bg-blue-900/60 text-blue-200" : "text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+              className={`rounded-lg p-1.5 transition-colors ${
+                mode === "chat"
+                  ? "bg-[hsl(191_100%_50%_/_0.12)] text-[hsl(191_100%_55%)]"
+                  : "text-[hsl(220_10%_40%)] hover:bg-[hsl(222_35%_12%)] hover:text-white"
               }`}
               title="Chat"
               aria-label="Switch to chat"
@@ -118,10 +108,10 @@ export default function AgentDock({
             </button>
             <button
               onClick={() => onSwitch("voice")}
-              className={`rounded-md p-1.5 ${
+              className={`rounded-lg p-1.5 transition-colors ${
                 mode === "voice"
-                  ? "bg-green-900/60 text-green-200"
-                  : "text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                  ? "bg-[hsl(142_70%_40%_/_0.12)] text-[hsl(142_70%_55%)]"
+                  : "text-[hsl(220_10%_40%)] hover:bg-[hsl(222_35%_12%)] hover:text-white"
               }`}
               title="Voice call"
               aria-label="Switch to a voice call"
@@ -130,7 +120,7 @@ export default function AgentDock({
             </button>
             <button
               onClick={() => setMinimized(true)}
-              className="rounded-md p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+              className="rounded-lg p-1.5 text-[hsl(220_10%_40%)] transition-colors hover:bg-[hsl(222_35%_12%)] hover:text-white"
               title="Minimize — keep the conversation running"
               aria-label="Minimize the support panel"
             >
@@ -138,7 +128,7 @@ export default function AgentDock({
             </button>
             <button
               onClick={onClose}
-              className="rounded-md p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+              className="rounded-lg p-1.5 text-[hsl(220_10%_40%)] transition-colors hover:bg-[hsl(222_35%_12%)] hover:text-white"
               title="End and close"
               aria-label="Close the support panel"
             >
@@ -147,9 +137,14 @@ export default function AgentDock({
           </div>
         </header>
 
-        <div className="relative flex-1 overflow-hidden bg-black">
+        <div className="relative flex-1 overflow-hidden bg-[hsl(223_47%_4%)]">
           {mode === "chat" ? (
-            <ClientChat key="chat" active={!minimized} onOrdersMayHaveChanged={onOrdersMayHaveChanged} />
+            <ClientChat
+              key="chat"
+              active={!minimized}
+              onOrdersMayHaveChanged={onOrdersMayHaveChanged}
+              onConversationSnapshot={onConversationSnapshot as ((c: import('@/lib/support/types').Conversation | null) => void) | undefined}
+            />
           ) : (
             <VoiceAgentCall
               key="voice"
@@ -157,6 +152,7 @@ export default function AgentDock({
                 onOrdersMayHaveChanged();
                 onClose();
               }}
+              onConversationSnapshot={onConversationSnapshot as ((c: import('@/lib/support/types').Conversation | null) => void) | undefined}
             />
           )}
         </div>

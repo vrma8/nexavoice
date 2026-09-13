@@ -1,24 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { speakAsAgent, stopAgent } from '@/lib/agora-server';
 import { DEFAULT_AGENT_UID } from '@/lib/agora';
+import { normalizeLanguageName } from '@/lib/agent-prompt';
 import { getCase, getConversation, recordEvent, updateConversation } from '@/lib/support/store';
 import { withStore } from '@/lib/support/route-store';
 
-/** The handover line is spoken before the AI leaves (a deliberate 4.5s pause), then two Agora calls follow. */
 export const maxDuration = 60;
 
 type Params = { params: Promise<{ id: string }> };
 
-const HANDOVER_LINE =
-  'Aapko ab hamare support agent se connect kiya ja raha hai. Main line chhod rahi hoon, please hold karein.';
+function handoverLine(language?: string): string {
+  switch (normalizeLanguageName(language)) {
+    case 'hindi':
+      return 'Aapko ab hamare support agent se connect kiya ja raha hai. Main line chhod rahi hoon, kripya hold karein.';
+    case 'hinglish':
+      return 'Ab main aapko hamare support agent se connect kar rahi hoon. Main call chhod rahi hoon, please hold karein.';
+    default:
+      return 'I am connecting you to a human support agent now. I am leaving the line — please stay on the call.';
+  }
+}
 
-/**
- * POST /api/cases/:id/takeover  { humanUid }
- *
- * Called by the dashboard once the human agent has joined the RTC channel:
- * the AI announces the handover, then leaves the channel so only the human and
- * the customer remain (v1.md §19 "AI stops/mutes").
- */
 async function handlePost(request: NextRequest, { params }: Params) {
   const { id } = await params;
   const supportCase = getCase(id);
@@ -44,10 +45,9 @@ async function handlePost(request: NextRequest, { params }: Params) {
         agentId: conversation.agentId,
         channel: conversation.channel,
         agentUid: DEFAULT_AGENT_UID,
-        text: HANDOVER_LINE,
+        text: handoverLine(conversation.context.language),
       });
       announcement = 'spoken';
-      // Give TTS a moment to play the line before the agent leaves.
       await new Promise((resolve) => setTimeout(resolve, 4500));
     } catch (error) {
       announcement = 'failed';
@@ -77,6 +77,4 @@ async function handlePost(request: NextRequest, { params }: Params) {
   });
 }
 
-// Bracketed by withStore so the durable store mirror is read before the
-// handler runs and written back before the response is flushed (serverless).
 export const POST = withStore(handlePost);

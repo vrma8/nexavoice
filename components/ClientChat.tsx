@@ -2,11 +2,12 @@
 
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { Send, UserIcon, Loader2, Bot, Headset } from "lucide-react";
+import { Loader2, Mic, Headset, Send, UserIcon } from "lucide-react";
 import {
   createConversation,
   endConversation,
   getConversation,
+  requestEscalation,
   sendHeartbeat,
   sendMessage,
 } from "@/lib/api";
@@ -22,29 +23,17 @@ type Message = {
 
 const POLL_MS = 2500;
 
-/**
- * Chat with the AI agent (and, after a handoff, with a human agent).
- *
- * The conversation is bound to the signed-in client record, so the agent knows
- * who it is talking to without asking, and it is *terminated* when this
- * component unmounts or the tab goes away — that is what keeps the support
- * dashboard showing live chats only.
- *
- * `active` mirrors the dock's expanded/minimized state: whenever the panel
- * becomes visible (first open, or restored from the minimized pill) the cursor
- * is dropped straight into the message box so the customer can just type.
- */
 export default function ClientChat({
   onOrdersMayHaveChanged,
   active = true,
+  onConversationSnapshot,
 }: {
   onOrdersMayHaveChanged?: () => void;
   active?: boolean;
+  onConversationSnapshot?: (conversation: Conversation | null) => void;
 } = {}) {
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [supportCase, setSupportCase] = useState<SupportCase | null>(null);
-  // First bubble: greets in the language saved on the account and confirms the
-  // preference ("Aapki pasand Hinglish hai — main Hinglish mein hi baat karoon?").
   const [messages, setMessages] = useState<Message[]>(() => {
     const session = getClientSession();
     return [
@@ -63,9 +52,6 @@ export default function ClientChat({
   const seenIds = useRef<Set<string>>(new Set());
   const lastSyncRef = useRef(0);
 
-  // Put the cursor in the message box as soon as the customer can type: right
-  // after the conversation is ready, and every time the dock is restored from
-  // its minimized pill.
   const canType =
     Boolean(conversation) && conversation?.state !== "RESOLVED" && conversation?.state !== "CLOSED";
   useEffect(() => {
@@ -74,7 +60,6 @@ export default function ClientChat({
     return () => window.clearTimeout(focus);
   }, [active, canType]);
 
-  // Create the backend conversation once, bound to the signed-in client record.
   useEffect(() => {
     let cancelled = false;
     const session = getClientSession();
@@ -98,8 +83,6 @@ export default function ClientChat({
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
-  // Heartbeat while the chat is open; close it when the panel unmounts (customer
-  // closed the chat / signed out) or the browser tab goes away.
   const conversationId = conversation?.id;
   useEffect(() => {
     if (!conversationId) return;
@@ -124,7 +107,6 @@ export default function ClientChat({
     ]);
   }, []);
 
-  // Poll for human agent messages / state changes once escalated (or always, cheaply).
   useEffect(() => {
     if (!conversation) return;
     const state = conversation.state;
@@ -133,17 +115,16 @@ export default function ClientChat({
       try {
         const snapshot = await getConversation(conversation.id, lastSyncRef.current);
         lastSyncRef.current = snapshot.now - 1000;
-        // Only pull messages we did not author locally (human agent / system).
         mergeMessages(snapshot.messages.filter((m) => m.role === "human_agent" || m.role === "system"));
         setConversation(snapshot.conversation);
         setSupportCase(snapshot.case);
+        onConversationSnapshot?.(snapshot.conversation);
       } catch {
-        // transient
       }
     };
     const id = setInterval(tick, POLL_MS);
     return () => clearInterval(id);
-  }, [conversation?.id, conversation?.state, mergeMessages, conversation]);
+  }, [conversation?.id, conversation?.state, mergeMessages, conversation, onConversationSnapshot]);
 
   const handleSend = async () => {
     const content = input.trim();
@@ -162,14 +143,10 @@ export default function ClientChat({
       }
       setConversation(result.conversation);
       setSupportCase(result.case);
-      // A turn may have added/removed an item or cancelled an order.
       onOrdersMayHaveChanged?.();
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       console.error("Error sending message", detail);
-      // The cause matters: "Conversation not found" means the backend lost the
-      // session (state is not shared across serverless instances), which no
-      // amount of retrying fixes.
       setMessages((prev) => [
         ...prev,
         {
@@ -184,24 +161,47 @@ export default function ClientChat({
     }
   };
 
+  const handleEscalation = async () => {
+    if (!conversation || conversation.state !== "AI_HANDLING") return;
+    setIsLoading(true);
+    try {
+      const result = await requestEscalation(conversation.id, "Customer pressed 'Talk to a human'");
+      setConversation(result.conversation);
+      setSupportCase(result.case);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `esc-${Date.now()}`,
+          role: "ai",
+          content: `Zaroor! Maine case ${result.caseId} bana diya hai. Ek human support agent thodi der mein isi chat mein aapse baat karenge.`,
+        },
+      ]);
+    } catch (err) {
+      console.error("Error escalating", err);
+      setError("Could not reach a human agent right now. Please try again.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const state = conversation?.state ?? "AI_HANDLING";
   const humanName = conversation?.humanAgentName;
   const banner =
     state === "WAITING_FOR_HUMAN"
       ? {
-          tone: "bg-yellow-900/30 border-yellow-700 text-yellow-300",
+          tone: "border-yellow-500/25 bg-yellow-500/10 text-yellow-300",
           icon: <Loader2 className="w-4 h-4 animate-spin" />,
           text: `Case ${supportCase?.id ?? ""} created — waiting for a support agent…`,
         }
       : state === "HUMAN_HANDLING"
         ? {
-            tone: "bg-purple-900/30 border-purple-700 text-purple-200",
+            tone: "border-purple-500/25 bg-purple-500/10 text-purple-200",
             icon: <Headset className="w-4 h-4" />,
             text: `You are now chatting with ${humanName ?? "a human support agent"}.`,
           }
         : state === "RESOLVED" || state === "CLOSED"
           ? {
-              tone: "bg-zinc-800 border-zinc-700 text-zinc-300",
+              tone: "border-[hsl(222_25%_20%)] bg-[hsl(222_35%_10%)] text-[hsl(220_15%_75%)]",
               icon: <UserIcon className="w-4 h-4" />,
               text: "This conversation has been resolved. Thank you!",
             }
@@ -210,47 +210,49 @@ export default function ClientChat({
   return (
     <div className="flex flex-col h-full absolute inset-0">
       {/* Status strip */}
-      <div className="flex items-center justify-between px-4 py-2 text-xs border-b border-zinc-800 bg-zinc-900/60">
-        <span className="flex items-center gap-2 text-zinc-400">
+      <div className="flex items-center justify-between border-b border-[hsl(222_25%_15%)] bg-[hsl(222_40%_7%)] px-4 py-2 text-xs">
+        <span className="flex items-center gap-2 text-[hsl(220_10%_50%)]">
           {state === "HUMAN_HANDLING" ? (
             <>
-              <Headset className="w-3.5 h-3.5 text-purple-400" /> Human agent
+              <Headset className="w-3.5 h-3.5 text-[hsl(260_70%_70%)]" /> Human agent
             </>
           ) : (
             <>
-              <Bot className="w-3.5 h-3.5 text-blue-400" /> AI Online
+              <Mic className="w-3.5 h-3.5 text-[hsl(191_100%_55%)]" /> AI Online
             </>
           )}
         </span>
-        <span className="text-zinc-600 font-mono">{conversation?.id ?? "connecting…"}</span>
+        <span className="font-mono text-[hsl(220_10%_35%)]">{conversation?.id ?? "connecting…"}</span>
       </div>
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.map((msg) =>
           msg.role === "system" ? (
-            <div key={msg.id} className="text-center text-xs text-zinc-500">
+            <div key={msg.id} className="text-center text-xs text-[hsl(220_10%_45%)]">
               {msg.content}
             </div>
           ) : (
             <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
               {msg.role !== "user" && (
                 <div
-                  className={`w-7 h-7 rounded-full flex items-center justify-center mr-2 flex-shrink-0 mt-1 text-xs font-bold ${
-                    msg.role === "human_agent" ? "bg-purple-700" : "bg-blue-600"
+                  className={`mr-2 mt-1 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                    msg.role === "human_agent"
+                      ? "border border-[hsl(260_60%_60%_/_0.25)] bg-[hsl(260_60%_60%_/_0.15)] text-[hsl(260_70%_75%)]"
+                      : "border border-[hsl(191_100%_50%_/_0.2)] bg-[hsl(191_100%_50%_/_0.12)] text-[hsl(191_100%_55%)]"
                   }`}
                   title={msg.role === "human_agent" ? humanName ?? "Human agent" : "Nexa (AI)"}
                 >
-                  {msg.role === "human_agent" ? "H" : "AI"}
+                  {msg.role === "human_agent" ? <Headset className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
                 </div>
               )}
               <div
-                className={`max-w-[78%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-line ${
+                className={`max-w-[78%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-line ${
                   msg.role === "user"
-                    ? "bg-blue-600 text-white rounded-tr-sm"
+                    ? "border border-[hsl(191_100%_50%_/_0.15)] bg-[hsl(191_100%_50%_/_0.12)] text-white rounded-tr-sm"
                     : msg.role === "human_agent"
-                      ? "bg-purple-700 text-white rounded-tl-sm"
-                      : "bg-zinc-800 text-zinc-100 rounded-tl-sm border border-zinc-700"
+                      ? "border border-[hsl(260_60%_60%_/_0.2)] bg-[hsl(260_60%_60%_/_0.1)] text-[hsl(260_40%_85%)] rounded-tl-sm"
+                      : "border border-[hsl(222_25%_16%)] bg-[hsl(222_35%_10%)] text-[hsl(220_15%_85%)] rounded-tl-sm"
                 }`}
               >
                 {msg.content}
@@ -261,14 +263,14 @@ export default function ClientChat({
 
         {isLoading && (
           <div className="flex justify-start">
-            <div className="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center mr-2 flex-shrink-0 text-xs font-bold">
-              AI
+            <div className="mr-2 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full border border-[hsl(191_100%_50%_/_0.2)] bg-[hsl(191_100%_50%_/_0.12)] text-[hsl(191_100%_55%)]">
+              <Mic className="h-3.5 w-3.5" />
             </div>
-            <div className="bg-zinc-800 border border-zinc-700 rounded-2xl rounded-tl-sm px-4 py-3">
+            <div className="rounded-2xl rounded-tl-sm border border-[hsl(222_25%_16%)] bg-[hsl(222_35%_10%)] px-4 py-3">
               <div className="flex gap-1">
-                <span className="w-2 h-2 bg-zinc-400 rounded-full animate-bounce [animation-delay:0ms]"></span>
-                <span className="w-2 h-2 bg-zinc-400 rounded-full animate-bounce [animation-delay:150ms]"></span>
-                <span className="w-2 h-2 bg-zinc-400 rounded-full animate-bounce [animation-delay:300ms]"></span>
+                <span className="w-2 h-2 bg-[hsl(220_10%_45%)] rounded-full animate-bounce [animation-delay:0ms]"></span>
+                <span className="w-2 h-2 bg-[hsl(220_10%_45%)] rounded-full animate-bounce [animation-delay:150ms]"></span>
+                <span className="w-2 h-2 bg-[hsl(220_10%_45%)] rounded-full animate-bounce [animation-delay:300ms]"></span>
               </div>
             </div>
           </div>
@@ -288,12 +290,26 @@ export default function ClientChat({
       </div>
 
       {/* Input area */}
-      <div className="p-4 bg-zinc-900 border-t border-zinc-800">
-        <div className="flex gap-2 items-end">
+      <div className="border-t border-[hsl(222_25%_13%)] bg-[hsl(222_40%_6%)] p-4">
+        {state === "AI_HANDLING" && (
+          <div className="mb-3 flex justify-center">
+            <Button
+              variant="ghost"
+              className="h-auto py-1 text-xs text-[hsl(220_10%_45%)] hover:text-[hsl(220_15%_75%)]"
+              onClick={handleEscalation}
+              disabled={!conversation || isLoading}
+            >
+              <UserIcon className="w-3.5 h-3.5 mr-1.5" />
+              Talk to a human agent
+            </Button>
+          </div>
+        )}
+
+        <div className="flex items-end gap-2">
           <input
             ref={inputRef}
             type="text"
-            className="flex-1 bg-zinc-800 border border-zinc-700 text-white rounded-2xl px-4 py-2.5 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm resize-none placeholder:text-zinc-500 disabled:opacity-50"
+            className="flex-1 rounded-xl border border-[hsl(222_25%_15%)] bg-[hsl(223_47%_4%)] px-3 py-2 text-sm text-white transition-colors placeholder:text-[hsl(220_10%_35%)] focus:border-[hsl(191_100%_50%_/_0.4)] focus:outline-none disabled:opacity-50"
             placeholder={
               state === "RESOLVED" || state === "CLOSED"
                 ? "Conversation closed"
@@ -307,7 +323,7 @@ export default function ClientChat({
             disabled={isLoading || !conversation || state === "RESOLVED" || state === "CLOSED"}
           />
           <Button
-            className="rounded-full w-10 h-10 p-0 flex-shrink-0 bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
+            className="h-10 w-10 flex-shrink-0 rounded-full border-none bg-[hsl(191_100%_50%)] p-0 text-[hsl(223_47%_4%)] hover:bg-[hsl(191_100%_45%)] disabled:opacity-50"
             onClick={handleSend}
             disabled={isLoading || !input.trim() || !conversation || state === "RESOLVED" || state === "CLOSED"}
             aria-label="Send message"
@@ -315,8 +331,8 @@ export default function ClientChat({
             <Send className="w-4 h-4" />
           </Button>
         </div>
-        <p className="mt-2 text-center text-[11px] text-zinc-600">
-          Nexa can help with orders and shopping — just ask. For a human agent, tell Nexa; she will connect you.
+        <p className="mt-2 text-center text-[11px] text-[hsl(220_10%_35%)]">
+          Nexa can add or remove products on an order that is still “Placed”.
         </p>
       </div>
     </div>

@@ -11,7 +11,6 @@ type HandoffBannerProps = {
   isAgentConnected: boolean;
 };
 
-/** Shows the escalation / human takeover status of a live voice call. */
 export function HandoffBanner({ state, caseId, humanName, isHumanConnected, isAgentConnected }: HandoffBannerProps) {
   if (isHumanConnected || state === 'HUMAN_HANDLING') {
     return (

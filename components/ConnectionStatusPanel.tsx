@@ -9,8 +9,6 @@ type ConnectionStatusPanelProps = {
   onToggle: () => void;
 };
 
-// Produces an accessible label from the raw RTC state string, with a special case for
-// "Connected (issues detected)" when RTM/agent errors exist while RTC transport is healthy.
 function getConnectionLabel(
   connectionState: string,
   connectionSeverity: 'normal' | 'warning' | 'error'

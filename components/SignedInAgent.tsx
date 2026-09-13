@@ -2,13 +2,9 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Headset, LogOut } from "lucide-react";
+import { LogOut } from "lucide-react";
 import { clearAgentSession, getAgentSession, type AgentSession } from "@/lib/session";
 
-/**
- * Shows the signed-in support agent's details (from the database record saved
- * at /login) in the dashboard header, with a sign-out action.
- */
 export default function SignedInAgent() {
   const [agent, setAgent] = useState<AgentSession | null>(null);
 
@@ -18,8 +14,11 @@ export default function SignedInAgent() {
 
   if (!agent) {
     return (
-      <Link href="/login?role=agent" className="flex items-center gap-1.5 text-xs text-purple-400 hover:text-purple-300">
-        <Headset className="h-3.5 w-3.5" /> Sign in
+      <Link
+        href="/login?role=agent"
+        className="text-xs text-[hsl(260_70%_70%)] transition-colors hover:text-[hsl(260_70%_80%)]"
+      >
+        Sign in
       </Link>
     );
   }
@@ -30,21 +29,19 @@ export default function SignedInAgent() {
   };
 
   return (
-    <div className="flex items-center gap-3">
-      <div className="flex items-center gap-1.5 text-xs text-zinc-300">
-        <Headset className="h-3.5 w-3.5 text-purple-400" />
-        <span className="font-medium">{agent.name}</span>
-        <span className="text-zinc-600">· {agent.email}</span>
-        {agent.title && agent.title !== "Support Agent" && (
-          <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase text-zinc-400">{agent.title}</span>
-        )}
-      </div>
+    <div className="flex items-center gap-2">
+      <span className="hidden max-w-[180px] truncate text-xs text-[hsl(220_10%_60%)] sm:block">{agent.name}</span>
+      {agent.title && agent.title !== "Support Agent" && (
+        <span className="hidden rounded bg-[hsl(260_60%_60%_/_0.1)] px-1.5 py-0.5 text-[10px] uppercase text-[hsl(260_70%_70%)] md:block">
+          {agent.title}
+        </span>
+      )}
       <button
         onClick={signOut}
-        className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+        className="text-[hsl(220_10%_40%)] transition-colors hover:text-red-400"
         aria-label="Sign out"
       >
-        <LogOut className="h-3.5 w-3.5" /> Sign out
+        <LogOut className="h-3 w-3" />
       </button>
     </div>
   );

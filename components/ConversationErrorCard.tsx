@@ -2,8 +2,6 @@ import React from 'react';
 
 export type ConnectionIssue = {
   id: string;
-  /** 'rtc' = the browser's own join/publish path, 'rtm' = transcript channel,
-   *  'agent' = engine-reported error, 'session' = agent never arrived / config. */
   source: 'rtc' | 'rtm' | 'agent' | 'rtm-signaling' | 'session';
   agentUserId: string;
   code: string | number;
@@ -13,9 +11,6 @@ export type ConnectionIssue = {
 
 export type ConnectionIssueSeverity = 'warning' | 'error';
 
-// Some agent errors embed HTTP codes inside the message string (e.g. "LLM: 401" or "HTTP 404")
-// rather than exposing them in the numeric `code` field. Extracting them gives us a semantically
-// richer signal for severity classification and CTA generation.
 function getEmbeddedIssueCode(issue: ConnectionIssue): string | null {
   const msg = issue.message.toLowerCase();
 
@@ -28,15 +23,10 @@ function getEmbeddedIssueCode(issue: ConnectionIssue): string | null {
   return null;
 }
 
-// Prefers the HTTP code embedded in the message over the raw transport code,
-// so severity and CTA logic consistently operate on the most specific error identifier.
 function getEffectiveIssueCode(issue: ConnectionIssue): string {
   return String(getEmbeddedIssueCode(issue) ?? issue.code);
 }
 
-// Classifies an issue as "warning" (transient, self-resolving) or "error" (action required).
-// Rate-limit (429), timeout (408), and conflict (409) errors are transient — the status dot
-// stays amber rather than red so the developer isn't alarmed by momentary backpressure.
 export function getConversationIssueSeverity(
   issue: ConnectionIssue
 ): ConnectionIssueSeverity {
@@ -55,8 +45,6 @@ export function getConversationIssueSeverity(
   return 'error';
 }
 
-// Translates generic provider 401 messages into module-specific copy so the developer
-// knows immediately which API key (LLM / ASR / TTS) is invalid without reading the raw payload.
 function getNormalizedMessage(issue: ConnectionIssue): string {
   const lowered = issue.message.toLowerCase();
   const code = getEffectiveIssueCode(issue).toLowerCase();
@@ -70,8 +58,6 @@ function getNormalizedMessage(issue: ConnectionIssue): string {
   return issue.message;
 }
 
-// Returns a short, actionable next-step for known HTTP / error codes so the developer
-// sees remediation guidance inline without having to cross-reference documentation.
 function getCta(issue: ConnectionIssue): string | null {
   const msg = issue.message.toLowerCase();
   const code = getEffectiveIssueCode(issue).toLowerCase();
@@ -116,7 +102,6 @@ export function ConversationErrorCard({ issue }: ConversationErrorCardProps) {
   const showRaw = issue.message !== normalizedMessage;
 
   return (
-    // Compact diagnostic card: headline for quick triage, optional CTA, raw payload for deeper debugging.
     <div className="rounded border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-xs">
       <div className="font-medium text-destructive">
         Conversation AI Engine Error: {transportCode}

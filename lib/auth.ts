@@ -1,12 +1,3 @@
-/**
- * Login identities, maintained in PostgreSQL through Prisma.
- *
- * The /login page collects the details of a client (customer) or a support
- * agent, and this module is the only place that writes those records to the
- * `Client` / `Agent` tables. Pages read the session the login response wrote to
- * localStorage, and `/api/auth/me` re-reads it from the database so what the UI
- * shows always matches the stored record.
- */
 import { prisma } from './db';
 
 export interface ClientInput {
@@ -34,7 +25,10 @@ export interface ClientRecord {
   city: string;
   address: string;
   preferredLanguage: string;
+  walletBalanceInr: number;
 }
+
+const WELCOME_WALLET_GIFT_INR = 500;
 
 export interface AgentRecord {
   id: string;
@@ -45,23 +39,35 @@ export interface AgentRecord {
 
 export async function upsertClient(input: ClientInput): Promise<ClientRecord> {
   const tier = input.tier === 'prime' ? 'prime' : 'standard';
-  const row = await prisma.client.upsert({
+  const existing = await prisma.client.findUnique({ where: { phone: input.phone } });
+  if (!existing) {
+    const row = await prisma.client.create({
+      data: {
+        name: input.name,
+        email: input.email,
+        phone: input.phone,
+        tier,
+        city: input.city?.trim() ?? '',
+        address: input.address?.trim() ?? '',
+        preferredLanguage: input.preferredLanguage ?? 'english',
+        walletBalanceInr: WELCOME_WALLET_GIFT_INR,
+        walletTransactions: {
+          create: {
+            amountInr: WELCOME_WALLET_GIFT_INR,
+            label: 'Welcome gift — NexaCash',
+          },
+        },
+      },
+    });
+    return toClientRecord(row);
+  }
+  const row = await prisma.client.update({
     where: { phone: input.phone },
-    create: {
-      name: input.name,
-      email: input.email,
-      phone: input.phone,
-      tier,
-      city: input.city?.trim() ?? '',
-      address: input.address?.trim() ?? '',
-      preferredLanguage: input.preferredLanguage ?? 'english',
-    },
-    update: {
+    data: {
       name: input.name,
       email: input.email,
       tier,
       city: input.city?.trim() ?? '',
-      // An address the client saved at checkout must survive a re-login.
       ...(input.address?.trim() ? { address: input.address.trim() } : {}),
       preferredLanguage: input.preferredLanguage ?? 'english',
     },
@@ -109,6 +115,7 @@ function toClientRecord(row: {
   city: string;
   address: string;
   preferredLanguage: string;
+  walletBalanceInr: number;
 }): ClientRecord {
   return {
     id: row.id,
@@ -119,19 +126,10 @@ function toClientRecord(row: {
     city: row.city,
     address: row.address,
     preferredLanguage: row.preferredLanguage,
+    walletBalanceInr: row.walletBalanceInr,
   };
 }
 
-// ---------------------------------------------------------------------------
-// Demo identities
-// ---------------------------------------------------------------------------
-
-/**
- * Ready-made identities so /login's "use a demo account" buttons always resolve
- * to real database rows. Products, carts and orders are *not* seeded — every
- * client starts with an empty cart and shops from the shared catalogue.
- * Seeded once per process, never throws.
- */
 const DEMO_CLIENTS: ClientInput[] = [
   {
     name: 'Rahul Sharma',
@@ -168,11 +166,6 @@ const DEMO_AGENTS: AgentInput[] = [
 
 let authSeeded = false;
 
-/**
- * Called from `withStore()` alongside the demo store fixture. Best-effort:
- * identity records must never take down a real conversation, and a database that
- * is not configured simply means there are no demo login records.
- */
 export async function maybeSeedAuthData(): Promise<void> {
   if (authSeeded) return;
   authSeeded = true;
@@ -185,7 +178,6 @@ export async function maybeSeedAuthData(): Promise<void> {
   }
 }
 
-/** Test seam. */
 export function resetAuthSeedState(): void {
   authSeeded = false;
 }

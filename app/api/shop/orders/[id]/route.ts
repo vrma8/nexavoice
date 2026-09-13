@@ -5,7 +5,9 @@ import {
   cancelOrder,
   getOrderForClient,
   listOrders,
+  pauseOrderEdit,
   removeItemFromOrder,
+  resumeOrderEdit,
   setOrderItemQty,
   updateOrderAddress,
 } from '@/lib/shop/service';
@@ -14,7 +16,6 @@ export const dynamic = 'force-dynamic';
 
 type Params = { params: Promise<{ id: string }> };
 
-/** GET /api/shop/orders/:code — one order of the signed-in client. */
 export async function GET(request: NextRequest, { params }: Params) {
   const lookup = await requireClient(request);
   if (!lookup.ok) return lookup.response;
@@ -24,14 +25,6 @@ export async function GET(request: NextRequest, { params }: Params) {
   return NextResponse.json({ order: found.data });
 }
 
-/**
- * PATCH /api/shop/orders/:code
- * Body: { action: 'add_item' | 'remove_item' | 'set_qty' | 'cancel' | 'address', … }
- *
- * The customer editing their own order by hand. It runs through the same
- * service functions as the AI agent's tools, so the "only while PLACED" rule
- * cannot be bypassed from the UI either.
- */
 export async function PATCH(request: NextRequest, { params }: Params) {
   const lookup = await requireClient(request);
   if (!lookup.ok) return lookup.response;
@@ -58,6 +51,10 @@ export async function PATCH(request: NextRequest, { params }: Params) {
         return cancelOrder(clientId, id, body.reason ?? 'cancelled by customer');
       case 'address':
         return updateOrderAddress(clientId, id, body.address ?? '');
+      case 'pause_edit':
+        return pauseOrderEdit(clientId, id);
+      case 'resume_edit':
+        return resumeOrderEdit(clientId, id);
       default:
         return { ok: false as const, error: { code: 'UNKNOWN_ACTION', message: 'Unknown action.' } };
     }

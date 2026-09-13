@@ -1,11 +1,3 @@
-/**
- * Browser-side login session helpers.
- *
- * The /login page persists the client/agent record (returned by the database
- * through POST /api/auth/login) to localStorage; pages read it here to show the
- * signed-in person's details. The database remains the source of truth —
- * /api/auth/me re-reads the record if a page wants to confirm it.
- */
 
 export interface ClientSession {
   id: string;
@@ -14,9 +6,9 @@ export interface ClientSession {
   phone: string;
   tier: string;
   city: string;
-  /** Saved delivery address — pre-fills checkout, updated when an order is placed. */
   address: string;
   preferredLanguage: string;
+  walletBalanceInr?: number;
 }
 
 export interface AgentSession {

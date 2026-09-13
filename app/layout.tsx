@@ -1,5 +1,29 @@
 import type { Metadata, Viewport } from 'next';
+import localFont from 'next/font/local';
 import './globals.css';
+
+const inter = localFont({
+  src: '../fonts/InterVariable.ttf',
+  variable: '--font-inter',
+  weight: '100 900',
+  display: 'swap',
+});
+
+const instrumentSerif = localFont({
+  src: [
+    { path: '../fonts/InstrumentSerif-Regular.ttf', weight: '400', style: 'normal' },
+    { path: '../fonts/InstrumentSerif-Italic.ttf', weight: '400', style: 'italic' },
+  ],
+  variable: '--font-instrument-serif',
+  display: 'swap',
+});
+
+const jetBrainsMono = localFont({
+  src: '../fonts/JetBrainsMonoVariable.ttf',
+  variable: '--font-jetbrains-mono',
+  weight: '100 800',
+  display: 'swap',
+});
 
 export const viewport: Viewport = {
   width: 'device-width',
@@ -39,8 +63,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="h-full" suppressHydrationWarning>
-      <body className="h-full min-h-screen">{children}</body>
+    <html
+      lang="en"
+      className={`h-full ${inter.variable} ${instrumentSerif.variable} ${jetBrainsMono.variable}`}
+      suppressHydrationWarning
+    >
+      <body className="h-full min-h-screen font-sans">{children}</body>
     </html>
   );
 }

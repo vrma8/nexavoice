@@ -17,11 +17,6 @@ export interface AgoraTokenData {
   appId?: string;
   /** Unix seconds when `token` stops being valid (renewal is automatic). */
   expiresAt?: number;
-  /**
-   * Whether the AI agent in this call can call backend tools (cart/orders).
-   * Copied from the invite-agent response; false shows a warning banner.
-   */
-  toolsEnabled?: boolean;
 }
 
 export interface ClientStartRequest {
@@ -56,4 +51,11 @@ export interface ConversationComponentProps {
   rtmClient: RTMClient;
   onTokenWillExpire: (uid: string) => Promise<AgoraRenewalTokens>;
   onEndConversation: () => void;
+  /** Polled conversation snapshots carry tool UI state (context.shopping). */
+  onConversationSnapshot?: (conversation: import('@/lib/support/types').Conversation | null) => void;
+  /**
+   * Whether the AI agent's backend tools are reachable (from /api/invite-agent).
+   * When false the call runs in limited mode and the dialog says so.
+   */
+  toolsEnabled?: boolean;
 }

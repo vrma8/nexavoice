@@ -1,8 +1,3 @@
-/**
- * NexaVoice browser API client — thin wrappers over the Next.js API routes.
- * Voice sessions are started by `VoiceAgentCall` (token → invite-agent); this
- * module covers chat, conversation tracking, escalation and the dashboard.
- */
 import type {
   Conversation,
   ConversationEvent,
@@ -19,12 +14,7 @@ async function json<T>(response: Response): Promise<T> {
   return data;
 }
 
-// ---------------------------------------------------------------------------
-// Conversations (chat + voice tracking)
-// ---------------------------------------------------------------------------
-
 export interface CreateConversationOptions {
-  /** Signed-in client record id (PostgreSQL) the conversation is bound to. */
   clientId?: string;
   customerName?: string;
 }
@@ -80,14 +70,6 @@ export interface TranscriptMirrorItem {
   turnId?: number;
 }
 
-/** Voice client mirrors transcript + agent state so the dashboard sees the live call. */
-/**
- * "The customer is still here."
- *
- * Called every few seconds by an open chat panel or voice call. The backend
- * closes any conversation that stops sending these, which is what guarantees the
- * agent dashboard only lists conversations that are genuinely running.
- */
 export async function sendHeartbeat(conversationId: string): Promise<void> {
   await fetch(`/api/conversations/${conversationId}`, {
     method: 'PATCH',
@@ -96,11 +78,6 @@ export async function sendHeartbeat(conversationId: string): Promise<void> {
   }).catch(() => {});
 }
 
-/**
- * Ends the conversation for good (panel closed, signed out, tab closing).
- * Uses `sendBeacon` when the page is going away, because a normal fetch is
- * cancelled while the tab unloads.
- */
 export function endConversation(conversationId: string, beacon = false): void {
   const url = `/api/conversations/${conversationId}/close`;
   if (beacon && typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
@@ -133,10 +110,6 @@ export async function requestEscalation(
   });
   return json(res);
 }
-
-// ---------------------------------------------------------------------------
-// Human agent dashboard
-// ---------------------------------------------------------------------------
 
 export interface DashboardSnapshot {
   now: number;
@@ -205,28 +178,10 @@ export async function resolveCase(
   return json(res);
 }
 
-/**
- * Ends the call for BOTH sides when the human agent leaves without resolving:
- * the conversation is closed, the customer's open call polls it and hangs up.
- */
-export async function leaveCase(
-  id: string,
-): Promise<{ case: SupportCase; conversation: Conversation | null }> {
-  const res = await fetch(`/api/cases/${id}/leave`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
-  });
-  return json(res);
-}
-
-// ---------------------------------------------------------------------------
-// Shopping (catalogue, cart, orders) — all scoped to the signed-in client
-// ---------------------------------------------------------------------------
-
 import type { CartView, OrderView, ProductView } from '@/lib/shop/service';
+import type { WalletTransactionView, WalletView } from '@/lib/shop/wallet';
 
-export type { CartView, OrderView, ProductView };
+export type { CartView, OrderView, ProductView, WalletTransactionView, WalletView };
 
 const CLIENT_ID_HEADER = 'x-nexavoice-client-id';
 
@@ -291,9 +246,11 @@ export type OrderEdit =
   | { action: 'remove_item'; product: string; qty?: number }
   | { action: 'set_qty'; productId: string; qty: number }
   | { action: 'cancel'; reason?: string }
-  | { action: 'address'; address: string };
+  | { action: 'address'; address: string }
+  // Stop / restart the status timer while a PLACED order is being edited.
+  | { action: 'pause_edit' }
+  | { action: 'resume_edit' };
 
-/** Customer-driven order changes — the same rules the AI agent's tools obey. */
 export async function editOrder(
   clientId: string,
   code: string,
@@ -305,4 +262,18 @@ export async function editOrder(
     body: JSON.stringify(edit),
   });
   return json(res);
+}
+
+export async function getWallet(clientId: string): Promise<WalletView> {
+  const res = await fetch('/api/shop/wallet', { headers: shopHeaders(clientId), cache: 'no-store' });
+  return (await json<{ wallet: WalletView }>(res)).wallet;
+}
+
+export async function addWalletMoney(clientId: string, amountInr: number): Promise<WalletView> {
+  const res = await fetch('/api/shop/wallet', {
+    method: 'POST',
+    headers: shopHeaders(clientId, true),
+    body: JSON.stringify({ amountInr }),
+  });
+  return (await json<{ wallet: WalletView }>(res)).wallet;
 }

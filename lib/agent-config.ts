@@ -1,16 +1,3 @@
-/**
- * Builds the NexaVoice Agora Conversational AI agent.
- *
- * Pipeline (Agora-managed credentials — no vendor keys needed):
- *   Deepgram nova-3 STT (multilingual: Hindi + English code-switching)
- *   → OpenAI gpt-4o-mini LLM with inline REST tools hitting this backend
- *   → MiniMax speech-2.6-turbo TTS
- *
- * Optional BYOK / custom LLM: set `NEXT_LLM_URL` + `NEXT_LLM_API_KEY` to route
- * the engine to any OpenAI-compatible endpoint — including this app's own
- * `/api/chat/completions` proxy, which executes the same tools server-side
- * (useful if inline REST tools are not enabled on your Agora project).
- */
 import {
   Agent,
   type AgoraClient,
@@ -25,23 +12,13 @@ import { buildSystemPrompt, buildVoiceGreeting, FAILURE_MESSAGE, normalizeLangua
 export interface BuildAgentOptions {
   client: AgoraClient;
   conversationId: string;
-  /** Shared secret the tool endpoints expect; omitted → tools disabled. */
   toolToken: string | null;
-  /** Public origin the engine calls back into; omitted → tools disabled. */
   toolsBaseUrl?: string | null;
-  /** Signed-in customer (from PostgreSQL) — name for the prompt, saved language for the greeting. */
   customer?: { name?: string; preferredLanguage?: string } | null;
 }
 
-/** Deepgram nova-3 `multi` transcribes Hindi/English code-switching in one stream. */
 export const STT_LANGUAGE = process.env.AGENT_STT_LANGUAGE?.trim() || 'multi';
 
-/**
- * Interaction language for Agora turn detection (`turn_detection.language`).
- * The SDK copies it into `asr.language`, so keep it a locale both Agora and
- * Deepgram accept. `en-IN` covers Hinglish callers; set `AGENT_LANGUAGE=hi-IN`
- * for Hindi-first deployments (bn-IN, ta-IN, te-IN, gu-IN, kn-IN also valid).
- */
 const INTERACTION_LANGUAGES: ReadonlySet<TurnDetectionLanguage> = new Set<TurnDetectionLanguage>([
   'en-IN',
   'en-US',
@@ -60,12 +37,10 @@ export const INTERACTION_LANGUAGE: TurnDetectionLanguage = (() => {
   return 'en-IN';
 })();
 
-/** MiniMax multilingual voice; override with AGENT_TTS_VOICE_ID (e.g. a Hindi voice id). */
 export const TTS_VOICE_ID = process.env.AGENT_TTS_VOICE_ID?.trim() || 'English_captivating_female1';
 
 export interface BuiltAgent {
   agent: Agent;
-  /** Whether the session was configured with backend tools. */
   toolsEnabled: boolean;
   llmMode: 'agora-managed' | 'custom';
 }
@@ -88,19 +63,15 @@ export function buildNexaVoiceAgent({
 
   const preferredLanguage = normalizeLanguageName(customer?.preferredLanguage);
 
-  // Tools reach the backend either as engine-called REST endpoints (agora-managed
-  // LLM) or in-process through the /api/chat/completions proxy (custom LLM).
-  // When neither is possible the prompt must NOT describe tools the model cannot
-  // call — otherwise it "checks" a cart it cannot see and invents the answer.
   const restTools =
-    !useCustomLlm && toolToken
-      ? buildAgoraRestTools(toolsBaseUrl ?? undefined)
+    !useCustomLlm && toolToken && toolsBaseUrl !== null
+      ? buildAgoraRestTools(toolsBaseUrl)
       : null;
-  const toolsAvailable = Boolean(restTools && restTools.length > 0) || useCustomLlm;
+
+  const effectiveToolsEnabled = Boolean(restTools) || useCustomLlm;
 
   const llmCommon = {
-    maxHistory: 24,
-    // The greeting confirms the saved language preference in that very language.
+    maxHistory: 32,
     greetingMessage: buildVoiceGreeting(preferredLanguage, customer?.name),
     failureMessage: FAILURE_MESSAGE,
     systemMessages: [
@@ -110,11 +81,11 @@ export function buildNexaVoiceAgent({
           mode: 'voice',
           customerName: customer?.name,
           preferredLanguage,
-          toolsAvailable,
+          toolsEnabled: effectiveToolsEnabled,
         }),
       },
     ],
-    params: { max_tokens: 400, temperature: 0.4, top_p: 0.9 },
+    params: { max_tokens: 400, temperature: 0.3, top_p: 0.9 },
     templateVariables,
   };
 
@@ -124,23 +95,17 @@ export function buildNexaVoiceAgent({
         apiKey: customLlmKey!,
         url: customLlmUrl!,
         model: process.env.NEXT_LLM_MODEL?.trim() || 'gpt-4o-mini',
-        // Custom endpoints receive the conversation id as a header so the
-        // in-process tool loop can scope tool calls (see lib/chat-completions.ts).
         headers: { 'x-nexavoice-conversation-id': conversationId },
         vendor: 'custom',
       })
     : new OpenAI({ ...llmCommon, model: 'gpt-4o-mini' });
 
-  // Inline REST tools (engine → our /api/agent-tools/* endpoints). Only when the
-  // Agora-managed LLM is used AND the deployment is publicly reachable; the
-  // custom LLM path executes tools itself. (`restTools` and `toolsAvailable`
-  // are computed above, before the prompt is built.)
   const agent = new Agent({
     client,
     turnDetection: {
       language: INTERACTION_LANGUAGE,
       config: {
-        speech_threshold: 0.5,
+        speech_threshold: 0.8, // Hardcoded threshold to override console sync issues
         start_of_speech: {
           mode: 'vad',
           vad_config: { interrupt_duration_ms: 200, prefix_padding_ms: 300 },
@@ -151,10 +116,6 @@ export function buildNexaVoiceAgent({
         },
       },
     },
-    // RTM is required for transcript/state events in the browser. enable_tools is
-    // only sent when the session actually has tools: a project without tool
-    // calling enabled rejects (or ignores) the flag, and a session that advertises
-    // tools it never receives leaves the agent silent for a whole turn.
     advancedFeatures: {
       enable_rtm: true,
       ...(restTools && restTools.length > 0 ? { enable_tools: true } : {}),
@@ -165,7 +126,7 @@ export function buildNexaVoiceAgent({
       enable_error_message: true,
       enable_metrics: true,
       silence_config: {
-        timeout_ms: 12000,
+        timeout_ms: 25000,
         action: 'speak',
         content: 'Are you still there? I am here to help you.',
       },
@@ -181,16 +142,11 @@ export function buildNexaVoiceAgent({
 
   return {
     agent,
-    toolsEnabled: toolsAvailable,
+    toolsEnabled: Boolean(restTools) || useCustomLlm,
     llmMode: useCustomLlm ? 'custom' : 'agora-managed',
   };
 }
 
-/**
- * `OpenAI.toConfig()` has no `tools` option yet; `Agent.toProperties()` spreads
- * the stored LLM config verbatim into `properties.llm`, so we attach the tools
- * to the stored config. Kept in one place so an SDK upgrade is a one-line fix.
- */
 function injectRestTools(agent: Agent, tools: ReturnType<typeof buildAgoraRestTools>) {
   const holder = agent as unknown as { _llm?: Record<string, unknown> };
   if (!holder._llm) throw new Error('LLM must be configured before attaching tools');

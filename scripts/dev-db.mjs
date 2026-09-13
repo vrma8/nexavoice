@@ -1,24 +1,3 @@
-/**
- * Zero-install PostgreSQL for local development.
- *
- * The app needs a real PostgreSQL (clients, the 50-product catalogue, carts,
- * orders and the mirrored support store all live there), but asking someone who
- * just cloned the repo to install a database server first is a poor first run.
- * PGlite is a full PostgreSQL compiled to WASM; `@electric-sql/pglite-socket`
- * puts it behind a TCP socket, so Prisma, `pnpm db:push` and `psql` talk to it
- * exactly as they would to a real server.
- *
- *   pnpm dev:db                      # starts on 127.0.0.1:5433, data in .data/pglite
- *   DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5433/postgres
- *
- * Keep it running in its own terminal, then in another:
- *   pnpm db:push && pnpm seed && pnpm dev
- *
- * It is a development convenience only: one WASM database engine serialises every
- * query, so it is slower than a real server under load and offers no durability
- * guarantees. Use a managed PostgreSQL (Neon, Supabase, Vercel Postgres, RDS…)
- * for anything deployed.
- */
 import { mkdirSync } from 'node:fs';
 import { PGlite } from '@electric-sql/pglite';
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket';
@@ -34,8 +13,6 @@ const server = new PGLiteSocketServer({
   db,
   port: PORT,
   host: HOST,
-  // Prisma opens a connection pool and the schema engine adds its own connection;
-  // the default of 1 would make those fail with "connection terminated".
   maxConnections: Number(process.env.DEV_DB_MAX_CONNECTIONS ?? 20),
 });
 await server.start();

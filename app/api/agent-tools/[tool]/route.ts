@@ -4,21 +4,8 @@ import { getToolSecret, TOOL_TOKEN_HEADER } from '@/lib/agent-tools';
 import { executeTool, getToolDefinition, TOOL_DEFINITIONS } from '@/lib/support/tools';
 import { withStore } from '@/lib/support/route-store';
 
-/** The engine waits on this; its own client timeout is 15s. */
 export const maxDuration = 30;
 
-/**
- * POST /api/agent-tools/<tool>?conversation_id=<id>
- *
- * Endpoint invoked by the Agora Conversational AI Engine for inline REST tools
- * (see lib/agent-tools.ts). The engine renders the JSON body from the LLM's
- * arguments; the conversation id and the shared secret come from
- * `template_variables` we set when starting the session, so neither can be
- * influenced by the model.
- *
- * Responses are always 200 with a JSON payload the LLM can read — including
- * business errors — so the model can explain problems instead of failing.
- */
 async function handlePost(request: NextRequest, context: { params: Promise<{ tool: string }> }) {
   const { tool } = await context.params;
 
@@ -61,7 +48,6 @@ async function handlePost(request: NextRequest, context: { params: Promise<{ too
   });
 }
 
-/** GET lists the tool catalogue (handy for debugging the deployment). */
 async function handleGet(request: NextRequest) {
   if (!isAuthorized(request)) {
     return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401 });
@@ -80,10 +66,6 @@ function isAuthorized(request: NextRequest): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-/**
- * When the LLM omits an optional argument, some engines send the raw
- * placeholder string (`{{args.order_id}}`) through. Treat those as absent.
- */
 function stripUnrenderedPlaceholders(args: Record<string, unknown>): Record<string, unknown> {
   const clean: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(args)) {
@@ -94,7 +76,5 @@ function stripUnrenderedPlaceholders(args: Record<string, unknown>): Record<stri
   return clean;
 }
 
-// Bracketed by withStore so the durable store mirror is read before the
-// handler runs and written back before the response is flushed (serverless).
 export const GET = withStore(handleGet);
 export const POST = withStore(handlePost);

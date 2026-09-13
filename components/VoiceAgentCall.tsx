@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, Suspense, useEffect, useCallback } from "react";
+import { useState, Suspense, useEffect } from "react";
 import dynamic from "next/dynamic";
 import type { RTMClient } from "agora-rtm";
 import type {
@@ -16,33 +16,29 @@ import { getClientSession } from "@/lib/session";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { LoadingSkeleton } from "./LoadingSkeleton";
 import { Button } from "@/components/ui/button";
-import { Phone, Loader2, Lock } from "lucide-react";
+import {
+  Headset,
+  Loader2,
+  Lock,
+  Mic,
+  Package,
+  Phone,
+  ShieldCheck,
+  Sparkles,
+} from "lucide-react";
+import type { Conversation } from "@/lib/support/types";
 
-// Dynamically import the ConversationComponent with SSR disabled
 const ConversationComponent = dynamic(() => import("./ConversationComponent"), {
   ssr: false,
 });
 
 const AgoraProvider = dynamic(() => import("./AgoraProvider"), { ssr: false });
 
-/** Why the AI agent could not be invited, shown verbatim instead of a generic banner. */
 interface AgentJoinError {
   message: string;
   hint?: string;
 }
 
-/** Non-blocking warning that the agent in this call has no backend tools. */
-const TOOLS_DISABLED_WARNING = {
-  message: "This call can't reach your cart or orders",
-  hint:
-    "The deployment has no public https URL for the agent's tools, so the assistant cannot check or change anything on your account in this call — use the chat instead, or expose the app publicly (Vercel URL / ngrok) and AGENT_TOOLS_BASE_URL.",
-};
-
-/**
- * Reads a JSON error body from one of this app's API routes. Route handlers return
- * `{ error, hint }`, and those two fields are the difference between "Failed to
- * start call" and an actionable message when a deployment is misconfigured.
- */
 async function readErrorBody(
   response: Response
 ): Promise<{ message: string; hint?: string }> {
@@ -56,29 +52,26 @@ async function readErrorBody(
   return { message, hint: body?.hint };
 }
 
-/**
- * Voice call with the AI agent, started from the shopping page.
- *
- * `onCallEnded` lets the host (the agent dock) close itself and refresh the
- * orders, because the AI may have changed one during the call.
- */
-export default function VoiceAgentCall({ onCallEnded }: { onCallEnded?: () => void } = {}) {
+export default function VoiceAgentCall({
+  onCallEnded,
+  onConversationSnapshot,
+}: {
+  onCallEnded?: () => void;
+  onConversationSnapshot?: (conversation: Conversation | null) => void;
+} = {}) {
   const [showConversation, setShowConversation] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [agoraData, setAgoraData] = useState<AgoraTokenData | null>(null);
   const [rtmClient, setRtmClient] = useState<RTMClient | null>(null);
   const [agentJoinError, setAgentJoinError] = useState<AgentJoinError | null>(null);
+  const [toolsEnabled, setToolsEnabled] = useState(true);
 
-  // Preload heavy modules on mount
   useEffect(() => {
     import("agora-rtc-react").catch(() => {});
     import("agora-rtm").catch(() => {});
   }, []);
 
-  // While the call is up, tell the backend the customer is still on the page,
-  // and end the conversation the moment the tab goes away — the agent dashboard
-  // must never show a call nobody is on.
   const conversationId = agoraData?.conversationId;
   useEffect(() => {
     if (!conversationId || !showConversation) return;
@@ -96,13 +89,9 @@ export default function VoiceAgentCall({ onCallEnded }: { onCallEnded?: () => vo
     setIsLoading(true);
     setError(null);
     setAgentJoinError(null);
-    // Held in a local, not state: React has not applied setState by the time the
-    // catch below runs, so reading state here would always see the previous value.
     let rtmFailure: string | null = null;
 
     try {
-      // 1. Fetch RTC token + channel (and the App ID, so the browser never depends
-      //    on a build-time-inlined NEXT_PUBLIC_AGORA_APP_ID).
       const agoraResponse = await fetch("/api/generate-agora-token");
       const responseData = await agoraResponse.json();
 
@@ -116,10 +105,8 @@ export default function VoiceAgentCall({ onCallEnded }: { onCallEnded?: () => vo
         throw new Error(MISSING_APP_ID_MESSAGE);
       }
 
-      // 2. Run agent invite and RTM setup in parallel
       const session = getClientSession();
       const [agentData, rtm] = await Promise.all([
-        // 2a. Start the AI agent
         fetch("/api/invite-agent", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -148,16 +135,13 @@ export default function VoiceAgentCall({ onCallEnded }: { onCallEnded?: () => vo
             return null;
           }),
 
-        // 2b. Set up RTM
         (async () => {
           const { default: AgoraRTM } = await import("agora-rtm");
-          const rtm: RTMClient = new AgoraRTM.RTM(appId, String(responseData.uid));
+          const rtm: RTMClient = new AgoraRTM.RTM(appId, responseData.uid);
           await rtm.login({ token: responseData.token });
           await rtm.subscribe(responseData.channel);
           return rtm;
         })().catch((err) => {
-          // Transcripts and agent state ride on RTM, but a failed login must not
-          // abort the call — audio still works, and the UI is told why it is quiet.
           const message = err instanceof Error ? err.message : String(err);
           console.error("[voice] RTM setup failed:", message);
           rtmFailure = message;
@@ -173,18 +157,16 @@ export default function VoiceAgentCall({ onCallEnded }: { onCallEnded?: () => vo
         );
       }
 
+      setToolsEnabled(agentData?.tools_enabled !== false);
       setRtmClient(rtm);
       setAgoraData({
         ...responseData,
         appId,
         agentId: agentData?.agent_id,
         conversationId: agentData?.conversation_id,
-        toolsEnabled: agentData?.tools_enabled ?? true,
       });
       setShowConversation(true);
     } catch (err) {
-      // The previous copy blamed the microphone for every failure, which sent
-      // people hunting for a permission problem when the real one was server-side.
       const message = err instanceof Error ? err.message : String(err);
       setError(
         /permission|denied|notallowed|getUserMedia|device/i.test(message)
@@ -197,28 +179,27 @@ export default function VoiceAgentCall({ onCallEnded }: { onCallEnded?: () => vo
     }
   };
 
-  const handleTokenWillExpire = useCallback(
-    async (uid: string): Promise<AgoraRenewalTokens> => {
-      const channel = agoraData?.channel;
-      if (!channel) throw new Error("Missing channel for token renewal");
+  const handleTokenWillExpire = async (
+    uid: string,
+  ): Promise<AgoraRenewalTokens> => {
+    const channel = agoraData?.channel;
+    if (!channel) throw new Error("Missing channel for token renewal");
 
-      const [rtcResponse, rtmResponse] = await Promise.all([
-        fetch(`/api/generate-agora-token?channel=${channel}&uid=${uid}`),
-        fetch(`/api/generate-agora-token?channel=${channel}&uid=${agoraData.uid}`),
-      ]);
-      const [rtcData, rtmData] = await Promise.all([
-        rtcResponse.json(),
-        rtmResponse.json(),
-      ]);
+    const [rtcResponse, rtmResponse] = await Promise.all([
+      fetch(`/api/generate-agora-token?channel=${channel}&uid=${uid}`),
+      fetch(`/api/generate-agora-token?channel=${channel}&uid=${agoraData.uid}`),
+    ]);
+    const [rtcData, rtmData] = await Promise.all([
+      rtcResponse.json(),
+      rtmResponse.json(),
+    ]);
 
-      if (!rtcResponse.ok || !rtmResponse.ok) {
-        throw new Error("Failed to generate renewal tokens");
-      }
+    if (!rtcResponse.ok || !rtmResponse.ok) {
+      throw new Error("Failed to generate renewal tokens");
+    }
 
-      return { rtcToken: rtcData.token, rtmToken: rtmData.token };
-    },
-    [agoraData]
-  );
+    return { rtcToken: rtcData.token, rtmToken: rtmData.token };
+  };
 
   const handleEndConversation = async () => {
     if (agoraData?.agentId) {
@@ -246,10 +227,10 @@ export default function VoiceAgentCall({ onCallEnded }: { onCallEnded?: () => vo
 
   if (showConversation && agoraData && rtmClient) {
     return (
-      <div className="flex flex-col h-full absolute inset-0">
+      <div className="flex h-full flex-col absolute inset-0">
         {agentJoinError && (
           <div
-            className="p-3 bg-red-900/30 text-red-300 text-sm text-center space-y-1"
+            className="space-y-1 p-3 text-center text-sm text-red-300 border-b border-red-500/25 bg-red-500/10"
             role="alert"
           >
             <div className="font-medium text-red-200">
@@ -258,7 +239,7 @@ export default function VoiceAgentCall({ onCallEnded }: { onCallEnded?: () => vo
             {agentJoinError.hint && (
               <div className="text-xs text-red-300/80">{agentJoinError.hint}</div>
             )}
-            <div className="text-xs text-zinc-400">
+            <div className="text-xs text-muted-foreground">
               Deployment self-check:{" "}
               <a href="/api/health" target="_blank" rel="noreferrer" className="underline">
                 /api/health
@@ -268,65 +249,79 @@ export default function VoiceAgentCall({ onCallEnded }: { onCallEnded?: () => vo
           </div>
         )}
 
-        {!agoraData.toolsEnabled && (
-          <div
-            className="p-3 bg-amber-900/30 text-amber-300 text-sm text-center space-y-1"
-            role="status"
-          >
-            <div className="font-medium text-amber-200">
-              {TOOLS_DISABLED_WARNING.message}
-            </div>
-            <div className="text-xs text-amber-300/80">{TOOLS_DISABLED_WARNING.hint}</div>
-          </div>
-        )}
-
-        <Suspense fallback={<LoadingSkeleton />}>
-          <ErrorBoundary>
-            <AgoraProvider>
-              <ConversationComponent
-                agoraData={agoraData}
-                rtmClient={rtmClient}
-                onTokenWillExpire={handleTokenWillExpire}
-                onEndConversation={handleEndConversation}
-              />
-            </AgoraProvider>
-          </ErrorBoundary>
-        </Suspense>
+        <div className="min-h-0 flex-1">
+          <Suspense fallback={<LoadingSkeleton />}>
+            <ErrorBoundary>
+              <AgoraProvider>
+                <ConversationComponent
+                  agoraData={agoraData}
+                  rtmClient={rtmClient}
+                  onTokenWillExpire={handleTokenWillExpire}
+                  onEndConversation={handleEndConversation}
+                  onConversationSnapshot={onConversationSnapshot}
+                  toolsEnabled={toolsEnabled}
+                />
+              </AgoraProvider>
+            </ErrorBoundary>
+          </Suspense>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-full w-full flex-col items-center justify-center overflow-y-auto px-6 py-8">
-      <div className="flex w-full max-w-sm flex-1 flex-col items-center justify-start pt-6 text-center">
+    <div className="flex h-full w-full flex-col items-center overflow-y-auto px-6 py-8">
+      <div className="flex w-full max-w-sm flex-1 flex-col items-center justify-start pt-4 text-center">
         {/* Avatar */}
         <div className="relative mb-5">
-          <div className="flex h-28 w-28 items-center justify-center rounded-full border-4 border-blue-500 bg-zinc-800 shadow-lg shadow-blue-900/40">
-            <span className="absolute inset-0 rounded-full bg-blue-500/10"></span>
-            <Phone className="h-12 w-12 text-blue-400" />
+          <div className="flex h-24 w-24 items-center justify-center rounded-full border border-[hsl(191_100%_50%_/_0.3)] bg-[hsl(191_100%_50%_/_0.08)]">
+            <Mic className="h-10 w-10 text-[hsl(191_100%_55%)]" />
           </div>
-          <span className="absolute -bottom-1 -right-1 flex h-7 w-7 items-center justify-center rounded-full border-2 border-zinc-950 bg-green-500">
-            <span className="h-2 w-2 rounded-full bg-zinc-950"></span>
-          </span>
+          <div
+            className="absolute inset-0 rounded-full border border-[hsl(191_100%_50%_/_0.15)] animate-ping"
+            style={{ animationDuration: "2s" }}
+          />
         </div>
 
-        <h2 className="text-2xl font-semibold text-white">Talk to Nexa</h2>
-        <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-          Speak in Hindi, English, or Hinglish — check an order, cancel, change an address,
-          or ask for a human agent.
+        <p className="text-base font-semibold text-white">Voice call with Nexa</p>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Speak in Hindi, English, or Hinglish — Nexa can check orders, edit your
+          cart, place or cancel an order, and hand you to a human agent.
         </p>
+
+        <ul className="mt-5 w-full space-y-2 text-left">
+          {[
+            { icon: Package, text: "“Where is my order NM-10023?”" },
+            { icon: Sparkles, text: "“Replace the kettle with the Philips one”" },
+            { icon: Headset, text: "“Connect me to a human agent”" },
+          ].map(({ icon: Icon, text }) => (
+            <li
+              key={text}
+              className="flex items-center gap-2.5 rounded-xl border border-border bg-card/60 px-3 py-2 text-xs text-card-foreground"
+            >
+              <Icon className="h-3.5 w-3.5 shrink-0 text-[hsl(191_100%_55%)]" />
+              {text}
+            </li>
+          ))}
+        </ul>
+
+        <div className="mt-4 inline-flex items-center gap-2 rounded-full border border-emerald-500/20 bg-emerald-500/5 px-3 py-1 text-xs text-emerald-300">
+          <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          Ready to connect
+        </div>
       </div>
 
       {error && (
-        <div className="mt-5 w-full max-w-sm rounded-lg border border-red-800 bg-red-950/40 px-4 py-3 text-center text-sm text-red-300">
+        <div className="mt-5 w-full max-w-sm rounded-lg border border-red-500/25 bg-red-500/10 px-4 py-3 text-center text-sm text-red-300">
           {error}
         </div>
       )}
 
       {/* Primary action + reassurance */}
       <div className="mt-auto flex w-full max-w-sm flex-col items-center gap-3 pb-2 pt-8">
+        {/* Start call button */}
         <Button
-          className="h-14 w-full rounded-full bg-green-600 text-lg font-semibold text-white shadow-lg shadow-green-900/40 transition-all hover:bg-green-700"
+          className="h-12 w-full rounded-full border-none bg-[hsl(191_100%_50%)] px-8 text-base font-semibold text-[hsl(223_47%_4%)] shadow-lg shadow-[hsl(191_100%_50%_/_0.2)] transition-all hover:bg-[hsl(191_100%_45%)]"
           onClick={handleStartCall}
           disabled={isLoading}
         >
@@ -338,20 +333,26 @@ export default function VoiceAgentCall({ onCallEnded }: { onCallEnded?: () => vo
           ) : (
             <>
               <Phone className="mr-2 h-5 w-5" />
-              Start Call
+              Start voice call
             </>
           )}
         </Button>
 
-        <ul className="flex w-full flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[11px] text-zinc-500">
-          <li className="flex items-center gap-1"><Lock className="h-3 w-3" /> Private</li>
-          <li className="text-zinc-700">•</li>
-          <li>Clear audio</li>
-          <li className="text-zinc-700">•</li>
+        <ul className="flex w-full flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+          <li className="flex items-center gap-1">
+            <Lock className="h-3 w-3" /> Private
+          </li>
+          <li className="text-[hsl(220_10%_30%)]">•</li>
+          <li className="flex items-center gap-1">
+            <ShieldCheck className="h-3 w-3" /> No card details ever
+          </li>
+          <li className="text-[hsl(220_10%_30%)]">•</li>
           <li>No app needed</li>
         </ul>
 
-        <p className="text-center text-xs text-zinc-600">Powered by Agora Conversational AI</p>
+        <p className="text-center text-xs text-muted-foreground">
+          Powered by Agora Conversational AI
+        </p>
       </div>
     </div>
   );

@@ -4,11 +4,6 @@ import { getAgent, getClient } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
-/**
- * GET /api/auth/me?role=client|agent&id=…
- * Re-reads a stored login identity from the database so pages can display the
- * record exactly as it is maintained in PostgreSQL.
- */
 export async function GET(request: NextRequest) {
   if (!hasDatabaseUrl()) {
     return NextResponse.json({ error: 'Database is not configured.' }, { status: 503 });

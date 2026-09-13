@@ -4,4 +4,12 @@ README.md
 .gitignore
 .DS_Store
 node_modules
-*.log 
+*.log
+tests/
+Docs/
+scripts/
+mcp-server/
+.agents/
+AGENTS.md
+CLAUDE.md
+*.svg 

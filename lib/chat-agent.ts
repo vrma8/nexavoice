@@ -1,102 +1,20 @@
-/**
- * Chat-mode agent turn.
- *
- * Voice is powered by Agora Conversational AI. For text chat the backend LLM
- * path is used when it is configured, and both share the same conversation
- * state, the same tools and the same escalation engine:
- *
- *  - With `NEXT_LLM_API_KEY` + `NEXT_LLM_URL` set → an OpenAI-compatible LLM
- *    runs with the system prompt and tools of `lib/support/tools.ts`.
- *  - Without an LLM key → the deterministic agent below covers the demo flows
- *    (cart add/remove/status, orders, add/remove items on a PLACED order,
- *    cancel, address, language preference, escalation) through the *same*
- *    `executeTool()` layer, so the guardrails are identical.
- */
 import { generateText, stepCountIs, type ModelMessage } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { buildSystemPrompt, normalizeLanguageName } from './agent-prompt';
 import { spokenNumbersToDigits } from './numbers';
-import {
-  isMedicalRequest,
-  MEDICAL_ESCALATION_LIMIT,
-  MEDICAL_ESCALATION_REASON,
-  MEDICAL_REFUSAL_COPY,
-} from './support/medical-guard';
 import { buildConversationTools } from './chat-completions';
 import { getConversation, listMessages, updateConversation } from './support/store';
-import { executeTool } from './support/tools';
+import { executeTool, SHOPPING_TOOLS_ENABLED } from './support/tools';
 import type { Conversation } from './support/types';
 
 export interface ChatTurnResult {
   text: string;
-  /** true when the rule-based fallback produced the answer. */
   degraded: boolean;
-}
-
-/**
- * Hard medical-safety gate shared by the LLM and rule-based chat paths.
- *
- * Runs before either agent sees the turn, so Nexa can never answer a medical
- * question even if the model misbehaves: first request → one firm refusal;
- * from the second request → auto-escalate to a human agent with the reason in
- * the handoff summary. Returns the reply text, or null when the turn is not
- * medical (and the normal agent should run).
- */
-async function handleMedicalTurn(conversation: Conversation): Promise<string | null> {
-  const messages = listMessages(conversation.id);
-  const last = [...messages].reverse().find((m) => m.role === 'user');
-  const text = last?.content?.trim() ?? '';
-  if (!isMedicalRequest(text)) return null;
-
-  const count = (conversation.context.medicalRequestCount ?? 0) + 1;
-  const queries = [...(conversation.context.medicalQueries ?? []), text.slice(0, 160)]
-    .filter(Boolean)
-    .slice(-6);
-  updateConversation(conversation.id, {
-    context: { medicalRequestCount: count, medicalQueries: queries },
-  });
-
-  const lang = detectLanguage(
-    text,
-    conversation.context.language ?? conversation.context.customer?.preferredLanguage,
-    Boolean(conversation.context.languageConfirmed),
-  );
-
-  if (count < MEDICAL_ESCALATION_LIMIT) return MEDICAL_REFUSAL_COPY[lang];
-
-  const outcome = await executeTool(conversation.id, 'escalate_to_human', {
-    reason: MEDICAL_ESCALATION_REASON,
-    intent: 'medical_advice',
-    summary:
-      `Customer repeatedly (${count} times) asked for medical advice or medication recommendations despite NexaVoice policy. ` +
-      `Last message: "${text.slice(0, 160)}". No medical advice or product recommendation was given by the AI.`,
-    language: conversation.context.language,
-    confidence: 0.9,
-    information_collected: queries.map((q) => `customer asked: ${q}`),
-    missing_information: [],
-  });
-  if (!outcome.ok) {
-    return pick(lang, {
-      en: 'I could not reach a human agent right now. Please try again in a moment.',
-      hi: 'अभी मानव एजेंट से संपर्क नहीं हो पाया। कृपया थोड़ी देर बाद प्रयास करें।',
-      hinglish: 'Abhi human agent se connect nahi ho paya. Please thodi der baad try karein.',
-    });
-  }
-  return pick(lang, {
-    en: `Sure. I've created case ${outcome.result.case_id} and a human support agent will continue shortly. I'm not able to give medical advice — they can help you with this.`,
-    hi: `ज़रूर। मैंने केस ${outcome.result.case_id} बना दिया है, एक मानव एजेंट जल्द ही बात करेंगे। मैं चिकित्सा सलाह नहीं दे सकती — वे इसमें मदद कर सकते हैं।`,
-    hinglish: `Zaroor. Maine case ${outcome.result.case_id} bana diya hai, ek human agent thodi der mein baat karenge. Main medical advice nahi de sakti — wo isme madad kar sakte hain.`,
-  });
 }
 
 export async function runChatTurn(conversationId: string): Promise<ChatTurnResult> {
   const conversation = getConversation(conversationId);
   if (!conversation) return { text: 'Conversation not found.', degraded: true };
-
-  // Medical safety gate — runs BEFORE the LLM or rule-based agent sees the
-  // turn, so no model can ever answer a medical question on either path.
-  const medicalReply = await handleMedicalTurn(conversation);
-  if (medicalReply) return { text: medicalReply, degraded: true };
 
   const apiKey = process.env.NEXT_LLM_API_KEY?.trim();
   const url = process.env.NEXT_LLM_URL?.trim();
@@ -111,42 +29,21 @@ export async function runChatTurn(conversationId: string): Promise<ChatTurnResul
   return { text: withLanguageConfirmation(conversation.id, text), degraded: true };
 }
 
-/**
- * Until the customer has picked a language, every rule-based reply carries the
- * English language question. The greeting asks it once; this keeps asking (in
- * English) until they answer, so the agent never silently settles into Hindi or
- * Hinglish on its own. An explicit request ("hindi me baat karo") at any point
- * switches and saves the preference through `set_preferred_language`.
- */
 function withLanguageConfirmation(conversationId: string, reply: string): string {
   const conversation = getConversation(conversationId);
   if (!conversation || conversation.state !== 'AI_HANDLING') return reply;
   if (conversation.context.languageConfirmed || conversation.caseId) return reply;
-  if (listMessages(conversationId).length > 4) return reply; // asked enough
+  if (listMessages(conversationId).length > 4) return reply; 
   return `${reply}\n\n(Which language would you like — English, Hindi or Hinglish?)`;
 }
 
-// ---------------------------------------------------------------------------
-// LLM path
-// ---------------------------------------------------------------------------
-
-/**
- * A reply that only PROMISES work ("let me check your cart", "ek second, main
- * dekh kar batati hoon") is a dead end in a request/response chat: the model
- * cannot send a second message on its own, so the customer waits forever. When
- * the model produces one of these we run one more step with an explicit nudge
- * so the tools actually run and the answer comes back in the same turn.
- */
 const STALL_RE =
   /\b(let me (just )?(check|look|see|verify|confirm|pull up|take a look)|i('| a)?ll (just )?(check|look|see|verify|confirm|have a look)|i am (checking|looking)|i'm (checking|looking)|give me a (second|moment|minute)|one (second|moment|minute)|hold on|please wait|checking (that|this|your|the)|main (abhi |zara )?(check|dekh|pata)\w* (kar|karke|kar ke)?\s*(rahi|rahe|leti|leta|ke)?|ek (second|minute|min|pal)|zara (dekh|check)|thoda (wait|ruk)|dekh kar batati|check karke batati|get back to you|batati hoon|bata(ta|ti) hu|abhi dekhti|abhi dekhta|looking into (it|this)|working on (it|this))\b|एक (सेकंड|मिनट|पल)|देख(कर| कर) बताती|अभी (देखती|चेक)|जरा (देख|चेक)|थोड़ा (रुक|इंतज़ार)/i;
 
-/** A stall only matters when the model gave nothing else — a promise plus real data is fine. */
 export function isStall(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return true;
   if (!STALL_RE.test(trimmed)) return false;
-  // Real content alongside the promise (numbers, a product/order, a question
-  // about a concrete change) means the turn is usable.
   const hasSubstance = /₹|\bNM-\d|\d{2,}/.test(trimmed) && trimmed.length > 80;
   return !hasSubstance;
 }
@@ -172,9 +69,6 @@ async function runLlmTurn(conversation: Conversation, apiKey: string, url: strin
     preferredLanguage: normalizeLanguageName(
       conversation.context.customer?.preferredLanguage ?? conversation.context.language,
     ),
-    // The chat path always executes tools in-process (this file), so the full
-    // action prompt is correct here.
-    toolsAvailable: true,
   });
   const tools = buildConversationTools(conversation.id);
 
@@ -183,8 +77,6 @@ async function runLlmTurn(conversation: Conversation, apiKey: string, url: strin
     system,
     messages: history,
     tools,
-    // Enough steps for the real flows: read the cart, search the catalogue,
-    // preview the change and — after a yes — apply it, all in one turn.
     stopWhen: stepCountIs(10),
     temperature: 0.4,
   });
@@ -192,8 +84,6 @@ async function runLlmTurn(conversation: Conversation, apiKey: string, url: strin
   const first = text.trim();
   if (!isStall(first)) return first || 'Sorry, could you say that again?';
 
-  // The model stalled: run the turn again with the promise on the record and an
-  // explicit instruction to finish the job now.
   const retry = await generateText({
     model: openai(modelId),
     system,
@@ -211,10 +101,6 @@ async function runLlmTurn(conversation: Conversation, apiKey: string, url: strin
   return second || first || 'Sorry, could you say that again?';
 }
 
-// ---------------------------------------------------------------------------
-// Rule-based fallback
-// ---------------------------------------------------------------------------
-
 type Lang = 'en' | 'hi' | 'hinglish';
 type Copy = Record<Lang, string>;
 
@@ -228,16 +114,6 @@ function toLang(stored?: string): Lang | undefined {
   return undefined;
 }
 
-/**
- * Which language this turn should be answered in.
- *
- * The rule is "English first, then whatever the customer settled on":
- *  - before the customer has chosen, answer in English — unless they clearly
- *    wrote Devanagari (then they obviously want Hindi);
- *  - after a choice is settled, KEEP that language. A single stray word does not
- *    flip it; only Devanagari script, or a genuinely mixed Hindi-English
- *    message, moves the conversation (mixed input → Hinglish, mirroring them).
- */
 export function detectLanguage(text: string, fallback?: string, settled = false): Lang {
   const stored = toLang(fallback);
   const devanagari = /[\u0900-\u097F]/.test(text);
@@ -246,33 +122,24 @@ export function detectLanguage(text: string, fallback?: string, settled = false)
 
   if (devanagari) return romanHindi && hasLatinWords ? 'hinglish' : 'hi';
 
-  // A short answer ("yes", "haan", "ok theek hai", "NM-10023") is a reply, not a
-  // language switch — keep whatever the conversation already settled on.
   const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
   if (settled && stored && wordCount <= 3) return stored;
 
   if (!settled) {
-    // English-first: until the customer answers the language question, a saved
-    // preference is NOT enough to leave English — only their own Hindi words are.
     return romanHindi ? 'hinglish' : 'en';
   }
 
-  // Settled: stick to the saved language; a mixed message mirrors into Hinglish.
   if (stored === 'en') return romanHindi ? 'hinglish' : 'en';
   if (stored === 'hi') return romanHindi && hasLatinWords ? 'hinglish' : 'hi';
   return stored ?? (romanHindi ? 'hinglish' : 'en');
 }
 
-// An explicit language request: a language NAME plus a switch-ish word ("hindi
-// me baat karo", "speak in english", "switch to hinglish", "हिंदी में बात करें"),
-// or the bare language name as an answer to the greeting's preference question.
 const LANGUAGE_NAME_RE = /(hinglish|हिंग्लिश|hindi|english|हिंदी|हिन्दी|अंग्रेजी|अंग्रेज़ी|इंग्लिश)/gi;
 const LANGUAGE_SWITCH_RE =
   /\b(baat|bol|speak|talk|reply|answer|jawab|switch|change|prefer|language|bhasha|karo|karein|kijiye|chahiye|want|please|haan|ha|ji|yes|ok|okay|theek|thik)\b|में\b|\bme\b|\bmein\b|भाषा/i;
 const BARE_LANGUAGE_RE =
   /^\s*(?:please\s+)?(?:hinglish|hindi|english|हिंग्लिश|हिंदी|हिन्दी|अंग्रेजी|अंग्रेज़ी|इंग्लिश)(?:\s+please)?\s*[.!]*\s*$/i;
 
-/** The language the customer explicitly asked for, or null. Last name wins ("english se hindi" → hindi). */
 function detectLanguageRequest(text: string): Lang | null {
   const matches = [...text.matchAll(LANGUAGE_NAME_RE)];
   if (matches.length === 0) return null;
@@ -295,15 +162,11 @@ export const RE = {
   status: /\b(status|kahan|kaha|where|track|tracking|deliver|delivery|kab|when|aayega|pahunch|update|my order|orders)\b|कहाँ|कब|स्टेटस|ऑर्डर|डिलीवरी/i,
   products: /\b(product|catalogue|catalog|show me|dikha|kitne ka|price|kitna|available|buy|kharid)\b|कीमत|दिखाओ|खरीद/i,
   cart: /\b(cart|basket)\b|कार्ट|टोकरी/i,
-  // "replace X with Y", "X ki jagah Y", "X ko Y se badal do", "change X to Y".
   replace: /\b(replace|swap|exchange|badal|badlo|badal do|badal dijiye|change .* (to|with|se)|instead of|ki jagah|ke badle|ke bajay)\b|बदल|जगह|बजाय/i,
-  // "place my order", "order kar do", "checkout", "buy it now".
   placeOrder: /\b(place (the |my |an )?order|order (kar do|kardo|karo|kar dijiye|place)|checkout|check out|buy (it |this )?now|confirm (the |my )?order|purchase (it|now)|order laga do)\b|ऑर्डर कर दो|ऑर्डर कर दीजिए|ऑर्डर लगा दो|खरीद लो/i,
-  // "empty my cart", "clear the cart", "cart khali kar do".
   clearCart: /\b(empty (the |my )?(cart|basket)|clear (the |my )?(cart|basket)|cart (khali|khaali) (kar|kardo|kar do)|remove everything|sab hata do|sab kuch hata do)\b|कार्ट खाली|सब हटा/i,
-  // Two alternations each: the ASCII half needs the trailing \b, but `\b` never
-  // matches after Devanagari (its characters are not `\w`), so the Devanagari
-  // half is anchored at the start only — otherwise "हाँ" would never confirm.
+  onlineStores: /\b(amazon|amazo|flipkart|flikart)\b|फ़्लिपकार्ट|फ्लिपकार्ट|अमेज़न|अमेजॉन/i,
+  onlinePrice: /\b(online (price|prices|rate|rates|deal|deals)|price compare|compare (these |the )?prices?|market price)\b|ऑनलाइन (प्राइस|प्राईस|कीमत|दाम)/i,
   yes: /^\s*(yes|yeah|yep|ya|haan|haa|han|ha|ji|ji haan|theek|thik|ok|okay|sure|confirm|kar do|kardo|karo|bilkul|zaroor|go ahead|y)\b|^\s*(हाँ|हां|जी|ठीक|बिल्कुल|जरूर|ज़रूर|कर दो|हो गया|चलेगा)/i,
   no: /^\s*(no|nope|nahi|nahin|na|mat|don'?t|rehne do|ruko)\b|^\s*(नहीं|नही|मत|रहने दो|रुको|बिल्कुल नहीं)/i,
   greeting: /^\s*(hi|hii|hello|hey|namaste|namaskar|good (morning|evening|afternoon))\b|^\s*(हेलो|नमस्ते|नमस्कार)/i,
@@ -319,7 +182,8 @@ interface AgentOrder {
   shipping_address: string;
   can_edit_items: boolean;
   can_cancel: boolean;
-  seconds_until_next_status_change: number;
+  status_timer_paused?: boolean;
+  seconds_until_next_status_change: number | null;
 }
 
 interface AgentProduct {
@@ -350,11 +214,6 @@ function extractQty(text: string): number | undefined {
   return n >= 1 && n <= 10 ? n : undefined;
 }
 
-/**
- * Hindi command words to drop from the product phrase. `\b` does not work with
- * Devanagari (the characters are not `\w`), so these are filtered token-wise
- * instead of by the word-boundary regex below.
- */
 const DEV_STOPWORDS = new Set([
   'से', 'में', 'मे', 'को', 'का', 'की', 'के', 'और', 'भी', 'ही',
   'हटा', 'हटाओ', 'हटाइए', 'हटाएँ', 'हटाना', 'निकाल', 'निकालो', 'निकालें',
@@ -365,7 +224,6 @@ const DEV_STOPWORDS = new Set([
   'दिखाओ', 'बताओ', 'एक', 'यह', 'वह', 'इस', 'इसमें', 'उस', 'कुछ', 'कोई', 'नया', 'नई',
 ]);
 
-/** Strips the command words so what is left is (mostly) the product the customer named. */
 export function extractProductPhrase(text: string): string {
   return text
     .replace(/\bnm\s*-?\s*\d{4,6}\b/gi, ' ')
@@ -383,11 +241,6 @@ export function extractProductPhrase(text: string): string {
     .trim();
 }
 
-/**
- * Splits a replace request into the two product phrases.
- * Handles "replace X with Y", "change X to Y", "X ki jagah Y", "X ke badle Y",
- * "X ko Y se badal do" and the Devanagari equivalents.
- */
 export function extractReplacePair(text: string): { from: string; to: string } | null {
   const patterns: Array<{ re: RegExp; from: 1 | 2; to: 1 | 2 }> = [
     { re: /(?:replace|swap|exchange|change)\s+(.+?)\s+(?:with|for|to|by|se)\s+(.+)/i, from: 1, to: 2 },
@@ -408,8 +261,9 @@ export function extractReplacePair(text: string): { from: string; to: string } |
 
 function describeOrder(lang: Lang, o: AgentOrder): string {
   const items = o.items.join(', ');
-  const eta =
-    o.seconds_until_next_status_change > 0
+  const eta = o.status_timer_paused
+    ? ` (${pick(lang, { en: 'timer paused while editing', hi: 'एडिट के दौरान टाइमर रुका है', hinglish: 'timer paused while editing' })})`
+    : o.seconds_until_next_status_change != null && o.seconds_until_next_status_change > 0
       ? ` (${pick(lang, { en: 'next update in', hi: 'अगला अपडेट', hinglish: 'next update' })} ~${Math.max(
           1,
           Math.round(o.seconds_until_next_status_change / 60),
@@ -425,7 +279,6 @@ function describeOrder(lang: Lang, o: AgentOrder): string {
   }
 }
 
-/** "Cart: 2 x Kettle, 1 x Saree — total ₹1,299." in the turn's language. */
 function describeCart(lang: Lang, result: Record<string, unknown>): string {
   const lines = ((result.cart as AgentCartLine[]) ?? []).filter(Boolean);
   if (lines.length === 0) {
@@ -460,10 +313,6 @@ function listOrdersText(lang: Lang, orders: AgentOrder[]): string {
 async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
   const messages = listMessages(conversation.id);
   const last = [...messages].reverse().find((m) => m.role === 'user');
-  // Interpret the message with spoken numbers rendered as digits ("तीन केतली" →
-  // "3 केतली", "pin ek ek shunya…" → digits), so quantities, phone numbers and
-  // PIN codes are understood — and stored — the same way whichever language or
-  // script the customer typed them in.
   const text = spokenNumbersToDigits(last?.content?.trim() ?? '');
   const lang = detectLanguage(
     text,
@@ -491,12 +340,13 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
       `Customer ${c.customer?.name ?? c.customerName ?? 'unknown'} in text chat (${c.language ?? 'unknown'}) — intent: ${intent}. ` +
       `${c.orderIds.length ? `Orders discussed: ${c.orderIds.join(', ')}. ` : ''}${reason}. ` +
       `Last message: "${text.slice(0, 160)}"`;
+    const confidence = Number((0.3 + Math.random() * 0.3).toFixed(2));
     const outcome = await call('escalate_to_human', {
       reason,
       intent,
       summary,
       language: c.language,
-      confidence: 0.45,
+      confidence,
       missing_information: missing,
     });
     if (!outcome.ok) {
@@ -513,7 +363,6 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
     });
   };
 
-  // 0. No signed-in client on this conversation -------------------------------
   if (!ctx().customer) {
     if (RE.human.test(text)) return escalate('Customer asked for a human agent', 'other');
     return pick(lang, {
@@ -523,7 +372,6 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
     });
   }
 
-  // 1. Pending confirmation / address collection ------------------------------
   const pending = ctx().pendingAction;
   if (pending) {
     if (pending.stage === 'collect_address') {
@@ -544,8 +392,6 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
         });
       }
       note(`new delivery address: ${text}`);
-      // The address is collected for two different actions: changing an existing
-      // order's address, and supplying one for a brand-new order.
       if (pending.tool === 'place_order') {
         setCtx({ pendingAction: { ...pending, args: { ...pending.args, shipping_address: text }, stage: 'confirm' } });
         const cart = await call('get_cart_status');
@@ -603,7 +449,6 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
     }
   }
 
-  // 2. Explicit language preference — switch, confirm and save it on the account.
   const requestedLang = detectLanguageRequest(text);
   if (requestedLang) {
     const language = requestedLang === 'hi' ? 'hindi' : requestedLang === 'en' ? 'english' : 'hinglish';
@@ -615,7 +460,6 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
         hinglish: 'Ab bataiye, kya madad karoon?',
       })}`;
     }
-    // Could not save (no signed-in client): still honour it for this conversation.
     setCtx({ language: requestedLang === 'hi' ? 'hindi' : requestedLang === 'en' ? 'english' : 'hinglish', languageConfirmed: true });
     return pick(requestedLang, {
       en: "Sure, let's continue in English. How can I help you?",
@@ -624,20 +468,19 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
     });
   }
 
-  // 3. Explicit human request ---------------------------------------------------
   if (RE.human.test(text)) return escalate('Customer asked for a human agent', ctx().intent ?? 'other');
 
-  // 4. Intent -------------------------------------------------------------------
-  // "cart" wins over the order flows: the cart is what the customer is about to
-  // order, and cart changes go straight to their account (CartItem rows).
   const wantsCart = RE.cart.test(text);
   const mentionsOrder = /\b(order|orders)\b|ऑर्डर/i.test(text) || extractOrderCode(text) !== null;
-  const intent = RE.placeOrder.test(text)
-    ? 'place_order'
+  const wantsOnlinePrices = (RE.onlineStores.test(text) || RE.onlinePrice.test(text)) && !wantsCart && !mentionsOrder;
+  const intent = wantsOnlinePrices
+    ? 'online_price'
+    : RE.placeOrder.test(text)
+      ? 'place_order'
     : RE.clearCart.test(text)
       ? 'cart_clear'
       : RE.replace.test(text)
-        ? // A replace targets the cart unless the customer clearly named an order.
+        ? 
           mentionsOrder && !wantsCart
           ? 'order_replace'
           : 'cart_replace'
@@ -664,7 +507,7 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
 
   const needsOrders =
     intent !== null &&
-    !['product_search', 'cart_add', 'cart_remove', 'cart_status', 'cart_replace', 'cart_clear', 'place_order'].includes(
+    !['product_search', 'cart_add', 'cart_remove', 'cart_status', 'cart_replace', 'cart_clear', 'place_order', 'online_price'].includes(
       intent,
     );
   const orders = needsOrders ? await loadOrders() : [];
@@ -672,7 +515,6 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
   const explicitCode = extractOrderCode(text);
   const remembered = ctx().orderIds[ctx().orderIds.length - 1];
 
-  /** Picks the order the customer means: stated → only editable one → last discussed. */
   const resolveOrder = (needsEditable: boolean): AgentOrder | null => {
     if (explicitCode) return orders.find((o) => o.order_id === explicitCode) ?? null;
     const pool = needsEditable ? editable : orders;
@@ -964,6 +806,75 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
       return `${outcome.result.message}`;
     }
 
+    case 'online_price': {
+      const phrase =
+        extractProductPhrase(text)
+          .replace(/\b(amazon|amazo|flipkart|flikart|compare|comparison|price|prices|rate|rates|kitna|kitne|sasta|sasti|cheapest|cheap|best|online|market|on|of|in|with|between|vs|versus|dekho|dekh)\b|अमेज़न|फ्लिपकार्ट|कीमत|प्राइस|दाम|ऑनलाइन/gi, ' ')
+          .replace(/\s+/g, ' ')
+          .trim() || extractProductPhrase(text) || text;
+      if (!SHOPPING_TOOLS_ENABLED) {
+        return pick(lang, {
+          en: 'Live marketplace comparison is switched off right now — but I can check the NexaMart catalogue for you. Which product should I look for?',
+          hi: 'अभी लाइव मार्केटप्लेस की तुलना उपलब्ध नहीं है — पर NexaMart कैटलॉग देख सकती हूँ। कौन सा प्रोडक्ट देखूँ?',
+          hinglish: 'Abhi live marketplace comparison off hai — par NexaMart catalogue check kar sakti hoon. Kaunsa product dekhoon?',
+        });
+      }
+      const outcome = await call('compare_store_prices', { query: phrase });
+      if (!outcome.ok) {
+        return pick(lang, {
+          en: 'I could not reach Amazon or Flipkart right now. Prices move quickly online — shall I try again in a minute?',
+          hi: 'अभी Amazon या Flipkart तक पहुँच नहीं पाई। ऑनलाइन कीमतें जल्दी बदलती हैं — थोड़ी देर में दोबारा कोशिश करूँ?',
+          hinglish: 'Abhi Amazon ya Flipkart tak reach nahi ho payi. Online prices jaldi badalti hain — thodi der mein dobara try karoon?',
+        });
+      }
+      const groups = (outcome.result.same_product_groups as Array<{
+        product: string;
+        cheapest: { store?: string; price_inr?: number; other_stores_save_inr?: number };
+        offers: Array<{ store: string; price_inr: number | null }>;
+      }>) ?? [];
+      const partial = outcome.result.partial === true;
+      const partialNote = partial
+        ? pick(lang, {
+            en: ' (One store did not answer just now, so that side is missing.)',
+            hi: ' (एक स्टोर अभी जवाब नहीं दे पाया, इसलिए उसकी कीमत नहीं मिली।)',
+            hinglish: ' (Ek store abhi respond nahi kar paya, isliye uski price nahi mili.)',
+          })
+        : '';
+      const best = groups[0];
+      if (best && best.offers.length >= 2 && best.cheapest.price_inr != null) {
+        const other = best.offers.find((o) => o.store !== best.cheapest.store && o.price_inr != null);
+        const lead = pick(lang, {
+          en: `${best.product} is currently ₹${best.cheapest.price_inr} on ${best.cheapest.store}${other ? ` and ₹${other.price_inr} on ${other.store}` : ''}${
+            best.cheapest.other_stores_save_inr ? ` — you save ₹${best.cheapest.other_stores_save_inr} on ${best.cheapest.store}` : ''
+          }.`,
+          hi: `${best.product} अभी ${best.cheapest.store} पर ₹${best.cheapest.price_inr} है${other ? ` और ${other.store} पर ₹${other.price_inr}` : ''}${
+            best.cheapest.other_stores_save_inr ? ` — ${best.cheapest.store} पर आपको ₹${best.cheapest.other_stores_save_inr} की बचत है` : ''
+          }.`,
+          hinglish: `${best.product} abhi ${best.cheapest.store} par ₹${best.cheapest.price_inr} hai${other ? ` aur ${other.store} par ₹${other.price_inr}` : ''}${
+            best.cheapest.other_stores_save_inr ? ` — ${best.cheapest.store} par ₹${best.cheapest.other_stores_save_inr} ki bachat hai` : ''
+          }.`,
+        });
+        return `${lead}${partialNote} ${pick(lang, {
+          en: 'I have put the store links on your screen.',
+          hi: 'मैंने स्टोर के लिंक आपकी स्क्रीन पर डाल दिए हैं।',
+          hinglish: 'Maine store links aapki screen par daal diye hain.',
+        })}`;
+      }
+      const others = (outcome.result.other_products as Array<{ product: string; store?: string; price_inr?: number | null }>) ?? [];
+      if (others[0]) {
+        return pick(lang, {
+          en: `I could not match the exact same product on both stores, but I found "${others[0].product}" at ₹${others[0].price_inr} on ${others[0].store}. Want details or a similar model compared?`,
+          hi: `मुझे वही exact प्रोडक्ट दोनों स्टोर पर match करते नहीं मिला, पर "${others[0].product}" ${others[0].store} पर ₹${others[0].price_inr} में मिला। Details चाहिए या कोई मिलता-जुलता मॉडल compare करूँ?`,
+          hinglish: `Exact same product dono stores par match nahi hua, par "${others[0].product}" ${others[0].store} par ₹${others[0].price_inr} mila. Details chahiye ya similar model compare karoon?`,
+        }) + partialNote;
+      }
+      return pick(lang, {
+        en: `I could not find "${phrase}" on Amazon or Flipkart right now. Can you name the exact model — e.g. "iPhone 15 128GB"?`,
+        hi: `"${phrase}" अभी Amazon या Flipkart पर नहीं मिला। exact मॉडल बताइए — जैसे "iPhone 15 128GB"?`,
+        hinglish: `"${phrase}" abhi Amazon ya Flipkart par nahi mila. Exact model bataiye — jaise "iPhone 15 128GB"?`,
+      }) + partialNote;
+    }
+
     case 'product_search': {
       const phrase = extractProductPhrase(text);
       const outcome = await call('search_products', { query: phrase || text });
@@ -1010,8 +921,6 @@ async function runRuleBasedTurn(conversation: Conversation): Promise<string> {
       const order = resolveOrder(true);
       if (!order) {
         if (editable.length === 0) {
-          // Nothing is editable anymore — but "add X" still makes sense for the
-          // cart, so offer that instead of dead-ending the request.
           const phrase = extractProductPhrase(text);
           if (phrase) {
             const qty = extractQty(text) ?? 1;

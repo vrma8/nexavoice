@@ -1,381 +1,805 @@
-# NexaVoice — Multilingual AI Support for NexaMart (Agora Conversational AI)
+# NexaVoice
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org/)
+[![Next.js](https://img.shields.io/badge/Next.js-16-black)](https://nextjs.org/)
+[![pnpm](https://img.shields.io/badge/pnpm-10-orange)](https://pnpm.io/)
+[![Agora](https://img.shields.io/badge/Agora-Conversational%20AI-blue)](https://www.agora.io/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-Prisma%207-336791)](https://www.postgresql.org/)
 
-NexaVoice is **NexaMart**, a small Indian online shop with AI-first customer support. A customer signs in, shops a 60-product catalogue priced in rupees, places an order and watches it move **placed → on the way → delivered**. While an order is still *placed* its items can be changed — by the customer on the page, or by the AI agent when they ask.
+> **NexaVoice** is an AI-first customer-support platform for the NexaMart demo store, built around a shared AI support agent that works over **text chat and real-time voice** and can hand conversations to a human support agent without losing context.
 
-Support is one click away from the shopping page: **chat** or a **voice call** (Agora Conversational AI Engine — STT → LLM → TTS in Agora Cloud), in **Hindi, English or Hinglish**. The agent reads the customer's real orders from PostgreSQL and — only with explicit confirmation — changes them, and it escalates to a **human agent dashboard** that shows only live calls and chats and receives a handoff summary with the customer's profile, orders and what was already said. For voice, the human joins the *same* Agora channel and the AI hands over and leaves.
+The project combines **Next.js 16, React 19, Agora Conversational AI, Agora RTC/RTM, OpenAI, Deepgram, MiniMax TTS, Prisma 7 and PostgreSQL** into one customer-support workflow.
 
-Built on the Agora Next.js quickstart (voice visualizer via [Agent UIKit](https://agoraio-conversational-ai.github.io/agent-uikit/), transcripts + `AGENT_METRICS` via [Agent Toolkit](https://github.com/AgoraIO-Conversational-AI/agent-client-toolkit-ts)). Product spec: [`Nexavoice Docs/v1.md`](./Nexavoice%20Docs/v1.md).
+---
 
-## Routes
+## What makes NexaVoice different
 
-| Route                        | Who      | What                                                                                     |
-| ---------------------------- | -------- | ---------------------------------------------------------------------------------------- |
-| `/`                          | —        | Landing: customer vs. support agent                                                      |
-| `/login`                     | Both     | Sign in as a customer (name + mobile, optional address) or as a support agent            |
-| `/client`                    | Customer | **Shopping page**: catalogue, cart, orders with live status, and a dock to chat or call the agent |
-| `/support-agent`             | Human    | Live dashboard: ongoing calls/chats, escalation queue, handoff summary + customer details  |
-| `/support-agent/cases/[id]`  | Human    | Case workspace: transcript, join the customer's call (AI leaves), chat reply, resolve      |
+NexaVoice is designed as a **customer-service agent, not just a chat UI**. The same support model, tool layer, conversation state and escalation workflow are shared between chat and voice.
 
-Everything the app shows lives in **PostgreSQL**: clients, the fixed 60-product catalogue ([`lib/shop/catalog-data.ts`](lib/shop/catalog-data.ts) → `Product` rows), carts, orders and the support store. Sign-in creates or matches a client by mobile number; the login page offers three ready-made demo customers (Rahul Sharma 9876543210 · Delhi, Priya Nair 9123456780 · Bengaluru, Amit Verma 9988776655 · Lucknow) and any new customer shops the same catalogue.
+### Core capabilities
 
-## Prerequisites
+- **Text + voice support from the same customer experience**
+  - Chat mode uses the shared Nexa support logic and tool layer.
+  - Voice mode uses **Agora Conversational AI Engine** over Agora RTC/RTM.
+  - Customers can move from AI support to human support without restarting the case.
 
-- [Node.js 22+](https://nodejs.org/en/download/)
-- [pnpm](https://pnpm.io/installation)
-- [Agora CLI](https://github.com/AgoraIO-Community/cli)
-- **PostgreSQL** — any instance (Neon, Supabase, Vercel Postgres, local). No database handy? `pnpm dev:db` starts a real PostgreSQL in WASM (PGlite) on `127.0.0.1:5433` with nothing to install.
+- **Intent-aware support workflow**
+  - Conversation state stores the active `intent`, language, order references, confidence, collected information and missing information.
+  - Escalation captures an intent such as `order_edit`, `cancellation`, `delivery_delay`, `payment_issue`, `complaint`, or `other`.
+  - Handoff data is preserved so the human can continue with the existing context.
 
-## Run It
+- **Context-rich human handoff**
+  - The handoff summary can contain client identity/profile, intent, issue summary, collected information, actions already taken, escalation reason, confidence, missing information, live order information and a transcript excerpt.
+  - This is designed to prevent the customer from having to repeat the full issue to the human agent.
 
-Getting started is quick and easy: install the CLI _(skip if you already have it)_ , scaffold the Next.js quickstart using the Agora CLI, install dependencies, and run.
+- **Real human takeover for voice**
+  - A human agent accepts the case and receives a token for the **same Agora channel**.
+  - The AI speaks a handover announcement, waits briefly for the announcement to play, then stops.
+  - The conversation transitions to `HUMAN_HANDLING` while the customer and human remain on the voice session.
 
-1. **Install the Agora CLI and sign in**
-   _(skip if `agora` is already on your PATH)_:
+- **Critical-topic guardrails (voice and chat)**
+  - Medical: the agent never recommends which medicine to take, compares medicines or suggests dosages — it refuses and directs the customer to a doctor; emergencies are pointed at 112/108 (India). Buying a specifically named medicine stays allowed.
+  - Self-harm or abuse: the agent stays calm, shares India's emergency numbers (112, Tele-MANAS 14416) and escalates to a human immediately with intent `safety`.
+  - Money: the agent never asks for card numbers, CVVs, OTPs, UPI PINs or passwords, and never promises refunds or timelines — fraud/dispute cases escalate with `payment_issue`.
+  - Safety and medical escalations are automatically flagged HIGH priority in the human queue (`isCriticalHandoff` in `lib/support/store.ts`).
 
-   macOS and Linux:
+- **Server-side action guardrails**
+  - Read-only actions can inspect customer, cart and order state.
+  - Mutating actions require `confirmed: true`.
+  - The shared backend tool layer enforces the confirmation rule independently of the LLM prompt.
+  - Order changes and cancellation are only allowed while an order is `PLACED`.
+  - The model does not choose an arbitrary customer ID; tool execution is scoped to the signed-in customer attached to the conversation.
+  - Tool calls are recorded in an audit trail.
 
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/AgoraIO/cli/main/install.sh | sh -s -- --add-to-path
-   ```
+- **Multilingual conversational support**
+  - Customer support is designed for **English, Hindi and Hinglish**.
+  - Voice turn detection supports Indian locales and Deepgram multilingual transcription.
+  - The customer's language choice can be stored on the account.
 
-   Windows PowerShell:
+- **Live voice telemetry**
+  - Agora RTM delivers transcript updates, agent state and `AGENT_METRICS` events to the browser.
+  - The client uses the Agora Agent Client Toolkit for transcript, state and metrics, with a purpose-built call dialog (orb, transcript, mute/unmute, human escalation).
+  - RTC/RTM failures are surfaced through connection diagnostics.
 
-   ```powershell
-   irm https://dl.agora.io/cli/install.ps1 | iex
-   ```
+- **Deployment-aware backend state**
+  - Conversation/case state is backend-owned.
+  - With `DATABASE_URL`, the support store is mirrored into PostgreSQL as a durable JSONB document so serverless instances can share conversations and cases.
+  - Heartbeats and stale-session cleanup prevent abandoned sessions from remaining live on the dashboard.
 
-   If the Windows install command fails in PowerShell, try running the macOS/Linux command from [Git Bash](https://git-scm.com/downloads/win), then open a new terminal and run `agora --help` to confirm the CLI is on your PATH.
+- **Operational diagnostics**
+  - `/api/health` performs an Agora Conversational AI control-plane self-check.
+  - `pnpm doctor` validates environment/configuration.
+  - Voice startup failures include actionable error hints.
 
-   Then verify and sign in:
-
-   ```bash
-   agora --help
-   agora login
-   ```
-
-   If `agora --help` is not found after install, close and reopen your terminal, then try again. If it still fails, check that the installer-added Agora CLI location is on your shell `PATH`.
-
-2. **Scaffold and run**
-   `agora init` clones the starter, binds an Agora project, and writes `.env.local`. (replace `my-nextjs-demo` with your own project name):
-
-   ```bash
-   agora init my-nextjs-demo --template nextjs
-   cd my-nextjs-demo
-   pnpm install
-   pnpm dev
-   ```
-
-3. **Create the schema and load the catalogue**, then open the app:
-
-   ```bash
-   pnpm dev:db          # optional: zero-install PostgreSQL on 127.0.0.1:5433 (leave running)
-   # DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5433/postgres  → .env.local
-   pnpm db:push         # create the tables (pnpm db:reset drops and recreates them)
-   pnpm seed            # insert the 50 NexaMart products
-   pnpm dev
-   ```
-
-4. Open [http://localhost:3000](http://localhost:3000), sign in as a customer, add a couple of products to the cart and place an order. Then use **Chat with support** / **Call support** on the same page and ask the agent to add or remove an item while the order is still *Placed*.
-
-If the agent does not join or transcripts do not appear, run **`agora project doctor --deep`** to check credentials, feature enablement, network reachability, and local env binding.
-
-### Working from a clone of this repository
-
-Use this path if you already cloned **this** repo (for example to contribute or fork):
-
-```bash
-git clone https://github.com/AgoraIO-Conversational-AI/agent-quickstart-nextjs.git
-cd agent-quickstart-nextjs
-agora login
-agora project use <your-project>
-pnpm install
-agora project env write .env.local
-agora project doctor --deep
-pnpm dev
-```
-
-### Deploy to Vercel
-
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FAgoraIO-Conversational-AI%2Fagent-quickstart-nextjs&project-name=agent-quickstart-nextjs&repository-name=agent-quickstart-nextjs&env=NEXT_PUBLIC_AGORA_APP_ID,NEXT_AGORA_APP_CERTIFICATE&envDescription=Agora%20credentials%20needed%20to%20run%20the%20app&envLink=https%3A%2F%2Fgithub.com%2FAgoraIO-Conversational-AI%2Fagent-quickstart-nextjs%23run-it&demo-title=Agora%20Conversational%20AI%20Next.js%20Quickstart&demo-description=Official%20Next.js%20quickstart%20for%20building%20browser-based%20voice%20AI%20with%20Agora&demo-image=https%3A%2F%2Fraw.githubusercontent.com%2FAgoraIO-Conversational-AI%2Fagent-quickstart-nextjs%2Fmain%2F.github%2Fassets%2FConversation-Ai-Client.gif)
-
-To populate Vercel env vars from your bound Agora project:
-
-```bash
-agora project use <your-project>
-agora project env write .env.local
-rg "^(NEXT_PUBLIC_AGORA_APP_ID|NEXT_AGORA_APP_CERTIFICATE)=" .env.local
-```
-
-Copy those two values into Vercel Project Settings → Environment Variables:
-
-| Variable | Type | Environments |
-| --- | --- | --- |
-| `NEXT_PUBLIC_AGORA_APP_ID` | **Config** | Production + Preview |
-| `NEXT_AGORA_APP_CERTIFICATE` | **Secret** | Production + Preview |
-
-Then **redeploy** — Vercel applies environment-variable changes to new deployments only,
-and a `NEXT_PUBLIC_*` value is frozen into the browser bundle during the build. A variable
-added after the last deploy is therefore readable by the API routes and `undefined` in the
-browser, which is exactly the "call never connects, with no error" case. (Type matters too:
-`NEXT_PUBLIC_*` values ship to the client regardless of their type, so never put a secret
-behind that prefix — the certificate is read server-side only.)
-
-The app no longer hard-depends on the inlined value: the client also accepts the App ID
-returned by `GET /api/generate-agora-token`, which the server reads at runtime. Keep the
-variable anyway so both sources agree.
-
-### Two things a Vercel deployment needs that local dev does not
-
-1. **A PostgreSQL database (`DATABASE_URL`).** Clients, products, carts and orders
-   are rows; the live conversation/case store is mirrored into one JSONB row.
-   Vercel runs every route as an independent function instance, so without a
-   database a conversation created by `POST /api/conversations` is invisible to
-   the next request — the chat answers "Conversation not found" and the dashboard
-   stays empty — and the shopping page cannot work at all (`/api/shop/*` answers
-   503). **Project → Storage → Create Database → Postgres**, then run
-   `pnpm db:push && pnpm seed` against that URL once.
-2. **An outbound URL the Agora engine can call back into** for voice tools. This
-   is taken from the origin the invite request arrived on, so a Vercel URL or a
-   tunnel needs no configuration, and the shared secret is derived from the App
-   Certificate when `AGENT_TOOLS_SECRET` is unset.
-
-Then check `https://<your-deployment>/api/health` (safe to open in a browser — it
-reports booleans and a masked App ID, never a secret). It says whether the Agora
-credentials loaded and *which env names provided them* (`agora.credentialSources`,
-including any inert CLI variables that are set), whether the client bundle was built
-with the App ID (`agora.publicAppIdInlined`), whether voice tools are wired up, which
-LLM the agent is using, whether state is shared across instances (`store.backend`),
-and — under `database` — whether PostgreSQL is actually reachable, with the live
-product/client counts, the latency and, on failure, the exact error plus a hint
-(pause restored? `pnpm db:push`? wrong region?). `status` is `degraded` when the
-database probe fails, because every cart/order tool fails with it.
-Unless you pass `?deep=0`, it also performs one read-only live round trip to the
-Conversational AI control plane and reports it under `agora.convoai` — `ok: true` with
-latency and live agent counts is definitive proof the deployment is connected to Agora;
-a `401/403` points at the certificate or the Conversational AI feature, `429` at quota,
-and a network error at the gateway area:
-
-```bash
-curl -s https://<your-deployment>/api/health | jq '{status, agora, tools: .agent.tools, store, database}'
-```
-
-### Environment variables
-
-Defined in [`env.local.example`](env.local.example).
-
-| Variable                     | Required | Notes                                                                                                                                                                   |
-| ---------------------------- | :------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NEXT_PUBLIC_AGORA_APP_ID`   |    ✅    | Agora Console → Project → App ID. Type **Config**, targeted at **Production + Preview**, then **redeploy** — a `NEXT_PUBLIC_*` value is inlined at build time, so an existing deployment keeps the old one. Alias: `AGORA_APP_ID` (server-side only — the browser then gets the App ID at runtime from `/api/generate-agora-token`). |
-| `NEXT_AGORA_APP_CERTIFICATE` |    ✅    | Agora Console → Project → App Certificate. **Server-side only.** Alias: `AGORA_APP_CERTIFICATE`.                                                                         |
-| `DATABASE_URL`               |    ✅    | PostgreSQL connection string. Holds clients, the 60-product catalogue, carts, orders and the mirrored support store. Without it the shopping page is disabled and conversation state is per-instance (fine for a quick look, broken on Vercel). |
-| `NEXAVOICE_STORE`            |    –     | `memory` \| `postgres`. Auto-detected: `postgres` when `DATABASE_URL` exists, otherwise `memory`. |
-| `NEXAVOICE_STATE_KEY`        |    –     | Row id of the mirrored support store (default `nexavoice`); override to isolate a test store. |
-| `ORDER_PLACED_SECONDS`       |    –     | How long a new order stays **Placed** — and therefore editable — before it goes out for delivery (default `120`). |
-| `ORDER_TRANSIT_SECONDS`      |    –     | How long an order stays **On the way** before it is **Delivered** (default `180`). |
-| `AGENT_TOOLS_BASE_URL`       |    –     | Override the public **https** URL the Agora engine calls back into (`${URL}/api/agent-tools/*`). Defaults to the request origin, then `VERCEL_URL`. |
-| `AGENT_TOOLS_SECRET`         |    –     | Shared secret (≥ 8 chars) the engine sends as `x-nexavoice-tool-token`. Unset → derived from the App Certificate, so tools still work on a fresh deployment. |
-| `AGORA_AREA`                 |    –     | Agora REST gateway region: `US` (default), `EU`, `AP` or `CN`. Must match the project's service area (India and other Asia-Pacific projects use `AP`) or the agent starts slowly or not at all. An unrecognised value logs a warning and falls back to `US`. |
-| `AGORA_REGION`               |    –     | Fallback for `AGORA_AREA`, using the name the Agora CLI writes: `US`/`EU`/`AP`/`CN` map directly, `global` routes through the US gateway. Takes effect only when `AGORA_AREA` is unset. |
-| `AGENT_LANGUAGE`             |    –     | Turn-detection / interaction locale: `en-IN` (default), `hi-IN`, `bn-IN`, `ta-IN`, `te-IN`, `gu-IN`, `kn-IN`, `en-US`.                                                   |
-| `AGENT_STT_LANGUAGE`         |    –     | Deepgram language, default `multi` (Hindi/English code-switching).                                                                                                      |
-| `AGENT_TTS_VOICE_ID`         |    –     | MiniMax voice id, default `English_captivating_female1`.                                                                                                                |
-| `NEXT_LLM_URL` / `NEXT_LLM_API_KEY` | – | OpenAI-compatible LLM. Enables the LLM chat agent and routes the voice agent through `/api/chat/completions` (custom LLM with server-side tools). Without them the chat uses a built-in rule-based agent and the voice agent uses Agora-managed OpenAI. |
-| `NEXT_LLM_MODEL`             |    –     | Model for the BYOK LLM (default `gpt-4o-mini`).                                                                                                                         |
-
-Not read by this app (Agora CLI / template metadata — setting them changes nothing here):
-`AGORA_PROJECT_ID`, `AGORA_PROJECT_NAME`, `AGORA_ENABLED_FEATURES`, `AGORA_FEATURE_RTC`,
-`AGORA_FEATURE_RTM`, `AGORA_FEATURE_CONVOAI`. Enabling Conversational AI is a console
-action, not an env var (`agora project doctor --deep` verifies it). `/api/health` lists
-any of these it finds set under `agora.credentialSources.inertVarsSet`, next to the names
-that actually provided the working credentials.
-
-The agent pipeline in [`lib/agent-config.ts`](lib/agent-config.ts) uses Agora-managed Deepgram STT, OpenAI LLM and MiniMax TTS, so no vendor keys are required. The Conversational AI feature and Agora-managed vendors must be enabled on the Agora project (`agora project doctor --deep`). Without `NEXT_LLM_*`, chat is answered by the deterministic rule-based agent in [`lib/chat-agent.ts`](lib/chat-agent.ts) — it covers the shopping flows (cart add/remove/status, order status → add/remove item → cancel → address → escalation, plus explicit language switches) with fixed copy, so free-form questions get a "what can I do" reply rather than an LLM answer.
-
-### The catalogue and the demo data
-
-The shop is deliberately fixed: **60 products** (electronics, kitchen, grocery,
-fashion, beauty, home, sports, stationery, medicine), all priced in rupees, defined
-once in [`lib/shop/catalog-data.ts`](lib/shop/catalog-data.ts) and written to the
-`Product` table by `pnpm seed`. Every customer — the three demo ones and anybody who
-signs up — shops from exactly that list, so an agent tool call can always be matched
-to a real product. The 10 medicine products carry a short caution note that is
-displayed on their card.
-
-`pnpm seed` is idempotent (products are upserted by SKU) and safe to re-run after a
-deploy; it never touches customers, carts or orders. There are no demo orders: the
-dashboard fills up when someone actually shops and asks for help, which is also the
-only thing it is allowed to show (see below).
-
-### Troubleshooting a deployment
-
-| Symptom | Cause | Fix |
-| --- | --- | --- |
-| Voice call starts, then nothing; "The AI agent could not join this call" | `invite-agent` error, now surfaced in the banner | Read the message + `/api/health`; run `agora project doctor --deep` |
-| Agent never speaks but an `agent_id` came back | Conversational AI not enabled for the App ID | Agora Console → project → All features → **Conversational AI** |
-| Call never connects, no error at all | App ID missing from the client bundle (var added or changed after the last build, or targeted only at Development) | Redeploy with `NEXT_PUBLIC_AGORA_APP_ID` targeted at Production/Preview — or rely on the `appId` the token route now serves |
-| "Agora doesn't seem connected", but CLI vars (`AGORA_PROJECT_ID`, `AGORA_FEATURE_*`, …) are set in Vercel | Those are CLI/template metadata this app never reads | Set the two names from the table above; check `agora.credentialSources` in `/api/health` to see which names are actually in effect |
-| `/api/health` shows `agora.convoai.ok: false` | Live control-plane check failed — the error + hint say which leg (auth / feature / quota / gateway area) | Follow the `hint`; typically fix the certificate, enable Conversational AI, or set `AGORA_AREA` |
-| Chat says "Conversation not found" / forgets the customer between turns | No `DATABASE_URL`, so state is per-instance | Add a PostgreSQL database and `pnpm db:push` |
-| Shopping page says the shop is unavailable | `DATABASE_URL` missing, or the tables/catalogue were never created | `pnpm db:push && pnpm seed` |
-| Agent says an order cannot be changed | It is no longer **Placed** — items are frozen once it is on the way | Expected; raise `ORDER_PLACED_SECONDS` for a longer window |
-| Agent talks but never looks up orders | Engine cannot reach `/api/agent-tools/*` | Check `agent.tools` in `/api/health`; needs a public https URL (Vercel URL, ngrok, cloudflared). The call shows an amber banner and the agent switches to an honest, tool-free prompt |
-| Agent invents products or quotes wrong prices | Tools disabled (see above) or the order database is down | Tools return `DATABASE_UNAVAILABLE` in that case; check `database` in `/api/health` |
-| Chat answers look canned | `NEXT_LLM_*` not set → rule-based agent | Set `NEXT_LLM_URL` / `NEXT_LLM_API_KEY` |
-| Dashboard shows nothing while a call is live | State not shared (see above) | Add `DATABASE_URL`; SSE is best-effort — the 3s poll reads the mirror |
-| A conversation lingers on the dashboard after the customer left | Nothing — the sweep closes it ~30s after the last heartbeat | Wait for it to disappear, or check the browser tab is really closed |
-| `ERR_PNPM_OUTDATED_LOCKFILE` during Vercel build | `package.json` was updated but the lockfile wasn't | Run `pnpm install` locally to synchronize `pnpm-lock.yaml` and push the changes |
-
-## Commands
-
-```bash
-# Dev
-pnpm dev                # start the Next.js dev server
-pnpm dev:db             # zero-install PostgreSQL (PGlite) on 127.0.0.1:5433
-pnpm db:push            # create/update the tables from prisma/schema.prisma
-pnpm db:reset           # drop and recreate the schema (development only)
-pnpm seed               # insert the 50 NexaMart products (.env.local is loaded)
-pnpm db:studio          # browse the data
-
-# Quality
-pnpm run lint           # eslint
-pnpm run typecheck      # tsc --noEmit
-pnpm run doctor         # local prereqs + env binding
-
-# CI / pre-ship
-pnpm run verify:api     # API contract checks
-pnpm run build          # production build
-pnpm run verify         # doctor + lint + typecheck + verify:api + build
-
-# End-to-end against a running dev server + database
-pnpm run test:voice-tools    # the exact REST calls the Agora engine makes in a
-                             # call: context, search, cart, place order, edit a
-                             # PLACED order, escalate + handoff summary
-pnpm run test:db-unavailable # proves tools return DATABASE_UNAVAILABLE (never a
-                             # generic failure the LLM improvises around) when
-                             # PostgreSQL is unreachable
-```
-
-Run `pnpm run verify` before shipping changes — it covers local prerequisites, lint, type safety, the core API route contracts, and the production build.
+---
 
 ## Architecture
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./system-architecture-dark.svg">
-  <img src="./system-architecture.svg" alt="System architecture">
-</picture>
-
-The browser fetches a combined RTC + RTM token (`buildTokenWithRtm`) from this app, joins the channel using a single RTC client, and uses RTM as the data channel for transcript, agent state, metrics, and error events. The Conversational AI Engine joins the same channel as the shared agent UID in [`lib/agora.ts`](lib/agora.ts) and runs the STT → LLM → TTS pipeline in Agora Cloud.
-
-## What You Get
-
-- browser voice client (Next.js App Router) with RTC audio plus RTM transcript/state events
-- Agora Conversational AI agent tuned as **Nexa**, a NexaMart shopping-support assistant (Hindi/English/Hinglish)
-- a **shopping page**: 60-product catalogue in rupees, cart, checkout, and orders that move `placed → on the way → delivered` on their own
-- **controlled backend actions**: read the signed-in customer's orders → add / remove items, change the address, cancel — only after they confirm, only while the order is still *placed*, all rules enforced server-side and audited
-- text chat sharing the same tools, conversation state and escalation path
-- **medical safety**: Nexa never gives medical advice or recommends/sells medical products — the first request is refused, and a second request auto-escalates to a human with a handoff summary naming the reason (`lib/support/medical-guard.ts`)
-- **human agent dashboard** (SSE + polling) showing only conversations that are still live, an escalation queue, and a handoff summary carrying the customer's profile, their orders and the tail of the transcript
-- voice takeover: the human joins the same channel as uid `654321`; the AI announces the handover and leaves
-- **full call transcript**: the customer + AI turns are mirrored from the toolkit, and after handover both sides caption their own microphone (Web Speech) so the case shows what the customer AND the human said
-- **two-sided ending**: if the customer ends, the human side ends too (case flagged `customerLeftAt`); if the human resolves/leaves, the customer's call/chat ends as well (`endedBy: 'human'`)
-- [`AgentVisualizer`](https://agoraio-conversational-ai.github.io/agent-uikit/), per-stage latency via `AGENT_METRICS`, labelled **Mute/Unmute** mic control in the call UI
-
-## How It Works
-
-### Voice (Agora Conversational AI Engine)
-
-1. **Call support** on `/client` opens the agent dock, which requests an RTC + RTM token from `/api/generate-agora-token`.
-2. `/api/invite-agent` registers a `VOICE` conversation and starts the agent (`agora-agents` SDK → `POST /v2/projects/{appid}/join`): Deepgram `nova-3` (`multi`), OpenAI `gpt-4o-mini` with the NexaMart system prompt, MiniMax TTS, `turn_detection.language` from `AGENT_LANGUAGE`, `enable_rtm` + `enable_tools`, and **inline REST tools** pointing at `/api/agent-tools/<tool>?conversation_id=…` (authenticated with `AGENT_TOOLS_SECRET` via template variables).
-3. The browser joins the channel, publishes mic audio and receives transcript / state / metrics over RTM. It mirrors completed turns and agent state to `PATCH /api/conversations/:id` so the dashboard sees the call live.
-4. When the LLM calls a tool, the engine POSTs to this backend; [`lib/support/tools.ts`](lib/support/tools.ts) enforces the guardrails (only the signed-in customer's data, `confirmed: true` for every write, nothing at all after handoff) and [`lib/shop/service.ts`](lib/shop/service.ts) enforces the business rules against PostgreSQL (items and address editable only while the order is *placed*, never empty an order, cancel only before dispatch). The system prompt is intent-first — detect what the customer wants, resolve it with tools, escalate only what tools cannot do — and every tool call records that intent on the conversation so the handoff names it even if the model forgets. A database outage surfaces to the model as `DATABASE_UNAVAILABLE` with an explicit never-invent instruction, and a session without tools gets a degraded, honest prompt instead of the full one.
-5. `escalate_to_human` (the AI tool — there is no customer-facing "connect to human" button; the customer just asks) creates a case with the handoff summary; repeated medical requests escalate automatically from the tool layer. The dashboard is notified over SSE.
-6. A human accepts the case, gets a token for the **same channel** (`/api/cases/:id/accept`) and joins; `/api/cases/:id/takeover` makes the AI say a handover line (`/agents/:id/speak`) and then stops it (`/agents/:id/leave`). Only customer and human remain, and both sides caption their own speech so the case transcript is complete.
-7. On hang-up the client calls `/api/stop-conversation` and the conversation is closed — if a human was handling it, the human side ends too (case flagged `customerLeftAt`). When the human resolves or leaves (`/api/cases/:id/resolve` or `/api/cases/:id/leave`), the customer's call/chat ends as well.
-
-If `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` are set, the engine is pointed at this app's `/api/chat/completions` (OpenAI-compatible SSE proxy) which runs the same tools server-side — use this if inline REST tools are not available on your Agora project.
-
-### Chat
-
-`POST /api/conversations` (with the signed-in `clientId`) → `POST /api/conversations/:id/messages`. With an LLM configured, [`lib/chat-agent.ts`](lib/chat-agent.ts) runs `generateText` with the same tool set; otherwise a deterministic EN/HI/Hinglish rule-based agent drives the same `executeTool` layer (cart status/add/remove, order status, add/remove item, address, cancel — each write proposed and confirmed first — language switches via `set_preferred_language`, and human request → escalation). After escalation the AI stays silent and the human replies from the case page.
-
-### State machine
-
-`AI_HANDLING → WAITING_FOR_HUMAN → HUMAN_HANDLING → RESOLVED` (or `CLOSED` when the customer leaves). State is owned by the backend store ([`lib/support/store.ts`](lib/support/store.ts), mirrored to PostgreSQL); the browser never decides it.
-
-**Liveness.** An open chat or call beats `PATCH /api/conversations/:id { heartbeat: true }` every 8 seconds and posts to `/api/conversations/:id/close` (via `sendBeacon`) on unmount, sign-out or `pagehide`. Any conversation whose last heartbeat is older than 30 seconds is swept closed the next time the dashboard is read, so `/support-agent` lists real, ongoing conversations only.
-
-### Order lifecycle
-
-`PLACED → ON_THE_WAY → DELIVERED`, plus `CANCELLED`. Transitions are computed lazily from `placedAt` on every read ([`syncOrderStatuses`](lib/shop/service.ts)), so they need no cron and behave identically on serverless. **Only while an order is `PLACED`** can its items or address change — the customer's own buttons and the agent's tools call the very same service functions, so neither can bypass the rule, and every change is appended to the order's timeline.
-
-## Optional BYOK
-
-The base `.env.local` contract contains only Agora credentials. To bring your own LLM (also used by the chat agent):
-
-```bash
-# OpenAI-compatible LLM (enables LLM chat + custom-LLM voice path with server-side tools)
-NEXT_LLM_URL=https://api.openai.com/v1/chat/completions
-NEXT_LLM_API_KEY=...
-NEXT_LLM_MODEL=gpt-4o-mini
+```text
+                          ┌──────────────────────┐
+                          │      NexaMart UI     │
+                          │  Next.js / React     │
+                          └──────────┬───────────┘
+                                     │
+                    ┌────────────────┴────────────────┐
+                    │                                 │
+                    ▼                                 ▼
+             Text / Chat                         Voice Call
+                    │                                 │
+                    ▼                                 ▼
+          Shared Nexa Agent Logic             Agora RTC + RTM
+                    │                                 │
+                    └────────────────┬────────────────┘
+                                     ▼
+                         Shared Conversation State
+                                     │
+                    ┌────────────────┼────────────────┐
+                    │                │                │
+                    ▼                ▼                ▼
+               Tool Layer      Audit / Events   Human Escalation
+                    │                                 │
+                    ▼                                 ▼
+              PostgreSQL /                  Same Agora channel
+              Prisma 7                         for takeover
 ```
 
-Other vendors (STT/TTS) can be swapped in [`lib/agent-config.ts`](lib/agent-config.ts) using the `agora-agents` vendor classes.
+### Voice pipeline
 
-## Repo Map
+```text
+Customer microphone
+      │
+      ▼
+Agora RTC
+      │
+      ▼
+Agora Conversational AI Engine
+      │
+      ├── Deepgram STT (nova-3, multilingual)
+      │
+      ├── OpenAI LLM (gpt-4o-mini by default)
+      │      │
+      │      └── Inline REST tools → NexaVoice backend
+      │
+      └── MiniMax TTS (speech_2_6_turbo)
+      │
+      ▼
+Agora RTC audio back to customer
 
-- `app/api/generate-agora-token/route.ts` — issues RTC + RTM tokens
-- `app/api/invite-agent/route.ts` — registers the VOICE conversation and starts the NexaVoice agent
-- `app/api/stop-conversation/route.ts` — stops the agent and closes the conversation
-- `app/api/agent-tools/[tool]/route.ts` — REST tool endpoint called by the Agora engine (secret-protected)
-- `app/api/chat/completions/route.ts` + `lib/chat-completions.ts` — OpenAI-compatible custom-LLM proxy with server-side tools
-- `app/api/conversations/**` — create / read / patch conversations, chat messages (AI turn)
-- `app/api/escalation/request/route.ts` — escalation endpoint (used by the AI tool layer; no customer button)
-- `app/api/cases/**` — list / detail / accept (voice token) / takeover (AI speak + leave) / resolve / leave (ends the call for both sides)
-- `app/api/dashboard/route.ts`, `app/api/dashboard/events/route.ts` — dashboard snapshot + SSE
-- `app/api/shop/**` — catalogue, cart, orders and order edits for the signed-in client (`x-nexavoice-client-id`)
-- `lib/agent-config.ts`, `lib/agent-prompt.ts`, `lib/agent-tools.ts` — agent pipeline, system prompt, tool schemas / REST tool wiring
-- `lib/agora-server.ts` — server-side Agora client (`stopAgent`, `speakAsAgent`, auth headers)
-- `lib/support/{types,store,tools,medical-guard,persist}.ts` — conversation/case model, store + events + heartbeat sweep, guarded `executeTool` + handoff summary, medical-safety guard, PostgreSQL mirror
-- `lib/shop/{catalog-data,service,http}.ts` — the 60 products, the Prisma shop service (catalogue, cart, orders, status machine) and the client-identity helper
-- `prisma/schema.prisma`, `scripts/db-push.mjs`, `scripts/seed-catalog.ts`, `scripts/dev-db.mjs` — database schema, offline `db push`, catalogue seed, zero-install PostgreSQL
-- `lib/chat-agent.ts` — chat turn (LLM or rule-based)
-- `lib/api.ts` — browser API client
-- `components/VoiceAgentCall.tsx`, `components/ConversationComponent.tsx` — customer voice call (token, RTM, RTC, transcript sync, labelled Mute/Unmute, two-sided hang-up, post-handover captions)
-- `components/ShoppingPage.tsx`, `components/AgentDock.tsx` — the shopping page (catalogue, cart, orders) and the slide-over that hosts chat or the call
-- `components/ClientChat.tsx` — customer chat
-- `components/SupportDashboard.tsx`, `components/CaseWorkspace.tsx`, `components/HumanVoiceBridge.tsx` — human dashboard, case page, voice takeover
-- `scripts/verify-api-contracts.ts` — API + tool-guardrail contract checks (`npm run verify:api`)
-- `AGENTS.md` — primary agent-facing guide
+Agora RTM → transcript + agent state + metrics → browser
+```
 
-## Troubleshooting
+---
 
-- **Agent does not join or transcripts are missing:** run `agora project doctor --deep`.
-- **`pnpm run doctor` fails:** run `agora project env write .env.local`, then retry.
-- **Manual clone / env values:** `agora project use <your-project>` then `agora project env write .env.local`.
-- **RTM login fails:** keep [`app/api/generate-agora-token/route.ts`](app/api/generate-agora-token/route.ts) on `RtcTokenBuilder.buildTokenWithRtm` — RTC-only tokens will not satisfy `rtm.login`.
-- **Transcript speakers inverted:** check the `uid === "0"` remap in [`components/ConversationComponent.tsx`](components/ConversationComponent.tsx).
-- **Agent never appears in channel:** ensure the shared agent UID in [`lib/agora.ts`](lib/agora.ts) is used by both the client and invite route.
-- **Agent talks but never looks up orders:** set `AGENT_TOOLS_BASE_URL` (public https) and `AGENT_TOOLS_SECRET`; check the server log line `[invite-agent] Backend tools disabled`. On localhost use a tunnel (ngrok/cloudflared) for `AGENT_TOOLS_BASE_URL`. Without tools the agent runs a degraded prompt that refuses to fake lookups, and the call UI shows an amber banner — never describe tools to a session that has none.
-- **`/join` rejects `llm.tools`:** your project may not have inline REST tools enabled — set `NEXT_LLM_URL`/`NEXT_LLM_API_KEY` so the engine uses `/api/chat/completions`, which runs the tools server-side.
-- **Human joins but the AI keeps talking:** `/api/cases/:id/takeover` needs the conversation's `agentId`; check the server log for `[takeover]` errors and that the Agora REST region (`AGORA_AREA`) matches your project.
+## Conversation lifecycle
 
-## More Docs
+```text
+AI_HANDLING
+    │
+    ├── customer resolved
+    │
+    └── escalation requested
+             │
+             ▼
+     WAITING_FOR_HUMAN
+             │
+             ▼
+      HUMAN_HANDLING
+             │
+        ┌────┴────┐
+        ▼         ▼
+     RESOLVED   customer leaves
+                  │
+                  ▼
+                CLOSED
+```
 
-- [docs/ai/L0_repo_card.md](./docs/ai/L0_repo_card.md)
-- [docs/ai/RECIPE.md](./docs/ai/RECIPE.md)
-- [AGENTS.md](./AGENTS.md)
+The backend also records events such as conversation creation, agent startup/shutdown, tool calls, escalation requests, case acceptance, human join/leave, resolution and closure.
 
-## Contributing
+---
 
-Pull requests welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and conventions.
+## AI agent behavior and safety boundaries
 
-## Security
+The system prompt in `lib/agent-prompt.ts` is shared by the voice and chat paths so the interfaces follow the same operational rules.
 
-Please do **not** open public issues for security reports. Email security@agora.io with details and reproduction steps.
+### Customer identity and data access
+
+The agent operates on the signed-in customer's context. The shared tool executor resolves the customer through the conversation rather than allowing the model to provide an arbitrary customer ID.
+
+### Confirmation before writes
+
+Mutating actions follow this sequence:
+
+```text
+1. Read current state
+2. Preview the exact change
+3. Tell the customer what will change
+4. Ask for explicit yes/no confirmation
+5. Execute only with confirmed=true
+6. Report the result
+```
+
+The backend tool executor also enforces `confirmed`, so prompt behavior is not the only protection.
+
+### Order lifecycle restriction
+
+Orders move through:
+
+```text
+PLACED → ON_THE_WAY → DELIVERED
+```
+
+Order items, delivery address and cancellation are only editable while the order is still `PLACED`. The shared shop/service layer enforces the rule for both UI and agent operations.
+
+While the customer is actively editing a `PLACED` order ("Change items" on the shopping page), the automatic status timer is **paused** so the order cannot move to `ON_THE_WAY` mid-edit. The pause is stored on the order (`pausedSince`), resumed when the customer finishes (with a fresh countdown), and auto-expires server-side if the "done" signal is ever lost.
+
+### NexaCash wallet
+
+Every client has a database-backed NexaCash wallet (`Client.walletBalanceInr` plus a `WalletTransaction` ledger):
+
+- New clients receive a ₹500 welcome gift; the wallet dropdown shows the live balance and ledger.
+- **Add money** tops the wallet up through `POST /api/shop/wallet`.
+- Choosing **NexaCash** at checkout deducts the order total the moment the order is placed.
+- Editing a wallet-paid order while it is `PLACED` charges or refunds the difference atomically — an edit the balance cannot cover is refused and rolled back.
+- Cancelling a wallet-paid order refunds the full amount straight back to the wallet.
+
+### Medical boundary
+
+NexaVoice deliberately does **not** act as a medical adviser. Symptom-based requests for medicines or medical recommendations are refused and redirected to a doctor. This is a safety boundary in the Nexa system prompt, not clinical decision support.
+
+> **Demo disclaimer:** NexaVoice is a customer-support demo/reference implementation. It should not be treated as a medical device or deployed with real clinical workflows without appropriate safety, privacy, compliance and medical review.
+
+---
+
+## Human escalation and handoff
+
+Escalation is a first-class support workflow rather than simply redirecting the user to a different page.
+
+### Escalation triggers
+
+The agent is instructed to escalate when the customer:
+
+- explicitly asks for a human/person/agent
+- is upset or reports fraud/legal escalation
+- experiences repeated failures
+- requests something outside the available tool capabilities
+- remains unclear after repeated clarification attempts
+
+### Handoff package
+
+The `HandoffSummary` model is designed around the information a human needs to take over immediately. It includes fields for:
+
+- client profile
+- intent
+- summary
+- information collected
+- actions taken
+- reason for escalation
+- confidence
+- missing information
+- live orders and their status
+- recent transcript turns
+
+### Voice takeover sequence
+
+```text
+Customer + AI in Agora channel
+          │
+          ▼
+Human accepts support case
+          │
+          ▼
+Human joins SAME Agora channel
+          │
+          ▼
+AI speaks handover announcement
+          │
+          ▼
+AI stops/leaves
+          │
+          ▼
+Customer + human continue
+```
+
+The implementation is in `app/api/cases/[id]/accept/route.ts` and `app/api/cases/[id]/takeover/route.ts`.
+
+---
+
+## Agora Conversational AI integration — important code locations
+
+These are the files to inspect first when evaluating the Agora implementation.
+
+### Server side
+
+| File | What it implements |
+| --- | --- |
+| [`lib/agent-config.ts`](./lib/agent-config.ts) | Creates the `agora-agents` Conversational AI agent; configures turn detection, RTM, metrics, Deepgram STT, OpenAI LLM, MiniMax TTS and inline REST tools. |
+| [`lib/agora-server.ts`](./lib/agora-server.ts) | Agora credentials/client setup plus control-plane operations such as agent stop/speak and health probing. |
+| [`lib/agent-tools.ts`](./lib/agent-tools.ts) | Builds Agora `properties.llm.tools[]` inline REST definitions, injects per-session template variables and resolves public tool access. |
+| [`app/api/invite-agent/route.ts`](./app/api/invite-agent/route.ts) | Starts the Agora agent with `agent.createSession(...).start()`, binds it to the caller's channel and registers the conversation. |
+| [`app/api/generate-agora-token/route.ts`](./app/api/generate-agora-token/route.ts) | Creates combined RTC + RTM tokens using `RtcTokenBuilder.buildTokenWithRtm`. |
+| [`app/api/agent-tools/[tool]/route.ts`](./app/api/agent-tools/%5Btool%5D/route.ts) | Receives Agora inline REST tool calls, verifies the server-side tool token and dispatches to `executeTool()`. |
+| [`app/api/cases/[id]/accept/route.ts`](./app/api/cases/%5Bid%5D/accept/route.ts) | Accepts a human case and, for voice, returns credentials for the same Agora channel. |
+| [`app/api/cases/[id]/takeover/route.ts`](./app/api/cases/%5Bid%5D/takeover/route.ts) | Speaks the handover line, stops the AI and changes the conversation to `HUMAN_HANDLING`. |
+
+### Browser side
+
+| File | What it implements |
+| --- | --- |
+| [`components/VoiceAgentCall.tsx`](./components/VoiceAgentCall.tsx) | Voice-call startup, token request, `/api/invite-agent`, RTM setup, token renewal and heartbeat lifecycle. |
+| [`components/AgoraProvider.tsx`](./components/AgoraProvider.tsx) | Agora RTC client provider for React. |
+| [`components/HumanVoiceBridge.tsx`](./components/HumanVoiceBridge.tsx) | Human support agent joining the same Agora RTC channel during takeover. |
+| [`components/ConversationComponent.tsx`](./components/ConversationComponent.tsx) | The live voice call dialog: orb + status, transcript, mute/unmute, latency pill, human escalation. |
+| [`components/HandoffBanner.tsx`](./components/HandoffBanner.tsx) | Shows the AI-to-human transition in the UI. |
+
+See [`Docs/agora-conversational-ai.md`](./Docs/agora-conversational-ai.md) for the deeper project-specific integration notes.
+
+---
+
+## Shared agent tool layer
+
+`lib/support/tools.ts` is the central action layer shared across voice and chat.
+
+The same `executeTool()` path supports:
+
+- Agora Conversational AI voice sessions through inline REST tools
+- custom-LLM/chat execution
+- rule-based fallback behavior
+
+Important tools include:
+
+```text
+get_customer_context
+search_products
+get_cart_status
+list_recent_orders
+get_order_status
+add_item_to_cart
+remove_item_from_cart
+set_cart_item_quantity
+replace_cart_item
+clear_cart
+place_order
+add_item_to_order
+remove_item_from_order
+replace_item_in_order
+cancel_order
+update_shipping_address
+set_preferred_language
+escalate_to_human
+```
+
+The key design point is that **business rules are enforced below the UI and below the LLM prompt**.
+
+---
+
+## Multi-store shopping engine (Amazon India & Flipkart)
+
+NexaVoice can check **live marketplace prices** in the middle of a conversation — "Find me the Sony WH-1000XM5 and compare prices" searches both stores, matches the offers variant-safely, and the agent speaks the cheapest option while the on-screen panel shows the links.
+
+### Environment variables
+
+```bash
+RETAIL_INTEL_PROXY=               # optional scraper proxy, e.g. http://user:pass@host:8000
+RETAIL_INTEL_PROXY_HEADER=        # e.g. "Authorization: Bearer X" — preferred over embedding secrets in the URL
+RETAIL_INTEL_TIMEOUT_MS=9000      # per-store fetch budget; the voice tool layer times out at 15 s
+RETAIL_INTEL_STORES=amazon,flipkart   # narrow the default store set (optional)
+SHOPPING_TOOLS_ENABLED=true       # "false" hides the four marketplace tools entirely
+```
+
+All of these are **server-side only** — the browser never reaches the stores and never sees a credential.
+
+### Agent tools
+
+| Tool | Purpose | When the agent uses it |
+|---|---|---|
+| `search_online_stores` | Live search on Amazon India + Flipkart | "how much is a Samsung Galaxy S24 online", "any deals on keurig?" |
+| `compare_store_prices` | Same product across stores, cheapest first | "compare X on Amazon and Flipkart", "which store is cheaper?" |
+| `get_online_product_details` | Full details of ONE product page (price, MRP, rating, specs) | "tell me more about the Flipkart one" |
+| `find_cheaper_alternatives` | (a) SAME product cheaper elsewhere, (b) cheaper different-brand alternatives — clearly separated | "is this cheaper anywhere?" |
+
+These are **read-only**. NexaMart never claims to stock marketplace items and never adds them to the cart — the comparison panel's *View Product* links open the store pages.
+
+### Architecture
+
+```text
+lib/shopping/
+  types.ts                      NormalizedProduct schema + UI payloads (one shape for every store)
+  http.ts                       fetch with timeout/retries, bot-check detection, RETAIL_INTEL_PROXY routing
+  normalize/                    Amazon/Flipkart titled prices, ratings, INR, availability → Product
+  matching/productMatcher.ts   identity extraction (brand/model/storage/RAM/size/colour/generation) + constrained scoring
+  compare.ts                    same-product grouping, cheapest-first, alternatives split (SAME vs ALTERNATIVE)
+  providers/                    one file per store (search + product page → NormalizedProduct), registry
+  service.ts                    orchestration: concurrent stores, per-store failure isolation, report types
+lib/support/shopping-tools.ts   agent-tool glue: writes conversation.context.shopping for the UI
+components/ShoppingComparisonPanel.tsx   the on-screen panel (loading → results → "You save ₹X")
+mcp-server/shopping/server.js   the same engine as a standalone stdio MCP server (5 tools)
+```
+
+**Matching safety** (the spec's hard requirement): the matcher explicitly names variants — storage (128 GB ≠ 256 GB), RAM (8 GB ≠ 12 GB), generation (AirPods Pro 1st vs 2nd gen), screen size, colour, model number (S24 ≠ S24 Ultra), bundles and quantities. `iPhone 15 128GB` and `iPhone 15 256GB` never merge into one comparison row; instead they appear as separate products with the variant spelled out.
+
+**Failure behaviour**: stores answer concurrently and each failure is typed (`STORE_BLOCKED`, `STORE_TIMEOUT`, `STORE_UNAVAILABLE`, `STORE_RATE_LIMITED`, `NO_RESULTS`). One store failing degrades the result to *partial* — the agent says which side is missing — and both failing produces an honest "I couldn't reach the stores right now," never a memorised price.
+
+### Testing (deterministic, no live network)
+
+```bash
+# 60 tests: normalization, matching (20 cases), comparison, providers (recorded
+# store pages), service failure matrix, MCP server smoke test over real stdio
+node --import tsx --test tests/shopping/*.test.ts
+```
+
+The stores' live pages are NOT hit in tests — recorded page fragments in `tests/shopping/fixtures.ts` pin the parsers, and an injected fetcher pins the failure matrix. The MCP server can be pinned the same way for demos:
+
+```bash
+RETAIL_INTEL_FIXTURE_FILE=/path/to/fixtures.json node --import tsx mcp-server/shopping/server.js
+```
+
+(The sandbox used for development blocks direct egress to amazon.in / flipkart.com — that is expected; the engine treats those failures exactly like "store unreachable" and the tests verify it.)
+
+---
+
+## Data model
+
+The Prisma schema contains the core shop and support entities:
+
+```text
+Client
+ ├── CartItem[]
+ └── Order[]
+       └── OrderItem[]
+
+Agent
+
+Product
+
+StoreState
+ └── durable JSON snapshot of support conversations/cases/events
+```
+
+See [`prisma/schema.prisma`](./prisma/schema.prisma).
+
+With `DATABASE_URL` configured, the current support store uses its synchronous in-memory representation and mirrors the support snapshot into the PostgreSQL `StoreState` row. This is the mechanism used to share support state between serverless instances.
+
+---
+
+## Tech stack
+
+| Layer | Technology |
+| --- | --- |
+| Frontend | Next.js 16 App Router, React 19, Tailwind CSS, Radix/shadcn-style UI |
+| Conversational AI | **Agora Conversational AI Engine** via `agora-agents` |
+| Voice transport | Agora RTC + RTM |
+| Voice STT | Deepgram `nova-3` |
+| LLM | OpenAI `gpt-4o-mini` by default; optional OpenAI-compatible custom endpoint |
+| TTS | MiniMax `speech_2_6_turbo` |
+| Browser voice tooling | `agora-agent-client-toolkit`, `agora-rtc-react` |
+| Backend | Next.js API routes / TypeScript |
+| Database | PostgreSQL + Prisma 7 |
+| Local database | PGlite/WASM helper via `pnpm dev:db` |
+| Package manager | pnpm 10 |
+| Deployment target | Vercel-friendly Next.js application |
+
+---
+
+## Run locally
+
+### Prerequisites
+
+- Node.js **22+** (`.nvmrc` is included)
+- pnpm **10**
+- An Agora project with App ID + App Certificate and **Conversational AI enabled**
+- PostgreSQL, or use the included PGlite database helper
+
+### 1. Clone
+
+```bash
+git clone https://github.com/vrma8/djikstra-NexaVoice.git
+cd djikstra-NexaVoice
+```
+
+### 2. Install dependencies
+
+```bash
+pnpm install
+```
+
+The repository runs `prisma generate` automatically via `postinstall`.
+
+### 3. Create `.env.local`
+
+macOS/Linux/Git Bash:
+
+```bash
+cp env.local.example .env.local
+```
+
+Windows PowerShell:
+
+```powershell
+Copy-Item env.local.example .env.local
+```
+
+At minimum for voice, set:
+
+```env
+NEXT_PUBLIC_AGORA_APP_ID=YOUR_AGORA_APP_ID
+NEXT_AGORA_APP_CERTIFICATE=YOUR_AGORA_APP_CERTIFICATE
+```
+
+For the included local database helper:
+
+```env
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5433/postgres
+```
+
+Optional agent configuration:
+
+```env
+AGENT_LANGUAGE=en-IN
+AGENT_STT_LANGUAGE=multi
+AGENT_TTS_VOICE_ID=English_captivating_female1
+```
+
+For full voice + backend-tool callbacks, a public HTTPS URL is required:
+
+```env
+AGENT_TOOLS_BASE_URL=https://your-public-deployment.example.com
+AGENT_TOOLS_SECRET=your-secret
+```
+
+The tool secret can also be derived from the Agora App Certificate when the explicit secret is omitted.
+
+### 4. Start the local database
+
+Terminal 1:
+
+```bash
+pnpm dev:db
+```
+
+This launches the included PGlite/WASM PostgreSQL-compatible server at `127.0.0.1:5433`.
+
+### 5. Create schema and seed data
+
+Terminal 2:
+
+```bash
+pnpm db:push
+pnpm seed
+```
+
+### 6. Start NexaVoice
+
+```bash
+pnpm dev
+```
+
+Open:
+
+```text
+http://localhost:3000
+```
+
+### 7. Verify
+
+Health check:
+
+```text
+http://localhost:3000/api/health
+```
+
+CLI checks:
+
+```bash
+pnpm doctor
+pnpm lint
+pnpm typecheck
+pnpm verify:api
+pnpm build
+```
+
+Or run everything:
+
+```bash
+pnpm verify
+```
+
+---
+
+## Deploy to Vercel
+
+The app is a standard Next.js 16 project and needs **no build-time environment variables**: every integration degrades gracefully and reports itself at `/api/health`. Full voice + database functionality only needs the variables below.
+
+### 1. Create the Vercel project
+
+1. Push the repo to GitHub. The committed `pnpm-lock.yaml`, `.nvmrc` (Node 24) and `packageManager` field mean Vercel's detected defaults — Next.js framework, pnpm via corepack, Node runtime — are already correct. (Node 22 also works; `engines` allows `>=22`.)
+2. On Vercel: **Add New → Project → Import** the repository. Vercel auto-detects Next.js; `vercel.json` pins `pnpm install --frozen-lockfile` and `pnpm build`, and `postinstall` runs `prisma generate` during install. Leave the build settings as they are and deploy.
+
+### 2. Provision PostgreSQL
+
+Create a PostgreSQL database — Vercel Postgres (Storage tab), Neon or Supabase all work — and copy the connection string (keep `?sslmode=require`).
+
+### 3. Set environment variables
+
+In **Vercel → Project → Settings → Environment Variables**, add these for **Production and Preview**:
+
+| Variable | Value |
+| --- | --- |
+| `NEXT_PUBLIC_AGORA_APP_ID` | Agora Console → project → App ID (exactly 32 characters) |
+| `NEXT_AGORA_APP_CERTIFICATE` | Agora Console → project → App Certificate (server-only secret) |
+| `AGORA_AREA` | `US` \| `EU` \| `AP` \| `CN` — must match the Agora project's region (India → `AP`); a mismatch makes calls fail to start |
+| `DATABASE_URL` | PostgreSQL connection string from step 2 |
+
+Optional: `AGENT_TOOLS_BASE_URL` (fixed public URL for Agora's tool callbacks — by default it is derived from each incoming request, which is usually what you want on Vercel), `AGENT_TOOLS_SECRET`, `AGENT_LANGUAGE`, `AGENT_STT_LANGUAGE`, `AGENT_TTS_VOICE_ID`, and `NEXT_LLM_URL` / `NEXT_LLM_API_KEY` / `NEXT_LLM_MODEL` for a custom LLM.
+
+> `NEXT_PUBLIC_*` values are inlined into the browser bundle at **build** time — after changing one, redeploy (Deployments → ⋯ → Redeploy). A missing inline is the #1 "server works but voice never connects" cause; `/api/health` reports `publicAppIdInlined` for exactly this reason, and a wrong-length App ID is reported as `degraded` with `agora.appIdShapeError`.
+
+### 4. Bootstrap the database (once, from your machine)
+
+```bash
+DATABASE_URL="postgres://…?sslmode=require" pnpm db:push
+DATABASE_URL="postgres://…?sslmode=require" pnpm seed
+```
+
+`db:push` creates the schema, `seed` loads the 60-product NexaMart catalogue. Without `DATABASE_URL` the deployment runs in-memory only — fine for a quick look, but state resets per serverless instance.
+
+### 5. Verify the deployment
+
+Open:
+
+```text
+https://<your-deployment>.vercel.app/api/health
+```
+
+`status: "ok"` with `agora.appIdConfigured: true` and `store.backend: "postgres"` means voice, database and tool callbacks are all wired up. The route also performs one live, read-only round trip to the Conversational AI control plane, so a wrong `AGORA_AREA` or a project without Conversational AI enabled shows up here as `degraded` — instead of as a call that never connects.
+
+Notes:
+
+- Pick the Vercel function region closest to your users (e.g. `bom1` Mumbai for India). It does not need to match `AGORA_AREA`, which selects the Agora gateway region of the project.
+- API routes declare `maxDuration` of 30–60 s, within Hobby-plan limits; the SSE stream self-closes after 5 minutes and the browser reconnects.
+
+---
+
+## Demo workflow
+
+### Customer
+
+```text
+http://localhost:3000/login?role=client
+```
+
+Use the demo login, shop normally, place an order, then open the support dock.
+
+Example requests:
+
+```text
+What is my order status?
+Add one more headphones to my order.
+Cancel my order.
+Mujhe Hindi mein baat karni hai.
+Talk to a human.
+```
+
+### Human support agent
+
+Open a second browser/session:
+
+```text
+http://localhost:3000/login?role=agent
+```
+
+The support dashboard shows active cases and the handoff context. For a voice case, accepting the case provides same-channel Agora credentials; takeover then stops the AI after the handoff line.
+
+---
+
+## Local voice limitation
+
+The browser can connect to Agora from a local development URL, but **Agora Cloud cannot reach `http://localhost` for the backend inline REST tools**.
+
+Therefore:
+
+- Local text chat can exercise backend tools directly.
+- Local voice can run as a conversational agent, but backend voice tool callbacks need a publicly reachable HTTPS URL.
+- For full voice + backend-tool functionality, use Vercel or an HTTPS tunnel such as ngrok/Cloudflare Tunnel and configure `AGENT_TOOLS_BASE_URL` when needed.
+
+---
+
+## Configuration reference
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `NEXT_PUBLIC_AGORA_APP_ID` / `AGORA_APP_ID` | Voice | Agora App ID |
+| `NEXT_AGORA_APP_CERTIFICATE` / `AGORA_APP_CERTIFICATE` | Voice | Server-side Agora App Certificate |
+| `AGORA_AREA` / `AGORA_REGION` | Optional | Conversational AI gateway area (`US`, `EU`, `AP`, `CN`) |
+| `DATABASE_URL` | Recommended | PostgreSQL connection for shop/support persistence |
+| `NEXAVOICE_STORE` | Optional | Force `memory`/`none` or `postgres` support store |
+| `NEXAVOICE_STATE_KEY` | Optional | PostgreSQL `StoreState` row key |
+| `AGENT_TOOLS_BASE_URL` | Optional | Public HTTPS URL used by Agora cloud callbacks |
+| `AGENT_TOOLS_SECRET` | Optional | Shared secret for tool callback authentication |
+| `AGENT_LANGUAGE` | Optional | Voice interaction locale such as `en-IN` or `hi-IN` |
+| `AGENT_STT_LANGUAGE` | Optional | Deepgram language; `multi` supports Hindi/English code-switching |
+| `AGENT_TTS_VOICE_ID` | Optional | MiniMax voice ID |
+| `NEXT_LLM_URL` | Optional | OpenAI-compatible custom endpoint |
+| `NEXT_LLM_API_KEY` | Optional | API key for custom LLM endpoint |
+| `NEXT_LLM_MODEL` | Optional | Custom LLM model; default `gpt-4o-mini` |
+| `ORDER_PLACED_SECONDS` | Optional | Demo `PLACED` timing |
+| `ORDER_TRANSIT_SECONDS` | Optional | Demo `ON_THE_WAY` timing |
+| `ORDER_EDIT_SECONDS` | Optional | Demo timing after order edits |
+| `ORDER_EDIT_PAUSE_MAX_SECONDS` | Optional | Max time an edit pause is held before the server resumes the order |
+
+See [`env.local.example`](./env.local.example) for the full configuration notes.
+
+---
+
+## Important API routes
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/generate-agora-token` | Generate RTC + RTM token data |
+| `POST /api/invite-agent` | Start an Agora Conversational AI session |
+| `POST /api/agent-tools/:tool` | Agora inline REST tool callback |
+| `POST /api/stop-conversation` | Stop the active AI conversation |
+| `GET /api/cases` | List support cases |
+| `POST /api/cases/:id/accept` | Accept a human support case |
+| `POST /api/cases/:id/takeover` | Perform AI → human voice takeover |
+| `POST /api/chat/completions` | OpenAI-compatible chat path with shared tools |
+| `GET /api/health` | App + Agora deployment self-check |
+
+---
+
+## Project structure
+
+```text
+app/
+  api/
+    agent-tools/              Agora inline REST tool callbacks
+    cases/                    Human escalation / accept / takeover / resolution
+    chat/                     Text chat + custom LLM endpoint
+    generate-agora-token/     RTC + RTM token generation
+    invite-agent/             Agora Conversational AI session startup
+    health/                   Deployment self-check
+    stop-conversation/        AI session shutdown
+
+components/
+  AgoraProvider.tsx           Agora RTC React provider
+  VoiceAgentCall.tsx          Voice call orchestration
+  ConversationComponent.tsx   Voice call dialog: orb, transcript, mute, escalation
+  HumanVoiceBridge.tsx        Human takeover RTC bridge
+  ...
+
+lib/
+  agent-config.ts             Agora agent construction
+  agent-prompt.ts             Shared agent policy/language/safety rules
+  agent-tools.ts              Agora tool declaration + callback routing
+  agora-server.ts             Agora server-side control-plane helpers
+  conversation.ts              Transcript normalization + agent state mapping
+  support/
+    tools.ts                  Shared tool execution + guardrails
+    store.ts                  Conversation/case state + audit/event recording
+    types.ts                  Conversation + handoff data model
+    persist.ts                PostgreSQL durable mirror
+    ...
+  shop/                      Catalogue, cart and order business logic
+
+prisma/
+  schema.prisma               PostgreSQL/Prisma data model
+
+Docs/
+  agora-conversational-ai.md  Agora integration deep dive
+```
+
+---
+
+## Implementation details worth reviewing
+
+### Conversation ID and authorization boundary
+
+Agora tool URLs carry the conversation ID through per-session `template_variables`. The model does not choose the customer or conversation context used for execution.
+
+### Tool authentication
+
+The Agora callback endpoint expects a server-side tool token. `lib/agent-tools.ts` can derive a stable secret from the Agora App Certificate when an explicit `AGENT_TOOLS_SECRET` is not configured. `app/api/agent-tools/[tool]/route.ts` verifies the token with a timing-safe comparison before executing a tool.
+
+### RTC vs RTM
+
+RTC transports the live audio. RTM is used for the transcript/state signaling consumed by the browser, including `AGENT_METRICS` events.
+
+### Stale conversation cleanup
+
+The client sends heartbeats while a support session is active. The support store closes sessions that stop heartbeating, which keeps the agent dashboard aligned with real client presence.
+
+---
+
+## Security and privacy
+
+- Never commit the Agora App Certificate.
+- Keep `AGENT_TOOLS_SECRET` server-side.
+- Keep `.env.local` out of Git.
+- Customer/order tool access is conversation-scoped.
+- Tool audit entries are sanitized and do not intentionally store secrets.
+
+For real production customer or medical workflows, add production-grade authentication/authorization, secret management, privacy controls, compliance, durable concurrency/locking where required, rate limiting, monitoring and appropriate medical/legal review.
+
+---
+
+## Development commands
+
+```bash
+pnpm dev             # Next.js development server
+pnpm dev:db          # Local PGlite/WASM PostgreSQL-compatible server
+pnpm db:push         # Push Prisma schema
+pnpm db:reset        # Reset schema (development only)
+pnpm seed            # Seed demo catalogue
+pnpm db:studio       # Open Prisma Studio
+pnpm doctor          # Environment/configuration diagnostics
+pnpm lint            # ESLint
+pnpm typecheck       # TypeScript check
+pnpm verify:api      # API contract checks
+pnpm build           # Production build
+pnpm verify          # Full verification suite
+```
+
+---
 
 ## License
 
-Released under the [MIT License](./LICENSE).
+See [`LICENSE`](./LICENSE).

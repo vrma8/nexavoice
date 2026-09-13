@@ -9,5 +9,11 @@
   "github": {
     "silent": true,
     "autoAlias": true
+  },
+  "regions": ["bom1"],
+  "functions": {
+    "app/api/invite-agent/route.ts": { "maxDuration": 30 },
+    "app/api/health/route.ts": { "maxDuration": 30 },
+    "app/api/agent-tools/[tool]/route.ts": { "maxDuration": 30 }
   }
 }

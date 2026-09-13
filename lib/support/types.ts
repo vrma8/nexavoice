@@ -1,8 +1,4 @@
-/**
- * Shared conversation / case model used by chat, voice and the human dashboard.
- * The backend (Next.js API routes) owns this state — the browser never does.
- * See "Nexavoice Docs/v1.md" §20–§24.
- */
+import type { ShoppingUiState } from '@/lib/shopping/types';
 
 export type ConversationMode = 'CHAT' | 'VOICE';
 
@@ -21,7 +17,6 @@ export interface ConversationMessage {
   role: MessageRole;
   content: string;
   createdAt: number;
-  /** Voice transcript turn id (dedupes RTM turn updates). */
   turnId?: number;
 }
 
@@ -29,17 +24,13 @@ export interface ToolAuditEntry {
   id: string;
   at: number;
   tool: string;
-  /** Sanitised arguments (never secrets). */
   args: Record<string, unknown>;
   ok: boolean;
-  /** One-line human readable description of what happened. */
   summary: string;
-  /** Whether the tool mutated demo backend data. */
   write: boolean;
 }
 
 export interface CustomerSnapshot {
-  /** Client row id (PostgreSQL) — every tool call is scoped to it. */
   id: string;
   name: string;
   phone: string;
@@ -52,37 +43,22 @@ export interface CustomerSnapshot {
 
 export interface ConversationContext {
   language?: string;
-  /** The customer confirmed the language preference in this conversation (or asked for one explicitly). */
   languageConfirmed?: boolean;
   intent?: string;
   customerName?: string;
   customer?: CustomerSnapshot;
-  /** Orders the AI looked up or changed in this conversation (order codes). */
   orderIds: string[];
   confidence?: number;
   missingInformation: string[];
   confirmedInformation: string[];
-  /**
-   * Chat-path only: a write action the assistant proposed and is waiting for
-   * the customer to confirm (never executed without an explicit yes).
-   */
   pendingAction?: {
     tool: string;
     args: Record<string, unknown>;
     stage: 'collect_address' | 'confirm';
   };
-  /** Consecutive turns the rule-based chat agent failed to understand. */
   misunderstandings?: number;
-  /** Free-form facts the customer gave during this conversation (for the handoff). */
   notes?: string[];
-  /**
-   * How many times the customer asked for medical advice / medication. The
-   * agent refuses every time; after `MEDICAL_ESCALATION_LIMIT` the backend
-   * escalates to a human automatically (see lib/support/medical-guard.ts).
-   */
-  medicalRequestCount?: number;
-  /** The customer's medical requests, most recent last (for the handoff summary). */
-  medicalQueries?: string[];
+  shopping?: ShoppingUiState;
 }
 
 export interface Conversation {
@@ -92,19 +68,11 @@ export interface Conversation {
   createdAt: number;
   updatedAt: number;
   endedAt?: number;
-  /** Agora RTC/RTM channel (voice only). */
   channel?: string;
-  /** Customer RTC uid (voice only). */
   customerUid?: string;
-  /** Agora Conversational AI agent id (voice only). */
   agentId?: string;
-  /** Latest agent state reported by the client (listening/thinking/speaking…). */
   agentState?: string;
-  /** Last heartbeat received from the customer's browser. */
   lastSeenAt?: number;
-  /** Who ended the conversation: the customer's browser or the human agent. */
-  endedBy?: 'customer' | 'human';
-  /** Human agent uid when a human has joined the voice channel. */
   humanUid?: string;
   humanAgentName?: string;
   caseId?: string;
@@ -115,12 +83,6 @@ export interface Conversation {
 
 export type CasePriority = 'LOW' | 'MEDIUM' | 'HIGH';
 
-/**
- * Handoff summary generated at escalation time — everything the human agent
- * needs to continue without asking the customer to repeat themselves:
- * who they are (from the database), what they bought, what the AI already did,
- * and the tail of the actual conversation.
- */
 export interface HandoffSummary {
   conversation_id: string;
   mode: 'chat' | 'voice';
@@ -133,9 +95,7 @@ export interface HandoffSummary {
   reason_for_escalation: string;
   confidence: number;
   missing_information: string[];
-  /** Client record as stored in PostgreSQL at escalation time. */
   customer_profile?: CustomerSnapshot;
-  /** Live orders of that client, newest first. */
   orders?: Array<{
     order_id: string;
     status: string;
@@ -145,12 +105,6 @@ export interface HandoffSummary {
     expected_delivery: string;
     editable: boolean;
   }>;
-  /** What is in the customer's cart right now (omitted when empty). */
-  cart?: {
-    items: string[];
-    total_inr: number;
-  };
-  /** Last turns of the conversation, oldest first ("Customer: …" / "AI: …"). */
   transcript_excerpt?: string[];
 }
 
@@ -165,12 +119,8 @@ export interface SupportCase {
   acceptedAt?: number;
   resolvedAt?: number;
   assignedTo?: string;
-  /** Email of the signed-in agent who accepted the case (from /login). */
   assignedAgentEmail?: string;
-  /** Set when the customer ended the chat/call while the case was still open. */
   customerLeftAt?: number;
-  /** Set when the human agent left the call without resolving (ends it for the customer too). */
-  humanLeftAt?: number;
   handoff: HandoffSummary;
   customer?: CustomerSnapshot;
   resolutionNote?: string;

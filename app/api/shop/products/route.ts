@@ -4,10 +4,6 @@ import { listProducts } from '@/lib/shop/service';
 
 export const dynamic = 'force-dynamic';
 
-/**
- * GET /api/shop/products — the fixed NexaMart catalogue (50 rows) from the
- * database. Seeded on first read, so a fresh deployment is never empty.
- */
 export async function GET() {
   if (!hasDatabaseUrl()) {
     return NextResponse.json(

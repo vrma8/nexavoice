@@ -7,17 +7,15 @@ const config: Config = {
     "./components/**/*.{js,ts,jsx,tsx,mdx}",
     "./app/**/*.{js,ts,jsx,tsx,mdx}",
     "*.{js,ts,jsx,tsx,mdx}",
-    "./node_modules/agora-agent-uikit/dist/**/*.{js,mjs}",
   ],
   theme: {
   	extend: {
       fontFamily: {
         sans: ['var(--font-sans)', 'system-ui', 'sans-serif'],
+        serif: ['var(--font-serif)', 'Georgia', 'serif'],
+        mono: ['var(--font-mono)', 'ui-monospace', 'monospace'],
       },
   		colors: {
-        // The <alpha-value> placeholder enables Tailwind opacity modifiers like
-        // bg-primary/90, bg-card/80, bg-destructive/10, etc.
-        // Without it, hsl(var(--token)) can't accept an alpha channel at utility-class time.
   			background: 'hsl(var(--background) / <alpha-value>)',
   			foreground: 'hsl(var(--foreground) / <alpha-value>)',
   			card: {

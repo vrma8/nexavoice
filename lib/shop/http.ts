@@ -1,12 +1,3 @@
-/**
- * Client identification for the shopping API.
- *
- * The signed-in client record (created on /login and stored in PostgreSQL) is
- * identified by the `x-nexavoice-client-id` header the browser sends with every
- * shop request. The id is always resolved against the database before anything
- * is read or written, so a stale localStorage session cannot reach data that no
- * longer exists, and every cart/order query is scoped to that one client.
- */
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma, hasDatabaseUrl } from '@/lib/db';
 

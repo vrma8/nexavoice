@@ -1,15 +1,3 @@
-/**
- * Snapshot encoding for the durable support-store mirror (see `persist.ts`).
- *
- * Pure data transforms only: no I/O, no `globalThis`, so the merge rules below can
- * be unit-tested and reused by any future backend (database, Redis, …).
- *
- * Merge rule: **newer document wins**. Each conversation/case carries an
- * `updatedAt` that every mutator bumps, so two instances that each served a
- * different customer keep both conversations instead of clobbering the whole
- * snapshot. Within one conversation the write that happened later wins outright —
- * a real multi-writer workload needs a database, not this.
- */
 import type {
   Conversation,
   ConversationEvent,
@@ -19,27 +7,19 @@ import type {
 
 export const SNAPSHOT_VERSION = 1;
 
-/** Closed/resolved conversations older than this are dropped from the snapshot. */
 const FINISHED_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_CONVERSATIONS = 60;
 const MAX_MESSAGES_PER_CONVERSATION = 200;
 const MAX_EVENTS = 500;
 
-/**
- * Products, carts and orders are *not* in here: they live in their own
- * PostgreSQL tables (see lib/shop/service.ts). This document only carries the
- * live support state — conversations, messages, cases and events.
- */
 export interface StoreSnapshot {
   version: number;
   savedAt: number;
-  /** Bumped on every write; lets callers detect a concurrent writer. */
   rev: number;
   conversations: Conversation[];
   messages: Record<string, ConversationMessage[]>;
   cases: SupportCase[];
   events: ConversationEvent[];
-  /** Highest case number issued, so `NV-####` ids never repeat across instances. */
   caseCounter: number;
 }
 
@@ -98,7 +78,6 @@ function normalizeMessages(
       );
     }
   }
-  // Snapshots written by older builds keyed messages by array index.
   for (const conversation of conversations ?? []) {
     const id = (conversation as Conversation | undefined)?.id;
     if (id && !out[id]) out[id] = [];
@@ -121,10 +100,6 @@ function isEvent(value: unknown): value is ConversationEvent {
   return !!e && typeof e.id === 'string' && typeof e.at === 'number';
 }
 
-/**
- * Folds `remote` into `local` and returns the union. `local` wins ties so the
- * instance that just served a turn never loses its own write to an older read.
- */
 export function mergeSnapshots(local: StoreSnapshot, remote: StoreSnapshot): StoreSnapshot {
   const conversations = new Map<string, Conversation>();
   for (const item of remote.conversations) conversations.set(item.id, item);
@@ -167,10 +142,6 @@ export function mergeSnapshots(local: StoreSnapshot, remote: StoreSnapshot): Sto
   };
 }
 
-/**
- * Keeps the document small and bounded: recent conversations first, finished ones
- * dropped after `FINISHED_TTL_MS` unless a case is still open.
- */
 export function pruneSnapshot(snapshot: StoreSnapshot, now = Date.now()): StoreSnapshot {
   const keep = snapshot.conversations
     .filter((conversation) => {

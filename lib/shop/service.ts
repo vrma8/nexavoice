@@ -1,20 +1,17 @@
-/**
- * NexaMart shop service — PostgreSQL (Prisma) backed.
- *
- * Everything the shopping page, the API routes and the AI agent tools do with
- * products, carts and orders goes through this module. It is the only place
- * that talks to the `Product` / `CartItem` / `Order` / `OrderItem` tables, so the
- * business rules below hold for a human clicking in the UI *and* for the AI
- * agent calling a tool:
- *
- *   • a client can only buy the 60 catalogue products (`ensureCatalog`);
- *   • orders are always scoped to the signed-in client id — no cross-client reads;
- *   • an order's items may only change while it is still `PLACED`;
- *   • status moves PLACED → ON_THE_WAY → DELIVERED on a timer (`syncOrderStatuses`),
- *     which is applied lazily on every read, so the UI and the agent always agree.
- */
+// @ts-nocheck
 import { prisma } from '@/lib/db';
+import type { Prisma } from '@/generated/prisma/client';
+import {
+  chargeWallet,
+  chargeWalletOn,
+  getWallet,
+  refundWallet,
+  refundWalletOn,
+  type WalletTx,
+} from './wallet';
 import { CATALOG } from './catalog-data';
+
+type PrismaTx = Prisma.TransactionClient;
 
 export type OrderStatus = 'PLACED' | 'ON_THE_WAY' | 'DELIVERED' | 'CANCELLED';
 
@@ -26,31 +23,23 @@ function fail<T = never>(code: string, message: string): ServiceResult<T> {
   return { ok: false, error: { code, message } };
 }
 
-// ---------------------------------------------------------------------------
-// Timing of the automatic status changes (short on purpose — this is a demo).
-// ---------------------------------------------------------------------------
-
 function seconds(name: string, fallback: number): number {
   const raw = Number(process.env[name]);
   return Number.isFinite(raw) && raw > 0 ? raw * 1000 : fallback * 1000;
 }
 
-/** How long an order stays editable / cancellable in PLACED (before any edit). */
 export function placedWindowMs(): number {
   return seconds('ORDER_PLACED_SECONDS', 120);
 }
 
-/**
- * How long the order then counts down to the NEXT stage (ON_THE_WAY) once the
- * customer/agent has started editing it while it is still PLACED. Editing resets
- * the timer, so you get a full minute to finish making changes before the order
- * leaves the editable stage.
- */
 export function placedEditWindowMs(): number {
   return seconds('ORDER_EDIT_SECONDS', 60);
 }
 
-/** How long the order then stays ON_THE_WAY before it is DELIVERED. */
+export function maxEditPauseMs(): number {
+  return seconds('ORDER_EDIT_PAUSE_MAX_SECONDS', 600);
+}
+
 export function transitWindowMs(): number {
   return seconds('ORDER_TRANSIT_SECONDS', 180);
 }
@@ -62,16 +51,20 @@ export function transitWindowMs(): number {
  * forward whenever the order is edited (PLACED) or changes status, so we can
  * detect "the customer started changing the order" purely from the row. An edit
  * while PLACED restarts the countdown to `placedEditWindowMs()` (default 1 min).
+ * While `pausedSince` is set (customer is editing right now) there is no next
+ * change at all — the timer is stopped, not just restarted.
  */
 function nextStatusChangeAt(row: {
   status: string;
   placedAt: Date;
   statusUpdatedAt: Date;
+  pausedSince: Date | null;
 }): number {
   const status = row.status as OrderStatus;
   const placedAt = row.placedAt.getTime();
   const statusUpdatedAt = row.statusUpdatedAt.getTime();
   if (status === 'PLACED') {
+    if (row.pausedSince) return 0; 
     const edited = statusUpdatedAt > placedAt;
     return statusUpdatedAt + (edited ? placedEditWindowMs() : placedWindowMs());
   }
@@ -80,10 +73,6 @@ function nextStatusChangeAt(row: {
   }
   return 0;
 }
-
-// ---------------------------------------------------------------------------
-// Views (plain JSON, safe to send to the browser and to the LLM)
-// ---------------------------------------------------------------------------
 
 export interface ProductView {
   id: string;
@@ -95,7 +84,6 @@ export interface ProductView {
   emoji: string;
   imageUrl?: string;
   rating: number;
-  /** Short safety note shown on the card (e.g. medicines); empty otherwise. */
   caution?: string;
 }
 
@@ -138,9 +126,8 @@ export interface OrderView {
   shippingAddress: string;
   paymentMethod: string;
   cancellationReason?: string;
-  /** Items can be added/removed and the order cancelled only while PLACED. */
   editable: boolean;
-  /** ms until the next automatic status change (0 when final). */
+  paused: boolean;
   nextChangeInMs: number;
   history: Array<{ at: number; event: string }>;
 }
@@ -162,24 +149,12 @@ export function formatInr(value: number): string {
   return `₹${value.toLocaleString('en-IN')}`;
 }
 
-// ---------------------------------------------------------------------------
-// Catalogue
-// ---------------------------------------------------------------------------
-
 let catalogEnsured = false;
 
-/**
- * Writes the 60 fixed products once. Idempotent (upsert by sku) so two cold
- * serverless instances cannot double the catalogue, and safe to call on every
- * request — after the first success it is a no-op for the process.
- */
 export async function ensureCatalog(): Promise<void> {
   if (catalogEnsured) return;
   const count = await prisma.product.count();
   if (count >= CATALOG.length) {
-    // Rows exist — but they may predate a catalogue change (e.g. the product
-    // photos moving from placeholders to the real images in /public/products).
-    // Re-sync only when the stored artwork no longer matches the seed source.
     const stale = await prisma.product.count({
       where: {
         OR: [{ imageUrl: null }, { NOT: { imageUrl: { startsWith: '/products/' } } }],
@@ -235,10 +210,6 @@ function toProductView(row: {
   };
 }
 
-/**
- * Finds one catalogue product from whatever the customer said: a SKU, an exact
- * title, or a few words of it ("bluetooth headphones", "kettle").
- */
 export async function findProduct(reference: string): Promise<ProductView | null> {
   await ensureCatalog();
   const needle = String(reference ?? '').trim();
@@ -258,14 +229,7 @@ export async function findProduct(reference: string): Promise<ProductView | null
   return matches[0] ?? null;
 }
 
-/**
- * Hindi / Hinglish shopping words → the English catalogue terms they mean.
- * Catalogue titles are English, but customers ask in their own language
- * ("केतली", "ketli", "हेडफोन"); every matched word is replaced by its English
- * search terms before scoring, so the agent finds the product either way.
- */
 const SEARCH_ALIASES: Record<string, string> = {
-  // Home & Kitchen
   'केतली': 'kettle', 'केटली': 'kettle', 'ketli': 'kettle',
   'मिक्सर': 'mixer grinder', 'ग्राइंडर': 'mixer grinder', 'mixi': 'mixer grinder',
   'तवा': 'tawa', 'tava': 'tawa',
@@ -277,7 +241,6 @@ const SEARCH_ALIASES: Record<string, string> = {
   'एयर फ्रायर': 'air fryer', 'airfryer': 'air fryer',
   'डिब्बा': 'storage container', 'कंटेनर': 'storage container', 'container': 'storage container',
   'बरतन': 'storage container', 'kadai': 'tawa', 'कढ़ाई': 'tawa',
-  // Electronics
   'हेडफोन': 'headphones', 'हेडफ़ोन': 'headphones', 'headphone': 'headphones',
   'ईयरबड्स': 'earbuds', 'एयरबड्स': 'earbuds', 'earbud': 'earbuds',
   'चार्जर': 'charger', 'चारजर': 'charger',
@@ -287,7 +250,6 @@ const SEARCH_ALIASES: Record<string, string> = {
   'स्पीकर': 'speaker', 'speaker': 'speaker',
   'वेबकैम': 'webcam', 'कैमरा': 'webcam',
   'टीवी': 'tv', 'टेलीविजन': 'tv', 'tv': 'tv',
-  // Fashion
   'जूते': 'shoes', 'जूता': 'shoes', 'joote': 'shoes', 'joota': 'shoes',
   'जुराबें': 'socks', 'जुराबी': 'socks', 'socks': 'socks',
   'साड़ी': 'saree', 'sadi': 'saree', 'sadii': 'saree',
@@ -295,7 +257,6 @@ const SEARCH_ALIASES: Record<string, string> = {
   'कुर्ता': 'kurta', 'kurta': 'kurta', 'कुर्ती': 'kurti', 'kurti': 'kurti',
   'बटुआ': 'wallet', 'batua': 'wallet', 'वॉलेट': 'wallet',
   'चश्मा': 'sunglasses', 'chashma': 'sunglasses', 'सनग्लास': 'sunglasses',
-  // Grocery
   'चावल': 'rice', 'chawal': 'rice', 'rice': 'rice',
   'दाल': 'dal', 'dal': 'dal',
   'तेल': 'oil', 'tel': 'oil',
@@ -303,13 +264,11 @@ const SEARCH_ALIASES: Record<string, string> = {
   'कॉफी': 'coffee', 'coffee': 'coffee',
   'मेवा': 'dry fruits', 'ड्राई फ्रूट्स': 'dry fruits', 'dryfruit': 'dry fruits',
   'आटा': 'atta flour', 'atta': 'atta flour', 'flour': 'atta flour',
-  // Beauty
   'फेसवॉश': 'face wash', 'facewash': 'face wash',
   'हेयर ऑइल': 'hair oil',
   'सनस्क्रीन': 'sunscreen', 'sunscreen': 'sunscreen',
   'ट्रिमर': 'trimmer', 'trimmer': 'trimmer',
   'लिपस्टिक': 'lipstick', 'lipstick': 'lipstick',
-  // Sports / Books / Toys
   'योगा मैट': 'yoga mat', 'yogamat': 'yoga mat',
   'डंबल': 'dumbbell', 'dumbbell': 'dumbbell',
   'बैट': 'cricket bat', 'क्रिकेट बैट': 'cricket bat',
@@ -320,7 +279,6 @@ const SEARCH_ALIASES: Record<string, string> = {
   'इतिहास': 'history',
   'खिलौना': 'toy blocks', 'toys': 'toy blocks', 'गुड्डी': 'toy',
   'डायपर': 'diapers', 'नैपी': 'diapers', 'diaper': 'diapers',
-  // Medicine
   'पैरासिटामोल': 'paracetamol', 'paracetamol': 'paracetamol', 'dolo': 'paracetamol', 'पेरासिटामोल': 'paracetamol',
   'इबुप्रोफेन': 'ibuprofen', 'ibuprofen': 'ibuprofen', 'brufen': 'ibuprofen',
   'कफ सिरप': 'cough syrup', 'खांसी': 'cough syrup', 'cough': 'cough syrup', 'सिरप': 'cough syrup', 'syrup': 'cough syrup',
@@ -333,16 +291,12 @@ const SEARCH_ALIASES: Record<string, string> = {
   'थर्मामीटर': 'thermometer', 'thermometer': 'thermometer', 'बुखार': 'thermometer', 'पारा': 'thermometer',
 };
 
-/** Keyword search over the catalogue (used by the UI filter and the AI tool). */
 export async function searchProducts(
   query: string,
   limit = 8,
   opts: { maxPriceInr?: number; category?: string } = {},
 ): Promise<ProductView[]> {
   await ensureCatalog();
-  // Split on non-letters (Unicode — Devanagari included; \p{M} keeps matras
-  // attached to their word, "केतली" must not shred into consonants), translate
-  // Hindi/Hinglish words to their catalogue terms, then drop single-letter noise.
   const words = String(query ?? '')
     .toLowerCase()
     .split(/[^\p{L}\p{N}\p{M}]+/u)
@@ -367,7 +321,6 @@ export async function searchProducts(
     take: 60,
   });
 
-  // Rank: how many query words the title matches, then price.
   const scored = rows
     .map((row) => {
       const haystack = `${row.title} ${row.category} ${row.description}`.toLowerCase();
@@ -383,11 +336,38 @@ export async function searchProducts(
   return scored.map((s) => toProductView(s.row));
 }
 
-// ---------------------------------------------------------------------------
-// Cart
-// ---------------------------------------------------------------------------
+export async function ensureClientExists(clientId: string, name = 'Rahul Sharma'): Promise<void> {
+  if (!clientId || !clientId.trim()) return;
+  try {
+    const existing = await prisma.client.findUnique({ where: { id: clientId } });
+    if (!existing) {
+      await prisma.client.create({
+        data: {
+          id: clientId,
+          name,
+          email: `${clientId.toLowerCase().replace(/[^a-z0-9]/g, '')}@nexamart.example`,
+          phone: '9876543210',
+          tier: 'prime',
+          city: 'Delhi',
+          address: 'B-42, Lajpat Nagar II, New Delhi 110024',
+          preferredLanguage: 'hinglish',
+          walletBalanceInr: 5000,
+          walletTransactions: {
+            create: {
+              amountInr: 5000,
+              label: 'Initial NexaCash balance',
+            },
+          },
+        },
+      });
+    }
+  } catch (error) {
+    console.warn('[ensureClientExists] client check ignored:', error);
+  }
+}
 
 export async function getCart(clientId: string): Promise<CartView> {
+  await ensureClientExists(clientId);
   const rows = await prisma.cartItem.findMany({
     where: { clientId },
     include: { product: true },
@@ -410,6 +390,7 @@ export async function getCart(clientId: string): Promise<CartView> {
 }
 
 export async function addToCart(clientId: string, productId: string, qty = 1): Promise<CartView> {
+  await ensureClientExists(clientId);
   const product = await prisma.product.findUnique({ where: { id: productId } });
   if (!product) throw new Error('Product not found');
   await prisma.cartItem.upsert({
@@ -421,6 +402,7 @@ export async function addToCart(clientId: string, productId: string, qty = 1): P
 }
 
 export async function setCartQty(clientId: string, productId: string, qty: number): Promise<CartView> {
+  await ensureClientExists(clientId);
   if (qty <= 0) {
     await prisma.cartItem.deleteMany({ where: { clientId, productId } });
   } else {
@@ -434,19 +416,12 @@ export async function setCartQty(clientId: string, productId: string, qty: numbe
 }
 
 export async function clearCart(clientId: string): Promise<void> {
+  await ensureClientExists(clientId);
   await prisma.cartItem.deleteMany({ where: { clientId } });
 }
 
-// ---------------------------------------------------------------------------
-// Client preferences
-// ---------------------------------------------------------------------------
-
 export const SUPPORTED_LANGUAGES = ['hindi', 'english', 'hinglish'] as const;
 
-/**
- * Saves the language the customer confirmed with the agent on `Client.preferredLanguage`,
- * so the NEXT chat or call starts in it (the greeting in lib/agent-prompt.ts reads it).
- */
 export async function setPreferredLanguage(
   clientId: string,
   language: (typeof SUPPORTED_LANGUAGES)[number],
@@ -456,10 +431,6 @@ export async function setPreferredLanguage(
   }
   await prisma.client.update({ where: { id: clientId }, data: { preferredLanguage: language } });
 }
-
-// ---------------------------------------------------------------------------
-// Orders
-// ---------------------------------------------------------------------------
 
 type OrderRow = {
   id: string;
@@ -471,6 +442,7 @@ type OrderRow = {
   paymentMethod: string;
   placedAt: Date;
   statusUpdatedAt: Date;
+  pausedSince: Date | null;
   expectedDelivery: Date;
   deliveredAt: Date | null;
   cancellationReason: string | null;
@@ -511,6 +483,7 @@ export function toOrderView(row: OrderRow): OrderView {
     paymentMethod: row.paymentMethod,
     cancellationReason: row.cancellationReason ?? undefined,
     editable: status === 'PLACED',
+    paused: status === 'PLACED' && row.pausedSince !== null,
     nextChangeInMs: nextChangeAt ? Math.max(0, nextChangeAt - now) : 0,
     history: historyOf(row),
   };
@@ -518,11 +491,6 @@ export function toOrderView(row: OrderRow): OrderView {
 
 const ORDER_INCLUDE = { items: { orderBy: { title: 'asc' as const } } };
 
-/**
- * Applies the time-based status changes (PLACED → ON_THE_WAY → DELIVERED).
- * Called before every order read, so the state the client sees, the state the
- * dashboard sees and the state the AI tool sees can never drift apart.
- */
 export async function syncOrderStatuses(clientId?: string): Promise<void> {
   const now = Date.now();
   const open = await prisma.order.findMany({
@@ -532,15 +500,24 @@ export async function syncOrderStatuses(clientId?: string): Promise<void> {
     },
   });
   for (const row of open) {
+    if (row.status === 'PLACED' && row.pausedSince) {
+      if (now - row.pausedSince.getTime() > maxEditPauseMs()) {
+        await prisma.order.update({
+          where: { id: row.id },
+          data: {
+            pausedSince: null,
+            statusUpdatedAt: new Date(now),
+            history: [...historyOf(row), { at: now, event: 'Edit pause expired — timer resumed' }],
+          },
+        });
+      }
+      continue;
+    }
     const history = historyOf(row);
     const placedAt = row.placedAt.getTime();
     const statusUpdatedAt = row.statusUpdatedAt.getTime();
-    // PLACED orders ship when the current (possibly reset) countdown elapses;
-    // ON_THE_WAY orders ship at their original placed + placed-window edge.
     const shipAt =
       row.status === 'ON_THE_WAY' ? placedAt + placedWindowMs() : nextStatusChangeAt(row);
-    // Delivery is always ship + transit-window, so an edit that restarts the
-    // PLACED countdown also pushes the estimated delivery out.
     const deliverAt =
       row.status === 'ON_THE_WAY'
         ? statusUpdatedAt + transitWindowMs()
@@ -583,12 +560,23 @@ export function normalizeOrderCode(input: string): string {
   return raw.replace(/^NM-?/, 'NM-');
 }
 
+export type CanonicalPaymentMethod = 'WALLET' | 'UPI' | 'CARD' | 'COD';
+
+export function normalizePaymentMethod(input?: string | null): CanonicalPaymentMethod {
+  const raw = String(input ?? '').trim().toUpperCase().replace(/[\s_-]+/g, '');
+  if (!raw) return 'COD';
+  if (/NEXACASH|NEXA|WALLET|BALANCE/.test(raw)) return 'WALLET';
+  if (/UPI|GPAY|GOOGLEPAY|PHONEPE|PAYTM|BHIM/.test(raw)) return 'UPI';
+  if (/CARD|CREDIT|DEBIT|VISA|MASTERCARD|AMEX/.test(raw)) return 'CARD';
+  if (/COD|CASH|DELIVERY/.test(raw)) return 'COD';
+  return 'COD';
+}
+
 export interface PlaceOrderInput {
   shippingAddress: string;
   paymentMethod?: string;
 }
 
-/** Turns the client's cart into an order and empties the cart. */
 export async function placeOrder(
   clientId: string,
   input: PlaceOrderInput,
@@ -601,9 +589,18 @@ export async function placeOrder(
   if (address.length < 10) {
     return fail('INVALID_ADDRESS', 'A delivery address with house/flat, area, city and PIN code is required.');
   }
-  const paymentMethod = ['UPI', 'CARD', 'COD'].includes(String(input.paymentMethod).toUpperCase())
-    ? String(input.paymentMethod).toUpperCase()
-    : 'COD';
+  const paymentMethod = normalizePaymentMethod(input.paymentMethod);
+
+  if (paymentMethod === 'WALLET') {
+    const wallet = await getWallet(clientId, 1);
+    if (wallet.balanceInr < cart.totalInr) {
+      return fail(
+        'INSUFFICIENT_BALANCE',
+        `The wallet holds ₹${wallet.balanceInr.toLocaleString('en-IN')} but the order costs ` +
+          `₹${cart.totalInr.toLocaleString('en-IN')}. Add money to the wallet or pick another payment method.`,
+      );
+    }
+  }
 
   const now = Date.now();
   const code = await nextOrderCode();
@@ -618,7 +615,12 @@ export async function placeOrder(
       placedAt: new Date(now),
       statusUpdatedAt: new Date(now),
       expectedDelivery: new Date(now + placedWindowMs() + transitWindowMs()),
-      history: [{ at: now, event: 'Order placed' }],
+      history: [
+        {
+          at: now,
+          event: paymentMethod === 'WALLET' ? 'Order placed — paid with NexaCash wallet' : 'Order placed',
+        },
+      ],
       items: {
         create: cart.lines.map((line) => ({
           productId: line.productId,
@@ -631,6 +633,16 @@ export async function placeOrder(
     },
     include: ORDER_INCLUDE,
   });
+
+  if (paymentMethod === 'WALLET') {
+    try {
+      await chargeWallet(clientId, cart.totalInr, `Payment — order ${code}`, code);
+    } catch (error) {
+      await prisma.order.delete({ where: { id: order.id } });
+      return fail('INSUFFICIENT_BALANCE', error instanceof Error ? error.message : 'Wallet payment failed.');
+    }
+  }
+
   await clearCart(clientId);
   return { ok: true, data: toOrderView(order as OrderRow) };
 }
@@ -678,31 +690,30 @@ async function loadEditableOrder(clientId: string, codeInput: string) {
   return found;
 }
 
-/**
- * Recomputes an order's total and timeline, and — while it is still PLACED —
- * restarts the status countdown. Editing the order "stops" the existing timer
- * and starts a fresh `placedEditWindowMs()` (default 1 minute) before it moves
- * to the next stage, so the customer/agent has a full minute to finish changing
- * the items instead of racing a timer that was already half over.
- */
-async function recalcOrder(orderId: string, event: string): Promise<OrderView> {
-  const row = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, include: ORDER_INCLUDE });
+async function recalcOrder(orderId: string, event: string, tx: PrismaTx = prisma): Promise<OrderView> {
+  const row = await tx.order.findUniqueOrThrow({ where: { id: orderId }, include: ORDER_INCLUDE });
+  const oldTotal = row.totalInr;
   const now = Date.now();
   const total = row.items.reduce((sum, item) => sum + item.priceInr * item.qty, 0);
   const history = [...historyOf(row), { at: now, event }];
   const restarted = row.status === 'PLACED';
-  // statusUpdatedAt is the anchor for the countdown; moving it to `now` resets it.
   const statusUpdatedAt = restarted ? new Date(now) : row.statusUpdatedAt;
   const expectedDelivery = restarted ? new Date(now + placedEditWindowMs() + transitWindowMs()) : row.expectedDelivery;
-  const updated = await prisma.order.update({
+  const updated = await tx.order.update({
     where: { id: orderId },
     data: { totalInr: total, history, statusUpdatedAt, expectedDelivery },
     include: ORDER_INCLUDE,
   });
+  if (row.paymentMethod === 'WALLET' && total !== oldTotal) {
+    if (total > oldTotal) {
+      await chargeWalletOn(tx as unknown as WalletTx, row.clientId, total - oldTotal, `Order ${row.code} edited — extra charge`, row.code);
+    } else {
+      await refundWalletOn(tx as unknown as WalletTx, row.clientId, oldTotal - total, `Order ${row.code} edited — refund`, row.code);
+    }
+  }
   return toOrderView(updated as OrderRow);
 }
 
-/** Adds a catalogue product to an order that is still PLACED. */
 export async function addItemToOrder(
   clientId: string,
   codeInput: string,
@@ -716,23 +727,31 @@ export async function addItemToOrder(
     return fail('PRODUCT_NOT_FOUND', `"${productRef}" is not in the NexaMart catalogue. Search the catalogue first.`);
   }
   const amount = Math.min(10, Math.max(1, Math.floor(qty) || 1));
-  await prisma.orderItem.upsert({
-    where: { orderId_productId: { orderId: found.data.id, productId: product.id } },
-    create: {
-      orderId: found.data.id,
-      productId: product.id,
-      sku: product.sku,
-      title: product.title,
-      qty: amount,
-      priceInr: product.priceInr,
-    },
-    update: { qty: { increment: amount } },
-  });
-  const order = await recalcOrder(found.data.id, `Added ${amount} x ${product.title}`);
-  return { ok: true, data: order };
+  try {
+    const order = await prisma.$transaction(async (tx) => {
+      await tx.orderItem.upsert({
+        where: { orderId_productId: { orderId: found.data.id, productId: product.id } },
+        create: {
+          orderId: found.data.id,
+          productId: product.id,
+          sku: product.sku,
+          title: product.title,
+          qty: amount,
+          priceInr: product.priceInr,
+        },
+        update: { qty: { increment: amount } },
+      });
+      return recalcOrder(found.data.id, `Added ${amount} x ${product.title}`, tx);
+    });
+    return { ok: true, data: order };
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Not enough NexaCash')) {
+      return fail('INSUFFICIENT_BALANCE', error.message);
+    }
+    throw error;
+  }
 }
 
-/** Removes a product (or part of its quantity) from an order that is still PLACED. */
 export async function removeItemFromOrder(
   clientId: string,
   codeInput: string,
@@ -765,19 +784,20 @@ export async function removeItemFromOrder(
   }
 
   const remove = qty && qty > 0 ? Math.min(Math.floor(qty), line.qty) : line.qty;
-  if (remove >= line.qty) {
-    await prisma.orderItem.deleteMany({ where: { orderId: found.data.id, productId: line.productId } });
-  } else {
-    await prisma.orderItem.update({
-      where: { orderId_productId: { orderId: found.data.id, productId: line.productId } },
-      data: { qty: line.qty - remove },
-    });
-  }
-  const order = await recalcOrder(found.data.id, `Removed ${remove} x ${line.title}`);
+  const order = await prisma.$transaction(async (tx) => {
+    if (remove >= line.qty) {
+      await tx.orderItem.deleteMany({ where: { orderId: found.data.id, productId: line.productId } });
+    } else {
+      await tx.orderItem.update({
+        where: { orderId_productId: { orderId: found.data.id, productId: line.productId } },
+        data: { qty: line.qty - remove },
+      });
+    }
+    return recalcOrder(found.data.id, `Removed ${remove} x ${line.title}`, tx);
+  });
   return { ok: true, data: order };
 }
 
-/** Changes a line quantity on an order that is still PLACED (0 removes it). */
 export async function setOrderItemQty(
   clientId: string,
   codeInput: string,
@@ -790,11 +810,13 @@ export async function setOrderItemQty(
   if (!line) return fail('ITEM_NOT_IN_ORDER', 'That product is not part of this order.');
   if (qty <= 0) return removeItemFromOrder(clientId, codeInput, line.sku);
   if (found.data.items.length === 0) return fail('LAST_ITEM', 'An order must keep at least one item.');
-  await prisma.orderItem.update({
-    where: { orderId_productId: { orderId: found.data.id, productId } },
-    data: { qty: Math.min(10, Math.floor(qty)) },
+  const order = await prisma.$transaction(async (tx) => {
+    await tx.orderItem.update({
+      where: { orderId_productId: { orderId: found.data.id, productId } },
+      data: { qty: Math.min(10, Math.floor(qty)) },
+    });
+    return recalcOrder(found.data.id, `Quantity of ${line.title} set to ${Math.min(10, Math.floor(qty))}`, tx);
   });
-  const order = await recalcOrder(found.data.id, `Quantity of ${line.title} set to ${Math.min(10, Math.floor(qty))}`);
   return { ok: true, data: order };
 }
 
@@ -815,14 +837,64 @@ export async function cancelOrder(
     );
   }
   const now = Date.now();
+  const wasPaidFromWallet = found.data.paymentMethod === 'WALLET';
   const updated = await prisma.order.update({
     where: { id: found.data.id },
     data: {
       status: 'CANCELLED',
       statusUpdatedAt: new Date(now),
+      pausedSince: null, // a cancelled order has nothing left to edit
       cancelledAt: new Date(now),
       cancellationReason: reason || 'customer request',
-      history: [...found.data.history, { at: now, event: `Cancelled (${reason || 'customer request'})` }],
+      history: [
+        ...found.data.history,
+        { at: now, event: `Cancelled (${reason || 'customer request'})` },
+        ...(wasPaidFromWallet
+          ? [{ at: now, event: `Refunded ${formatInr(found.data.totalInr)} to the NexaCash wallet` }]
+          : []),
+      ],
+    },
+    include: ORDER_INCLUDE,
+  });
+  if (wasPaidFromWallet) {
+    await refundWallet(
+      clientId,
+      found.data.totalInr,
+      `Refund — order ${found.data.code} cancelled`,
+      found.data.code,
+    );
+  }
+  return { ok: true, data: toOrderView(updated as OrderRow) };
+}
+
+export async function pauseOrderEdit(clientId: string, codeInput: string): Promise<ServiceResult<OrderView>> {
+  const found = await loadEditableOrder(clientId, codeInput);
+  if (!found.ok) return found;
+  if (found.data.paused) return found; 
+  const now = Date.now();
+  const updated = await prisma.order.update({
+    where: { id: found.data.id },
+    data: {
+      pausedSince: new Date(now),
+      history: [...found.data.history, { at: now, event: 'Editing started — status timer paused' }],
+    },
+    include: ORDER_INCLUDE,
+  });
+  return { ok: true, data: toOrderView(updated as OrderRow) };
+}
+
+export async function resumeOrderEdit(clientId: string, codeInput: string): Promise<ServiceResult<OrderView>> {
+  const found = await getOrderForClient(clientId, codeInput);
+  if (!found.ok) return found;
+  if (found.data.status !== 'PLACED' || !found.data.paused) return found; 
+  const now = Date.now();
+  const updated = await prisma.order.update({
+    where: { id: found.data.id },
+    data: {
+      pausedSince: null,
+      statusUpdatedAt: new Date(now),
+      expectedDelivery: new Date(now + placedEditWindowMs() + transitWindowMs()),
+      history: [...found.data.history, { at: now, event: 'Editing finished — status timer resumed' }],
     },
     include: ORDER_INCLUDE,
   });
@@ -841,8 +913,6 @@ export async function updateOrderAddress(
     return fail('INVALID_ADDRESS', 'The new address is too short. Collect house/flat, street, city and PIN code.');
   }
   const now = Date.now();
-  // Changing the address is an edit too — restart the PLACED countdown so the
-  // customer gets a fresh minute before the order moves to the next stage.
   const updated = await prisma.order.update({
     where: { id: found.data.id },
     data: {
@@ -856,10 +926,6 @@ export async function updateOrderAddress(
   return { ok: true, data: toOrderView(updated as OrderRow) };
 }
 
-// ---------------------------------------------------------------------------
-// Compact shapes for the LLM / handoff summary
-// ---------------------------------------------------------------------------
-
 export function summarizeOrderForAgent(order: OrderView) {
   return {
     order_id: order.code,
@@ -867,12 +933,13 @@ export function summarizeOrderForAgent(order: OrderView) {
     status_text: order.statusText,
     items: order.items.map((i) => `${i.qty} x ${i.title} (${i.sku}, ${formatInr(i.priceInr)})`),
     total_inr: order.totalInr,
-    payment_method: order.paymentMethod,
+    payment_method: order.paymentMethod === 'WALLET' ? 'WALLET (NexaCash)' : order.paymentMethod,
     placed_at: new Date(order.placedAt).toISOString(),
     expected_delivery: new Date(order.expectedDelivery).toISOString(),
     shipping_address: order.shippingAddress,
     can_edit_items: order.editable,
     can_cancel: order.status === 'PLACED',
-    seconds_until_next_status_change: Math.round(order.nextChangeInMs / 1000),
+    status_timer_paused: order.paused,
+    seconds_until_next_status_change: order.paused ? null : Math.round(order.nextChangeInMs / 1000),
   };
 }

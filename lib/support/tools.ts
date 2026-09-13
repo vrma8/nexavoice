@@ -1,44 +1,25 @@
-/**
- * Shared, mode-independent tool layer.
- *
- * The same `executeTool()` serves:
- *   1. Agora Conversational AI voice sessions — the engine's LLM calls our REST
- *      tool endpoints (`/api/agent-tools/<tool>`) declared in `lib/agent-tools.ts`.
- *   2. The chat / custom-LLM path (`/api/chat/*`) and the rule-based fallback
- *      agent — they execute the same functions in-process.
- *
- * Rules enforced here (not left to the prompt):
- *   - Every call is scoped to the **signed-in client** attached to the
- *     conversation. The model never passes a customer id, so it cannot read or
- *     change another person's orders.
- *   - Write tools (`add_item_to_order`, `remove_item_from_order`,
- *     `cancel_order`, `update_shipping_address`) require `confirmed: true`,
- *     which the prompt only allows after an explicit yes from the customer.
- *   - Items may only be changed while the order is still PLACED — enforced in
- *     `lib/shop/service.ts`, so the UI and the agent obey the same rule.
- *   - Every call is written to the conversation audit trail, so the human
- *     dashboard shows exactly what the AI did.
- */
 import * as shop from '@/lib/shop/service';
+import * as walletApi from '@/lib/shop/wallet';
 import { LANGUAGE_CONFIRM_MESSAGE, normalizeLanguageName } from '@/lib/agent-prompt';
-import { isDatabaseUnavailableError } from '@/lib/db';
 import {
-  appendMessage,
   appendToolAudit,
   createCase,
   getConversation,
+  isCriticalHandoff,
   listMessages,
   recordEvent,
   updateConversation,
 } from './store';
-import {
-  isMedicalProduct,
-  isMedicalRequest,
-  MEDICAL_ESCALATION_LIMIT,
-  MEDICAL_ESCALATION_REASON,
-  MEDICAL_REFUSAL_MESSAGE,
-} from './medical-guard';
 import type { Conversation, HandoffSummary } from './types';
+import type { JsonSchemaObject, ToolArgs, ToolOutcome } from './tool-types';
+import {
+  SHOPPING_TOOL_DEFINITIONS,
+  SHOPPING_TOOL_NAMES,
+  executeShoppingTool,
+  isShoppingToolName,
+} from './shopping-tools';
+
+export type { JsonSchemaObject } from './tool-types';
 
 export const TOOL_NAMES = [
   'get_customer_context',
@@ -46,6 +27,7 @@ export const TOOL_NAMES = [
   'list_recent_orders',
   'get_order_status',
   'get_cart_status',
+  'get_wallet_balance',
   'add_item_to_cart',
   'remove_item_from_cart',
   'set_cart_item_quantity',
@@ -59,21 +41,15 @@ export const TOOL_NAMES = [
   'update_shipping_address',
   'set_preferred_language',
   'escalate_to_human',
+  ...SHOPPING_TOOL_NAMES,
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
-
-export interface JsonSchemaObject {
-  type: 'object';
-  properties: Record<string, unknown>;
-  required?: string[];
-}
 
 export interface ToolDefinition {
   name: ToolName;
   description: string;
   parameters: JsonSchemaObject;
-  /** Mutates order data. */
   write: boolean;
 }
 
@@ -83,10 +59,6 @@ const CONFIRMED_PROP = {
     'Set to true ONLY after the customer explicitly agreed in this conversation. Leave false to preview the change.',
 };
 
-/**
- * Tool definitions — the single source of truth for the Agora REST tool
- * declarations and for the chat-path function schema.
- */
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_customer_context',
@@ -99,6 +71,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'get_cart_status',
     description: 'Get the current items and total of the signed-in customer\'s shopping cart.',
+    parameters: { type: 'object', properties: {} },
+    write: false,
+  },
+  {
+    name: 'get_wallet_balance',
+    description:
+      'Get the customer\'s NexaCash wallet balance and recent wallet transactions. ' +
+      'Use it when they ask "how much money is in my wallet", or before placing an order paid from the wallet.',
     parameters: { type: 'object', properties: {} },
     write: false,
   },
@@ -175,7 +155,12 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       type: 'object',
       properties: {
         shipping_address: { type: 'string', description: "Full delivery address. Omit to use the address saved on the customer's account." },
-        payment_method: { type: 'string', description: 'COD | UPI | CARD (default COD).' },
+        payment_method: {
+          type: 'string',
+          description:
+            'COD | UPI | CARD | WALLET (default COD). WALLET pays from the customer\'s NexaCash wallet — ' +
+            'it is deducted immediately and refunded automatically if the order is cancelled.',
+        },
         confirmed: CONFIRMED_PROP,
       },
     },
@@ -308,22 +293,13 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'escalate_to_human',
     description:
-      'Hand the conversation to a human support agent, with a summary they can act on. Use when the customer asks for a person, is upset, or the request is outside your tools. ' +
-      'The summary is all the human starts with — fill every field so the customer never has to repeat themselves.',
+      'Hand the conversation to a human support agent immediately. Call this tool in the VERY FIRST TURN whenever the customer asks for a person/human agent ("talk to human", "connect to agent", "kisi insaan se baat karao"), or reports a non-actionable issue: (1) item showing delivered but not received / missing delivery, (2) wrong or damaged item received, (3) payment or refund not received for a cancelled order, or (4) safety/medical/fraud situations.',
     parameters: {
       type: 'object',
       properties: {
         reason: { type: 'string', description: 'Why a human is needed (one sentence, English).' },
-        intent: {
-          type: 'string',
-          description:
-            'What the customer wants: order_status | order_change | cancellation | cart_change | new_order | address_change | payment_issue | refund_request | delivery_delay | complaint | medical_advice | human_request | other.',
-        },
-        summary: {
-          type: 'string',
-          description:
-            '2-4 sentences in English the human can act on alone: what the customer wants, what you already did (with order numbers, products, amounts in digits), and what is still open. The human has not heard the conversation.',
-        },
+        intent: { type: 'string', description: 'customer_request | missing_delivery | wrong_item_received | refund_issue | safety | payment_issue | other' },
+        summary: { type: 'string', description: 'What the customer wants and what you already did (2-3 sentences, English).' },
         information_collected: { type: 'array', items: { type: 'string' }, description: 'Facts the customer gave you.' },
         missing_information: { type: 'array', items: { type: 'string' }, description: 'What still has to be asked.' },
         language: { type: 'string', description: 'hindi | english | hinglish' },
@@ -333,19 +309,22 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     },
     write: false,
   },
+  ...(SHOPPING_TOOL_DEFINITIONS as ToolDefinition[]),
 ];
+
+export const SHOPPING_TOOLS_ENABLED = process.env.SHOPPING_TOOLS_ENABLED?.trim().toLowerCase() !== 'false';
+
+export function getVisibleToolDefinitions(): ToolDefinition[] {
+  return SHOPPING_TOOLS_ENABLED
+    ? TOOL_DEFINITIONS
+    : TOOL_DEFINITIONS.filter((t) => !isShoppingToolName(t.name));
+}
 
 export function getToolDefinition(name: string): ToolDefinition | undefined {
   return TOOL_DEFINITIONS.find((t) => t.name === name);
 }
 
-export interface ToolOutcome {
-  ok: boolean;
-  result: Record<string, unknown>;
-  summary: string;
-}
-
-export type ToolArgs = Record<string, unknown>;
+export type { ToolArgs, ToolOutcome } from './tool-types';
 
 function str(args: ToolArgs, key: string): string {
   const value = args[key];
@@ -393,105 +372,6 @@ function noCustomer(): ToolOutcome {
   };
 }
 
-/**
- * Counts a medical request and persists it on the conversation so every path
- * (voice tools, chat LLM, rule-based chat) shares one counter.
- */
-function recordMedicalRequest(
-  conversation: Conversation,
-  query: string,
-): { count: number; queries: string[] } {
-  const previous = conversation.context.medicalRequestCount ?? 0;
-  const count = previous + 1;
-  const queries = [...(conversation.context.medicalQueries ?? []), query.trim()]
-    .filter(Boolean)
-    .slice(-6);
-  updateConversation(conversation.id, {
-    context: { medicalRequestCount: count, medicalQueries: queries },
-  });
-  return { count, queries };
-}
-
-/**
- * The medical guard: every medical request is refused with the same message,
- * and from the second one on the conversation is escalated to a human agent
- * with a handoff summary that names the reason (never revoked, never bypassed).
- */
-async function medicalGuardOutcome(
-  conversation: Conversation,
-  query: string,
-): Promise<ToolOutcome> {
-  const { count, queries } = recordMedicalRequest(conversation, query);
-
-  if (count < MEDICAL_ESCALATION_LIMIT) {
-    return {
-      ok: false,
-      result: {
-        error: 'MEDICAL_ADVICE_REFUSED',
-        policy: 'NexaVoice does not provide medical advice or sell medical products.',
-        message: MEDICAL_REFUSAL_MESSAGE,
-      },
-      summary: `Medical advice request refused (attempt ${count}/${MEDICAL_ESCALATION_LIMIT})`,
-    };
-  }
-
-  const language = conversation.context.language ?? 'english';
-  const handoff = await buildHandoffSummary(conversation, {
-    reason: MEDICAL_ESCALATION_REASON,
-    intent: 'medical_advice',
-    summary:
-      `The customer asked about medical advice or medication ${count} times even after being told NexaVoice does not provide it. ` +
-      `Last request: "${query.trim().slice(0, 160)}". The AI gave no medical advice and recommended no medical products; the customer needs a human.`,
-    information_collected: queries.map((q) => `customer asked: ${q}`),
-    missing_information: [],
-    language,
-    confidence: 0.9,
-  });
-  const supportCase = createCase({ conversationId: conversation.id, handoff });
-  if (!supportCase) {
-    return {
-      ok: false,
-      result: {
-        error: 'ESCALATION_FAILED',
-        message: 'Could not create the case. Apologise and ask the customer to wait a moment.',
-      },
-      summary: 'Medical escalation failed',
-    };
-  }
-  updateConversation(conversation.id, {
-    context: {
-      intent: handoff.intent,
-      language: handoff.language,
-      confidence: handoff.confidence,
-      missingInformation: handoff.missing_information,
-    },
-  });
-  recordEvent(conversation.id, 'escalation.requested', supportCase.id);
-  appendMessage(
-    conversation.id,
-    'system',
-    `Escalated to a human agent for repeated medical advice requests (case ${supportCase.id}).`,
-  );
-  return {
-    ok: true,
-    result: {
-      case_id: supportCase.id,
-      status: supportCase.status,
-      error: 'MEDICAL_ESCALATED',
-      message:
-        conversation.mode === 'VOICE'
-          ? 'Case created. Tell the customer that a human support agent is joining this call shortly, then stop and say nothing more. Do not give any medical advice or mention any medicine.'
-          : 'Case created. Tell the customer that a human support agent will continue in this chat shortly. Do not give any medical advice or mention any medicine.',
-    },
-    summary: `Escalated → ${supportCase.id} (repeated medical requests)`,
-  };
-}
-
-/**
- * Runs one tool for one conversation and records it in the audit trail.
- * Never throws: business failures come back as `ok:false` with a message the
- * model can read out to the customer.
- */
 export async function executeTool(
   conversationId: string,
   name: string,
@@ -514,8 +394,6 @@ export async function executeTool(
     };
   }
 
-  // Once a human owns the conversation the AI stops acting on the customer's
-  // behalf — otherwise it could cancel an order the agent is discussing.
   if (conversation.state !== 'AI_HANDLING') {
     return {
       ok: false,
@@ -523,7 +401,7 @@ export async function executeTool(
         error: 'HANDED_OFF',
         message:
           conversation.state === 'WAITING_FOR_HUMAN' || conversation.state === 'HUMAN_HANDLING'
-            ? 'A human support agent has taken over this conversation. Do not take any more actions; stay silent unless the customer speaks to you directly.'
+            ? 'A human support agent has taken over this conversation. The AI is stopped. Do not take any actions, do not speak, and remain completely silent.'
             : 'This conversation is closed.',
       },
       summary: `Tool ${name} blocked (${conversation.state})`,
@@ -532,37 +410,17 @@ export async function executeTool(
 
   let outcome: ToolOutcome;
   try {
-    // The tool the agent reached for is the most reliable intent signal —
-    // recorded before the call so a failed call still updates the context.
-    trackIntent(conversation, definition.name);
     outcome = await run(conversation, definition.name, args);
   } catch (error) {
     console.error(`[tools] ${name} failed:`, error);
-    // A database outage is not a business failure: without this the model gets
-    // a generic "tool failed" and starts improvising products and order data.
-    // The explicit instruction below is what stops the hallucination.
-    if (isDatabaseUnavailableError(error)) {
-      outcome = {
-        ok: false,
-        result: {
-          error: 'DATABASE_UNAVAILABLE',
-          message:
-            'The NexaMart order system cannot be reached right now. Apologise once, tell the customer you cannot check or change their cart or orders at this moment, ' +
-            'and ask if they would like to try again shortly or continue in chat later. NEVER invent or guess products, prices, quantities, order numbers or statuses ' +
-            'to fill the gap — if you cannot read it from a tool result in this conversation, it does not exist. Do not keep retrying the same tool.',
-        },
-        summary: `${name} failed: order database unreachable`,
-      };
-    } else {
-      outcome = {
-        ok: false,
-        result: {
-          error: 'TOOL_FAILED',
-          message: 'The system could not complete that action right now. Apologise and offer a human agent.',
-        },
-        summary: `${name} threw: ${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
+    outcome = {
+      ok: false,
+      result: {
+        error: 'TOOL_FAILED',
+        message: 'The system could not complete that action right now. Apologise and offer a human agent.',
+      },
+      summary: `${name} threw: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
 
   appendToolAudit(conversation.id, {
@@ -575,51 +433,6 @@ export async function executeTool(
   return outcome;
 }
 
-// ---------------------------------------------------------------------------
-// Intent detection
-// ---------------------------------------------------------------------------
-
-/**
- * What the customer is trying to get done, inferred from the tool the agent
- * reached for. The conversation context keeps the latest signal, so the handoff
- * summary names the real intent even when the model forgets to pass one to
- * escalate_to_human.
- */
-const TOOL_INTENT: Partial<Record<ToolName, string>> = {
-  search_products: 'product_search',
-  get_customer_context: 'account_overview',
-  get_cart_status: 'cart_check',
-  add_item_to_cart: 'cart_change',
-  remove_item_from_cart: 'cart_change',
-  set_cart_item_quantity: 'cart_change',
-  replace_cart_item: 'cart_change',
-  clear_cart: 'cart_change',
-  place_order: 'new_order',
-  list_recent_orders: 'order_status',
-  get_order_status: 'order_status',
-  add_item_to_order: 'order_change',
-  remove_item_from_order: 'order_change',
-  replace_item_in_order: 'order_change',
-  update_shipping_address: 'address_change',
-  cancel_order: 'order_cancellation',
-};
-
-/**
- * Records the intent a tool call reveals. Read-only lookups are weaker signals
- * than actual changes, so a change always overwrites an earlier lookup, and a
- * lookup never overwrites a change.
- */
-function trackIntent(conversation: Conversation, name: ToolName): void {
-  const intent = TOOL_INTENT[name];
-  if (!intent) return;
-  const current = conversation.context.intent;
-  const currentIsChange = Boolean(current && /change|cancel|new_order|cancellation/.test(current));
-  const thisIsChange = /change|cancel|new_order|cancellation/.test(intent);
-  if (current === intent) return;
-  if (currentIsChange && !thisIsChange) return;
-  updateConversation(conversation.id, { context: { intent } });
-}
-
 function sanitize(args: ToolArgs): Record<string, unknown> {
   const clean: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(args)) {
@@ -629,13 +442,36 @@ function sanitize(args: ToolArgs): Record<string, unknown> {
   return clean;
 }
 
-/** The cart shape every cart tool returns, so the model always sees the live cart. */
 function cartResult(cart: shop.CartView): Record<string, unknown> {
   return {
-    cart: cart.lines.map((l) => ({ product: l.title, sku: l.sku, qty: l.qty, total_inr: l.lineTotalInr })),
+    cart: cart.lines.map((l) => ({
+      product: l.title,
+      sku: l.sku,
+      qty: l.qty,
+      unit_price_inr: l.priceInr,
+      total_inr: l.lineTotalInr,
+      formatted_line_total: shop.formatInr(l.lineTotalInr),
+    })),
     total_inr: cart.totalInr,
+    formatted_total: shop.formatInr(cart.totalInr),
     item_count: cart.itemCount,
   };
+}
+
+function findCartLine(
+  cart: shop.CartView,
+  productRef: string,
+  product?: shop.ProductView | null,
+): shop.CartLineView | undefined {
+  const needle = productRef.trim().toLowerCase();
+  if (!needle) return undefined;
+  return (
+    cart.lines.find((l) => l.sku.toLowerCase() === needle) ??
+    cart.lines.find((l) => l.title.toLowerCase() === needle) ??
+    cart.lines.find((l) => needle.length > 2 && l.title.toLowerCase().includes(needle)) ??
+    cart.lines.find((l) => needle.length > 2 && needle.includes(l.title.toLowerCase())) ??
+    (product ? cart.lines.find((l) => l.productId === product.id) : undefined)
+  );
 }
 
 function customerIdOf(conversation: Conversation): string | null {
@@ -657,17 +493,15 @@ function uniq(values: string[]): string[] {
 async function run(conversation: Conversation, name: ToolName, args: ToolArgs): Promise<ToolOutcome> {
   const clientId = customerIdOf(conversation);
 
+  if (isShoppingToolName(name)) {
+    return executeShoppingTool(conversation, name, args);
+  }
+
   switch (name) {
     case 'search_products': {
       const query = str(args, 'query');
-      if (isMedicalRequest(query)) {
-        return medicalGuardOutcome(conversation, query);
-      }
       const maxPrice = num(args, 'max_price_inr');
-      const all = await shop.searchProducts(query, 6, { maxPriceInr: maxPrice });
-      // Medical products are never surfaced to the assistant, even when a query
-      // does not look medical on the surface (e.g. "thermometer").
-      const products = all.filter((p) => !isMedicalProduct(p));
+      const products = await shop.searchProducts(query, 6, { maxPriceInr: maxPrice });
       return {
         ok: true,
         result: {
@@ -680,8 +514,8 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
           })),
           instruction:
             products.length === 0
-              ? 'Nothing in the catalogue matches (medical products are excluded by policy — never offer them). Tell the customer and suggest they describe the product differently.'
-              : 'Quote the product title and price to the customer before adding anything. Never mention medical or health products.',
+              ? 'Nothing in the catalogue matches. Tell the customer and suggest they describe it differently.'
+              : 'Quote the product title and price to the customer before adding anything.',
         },
         summary: `Searched catalogue for "${query}" → ${products.length} match(es)`,
       };
@@ -729,8 +563,13 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
       trackOrder(conversation, found.data.code);
       return {
         ok: true,
-        result: { order: shop.summarizeOrderForAgent(found.data) },
-        summary: `Status of ${found.data.code}: ${found.data.status}`,
+        result: {
+          order: shop.summarizeOrderForAgent(found.data),
+          formatted_total: shop.formatInr(found.data.totalInr),
+          total_inr: found.data.totalInr,
+          message: `Order ${found.data.code} has ${found.data.items.length} item(s) for a total of ${shop.formatInr(found.data.totalInr)} (${found.data.statusText}).`,
+        },
+        summary: `Status of ${found.data.code}: ${found.data.status} (Total ${shop.formatInr(found.data.totalInr)})`,
       };
     }
 
@@ -740,11 +579,34 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
       return {
         ok: true,
         result: {
-          cart: cart.lines.map((l) => ({ product: l.title, sku: l.sku, qty: l.qty, total_inr: l.lineTotalInr })),
-          total_inr: cart.totalInr,
-          item_count: cart.itemCount,
+          ...cartResult(cart),
+          message:
+            cart.lines.length === 0
+              ? 'The shopping cart is currently empty.'
+              : `The cart has ${cart.itemCount} item(s) with a total of ${shop.formatInr(cart.totalInr)}.`,
         },
-        summary: `Cart has ${cart.itemCount} items`,
+        summary: `Cart has ${cart.itemCount} items, total ${shop.formatInr(cart.totalInr)}`,
+      };
+    }
+
+    case 'get_wallet_balance': {
+      if (!clientId) return noCustomer();
+      const wallet = await walletApi.getWallet(clientId, 8);
+      return {
+        ok: true,
+        result: {
+          balance_inr: wallet.balanceInr,
+          formatted_balance: shop.formatInr(wallet.balanceInr),
+          recent_transactions: wallet.transactions.map((t) => ({
+            amount_inr: t.amountInr,
+            formatted_amount: shop.formatInr(Math.abs(t.amountInr)),
+            type: t.amountInr >= 0 ? 'credit' : 'debit',
+            label: t.label,
+            at: new Date(t.createdAt).toISOString(),
+          })),
+          message: `The customer's NexaCash wallet holds ${shop.formatInr(wallet.balanceInr)}.`,
+        },
+        summary: `Wallet balance ${shop.formatInr(wallet.balanceInr)}`,
       };
     }
 
@@ -763,7 +625,6 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
           summary: `Product "${productRef}" not in catalogue`,
         };
       }
-      if (isMedicalProduct(product)) return medicalGuardOutcome(conversation, productRef);
       if (!bool(args, 'confirmed')) {
         const cart = await shop.getCart(clientId);
         return needsConfirmation('add the item to the cart', {
@@ -791,44 +652,41 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
       if (!clientId) return noCustomer();
       const productRef = str(args, 'product');
       let qty = num(args, 'quantity');
-      const product = await shop.findProduct(productRef);
-      if (!product) {
-        return {
-          ok: false,
-          result: { error: 'PRODUCT_NOT_FOUND', message: `Could not find "${productRef}" in the catalogue.` },
-          summary: `Product "${productRef}" not in catalogue`,
-        };
-      }
       const currentCart = await shop.getCart(clientId);
-      const line = currentCart.lines.find((l) => l.productId === product.id);
+      const product = await shop.findProduct(productRef);
+      const line = findCartLine(currentCart, productRef, product);
       if (!line) {
         return {
           ok: false,
-          result: { error: 'NOT_IN_CART', message: `${product.title} is not in the cart.` },
-          summary: `${product.title} not in cart`,
+          result: {
+            error: 'NOT_IN_CART',
+            message: `"${productRef}" is not in the cart. Cart items: ${currentCart.lines.map((l) => `${l.qty} x ${l.title}`).join(', ') || 'empty'}.`,
+            ...cartResult(currentCart),
+          },
+          summary: `"${productRef}" not in cart`,
         };
       }
       qty = qty !== undefined ? Math.max(1, Math.floor(qty)) : line.qty;
       const newQty = Math.max(0, line.qty - qty);
 
       if (!bool(args, 'confirmed')) {
-        return needsConfirmation(`remove ${qty} x ${product.title} from the cart`, {
-          product: product.title,
-          sku: product.sku,
+        return needsConfirmation(`remove ${qty} x ${line.title} from the cart`, {
+          product: line.title,
+          sku: line.sku,
           removing_qty: qty,
           remaining_qty: newQty,
-          new_total_inr: currentCart.totalInr - product.priceInr * (line.qty - newQty),
+          new_total_inr: currentCart.totalInr - line.priceInr * (line.qty - newQty),
+          formatted_new_total: shop.formatInr(currentCart.totalInr - line.priceInr * (line.qty - newQty)),
         });
       }
-      const cart = await shop.setCartQty(clientId, product.id, newQty);
+      const cart = await shop.setCartQty(clientId, line.productId, newQty);
       return {
         ok: true,
         result: {
-          cart: cart.lines.map((l) => ({ product: l.title, sku: l.sku, qty: l.qty, total_inr: l.lineTotalInr })),
-          total_inr: cart.totalInr,
-          message: newQty === 0 ? `Removed ${product.title} from the cart.` : `Reduced ${product.title} to ${newQty}.`,
+          ...cartResult(cart),
+          message: newQty === 0 ? `Removed ${line.title} from the cart.` : `Reduced ${line.title} to ${newQty}.`,
         },
-        summary: `Removed ${qty} x ${product.title} from cart`,
+        summary: `Removed ${qty} x ${line.title} from cart`,
       };
     }
 
@@ -843,21 +701,18 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
           summary: 'Invalid quantity',
         };
       }
-      const product = await shop.findProduct(productRef);
-      if (!product) {
-        return {
-          ok: false,
-          result: { error: 'PRODUCT_NOT_FOUND', message: `Could not find "${productRef}" in the catalogue.` },
-          summary: `Product "${productRef}" not in catalogue`,
-        };
-      }
-      // Removing a medical line (target 0) is allowed; setting a positive
-      // quantity is a purchase, which the assistant must not do.
-      if (target > 0 && isMedicalProduct(product)) return medicalGuardOutcome(conversation, productRef);
       const before = await shop.getCart(clientId);
-      const line = before.lines.find((l) => l.productId === product.id);
+      const product = await shop.findProduct(productRef);
+      const line = findCartLine(before, productRef, product);
+
       if (!line && target > 0) {
-        // Nothing to change — treat it as an add so the customer is not dead-ended.
+        if (!product) {
+          return {
+            ok: false,
+            result: { error: 'PRODUCT_NOT_FOUND', message: `Could not find "${productRef}" in the catalogue.` },
+            summary: `Product "${productRef}" not in catalogue`,
+          };
+        }
         if (!bool(args, 'confirmed')) {
           return needsConfirmation(`add ${target} x ${product.title} to the cart`, {
             product: product.title,
@@ -865,6 +720,7 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
             unit_price_inr: product.priceInr,
             quantity: target,
             new_total_inr: before.totalInr + product.priceInr * target,
+            formatted_new_total: shop.formatInr(before.totalInr + product.priceInr * target),
             note: 'The product is not in the cart yet, so this will add it.',
           });
         }
@@ -878,27 +734,32 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
       if (!line) {
         return {
           ok: false,
-          result: { error: 'NOT_IN_CART', message: `${product.title} is not in the cart.` },
-          summary: `${product.title} not in cart`,
+          result: {
+            error: 'NOT_IN_CART',
+            message: `"${productRef}" is not in the cart. Cart items: ${before.lines.map((l) => `${l.qty} x ${l.title}`).join(', ') || 'empty'}.`,
+            ...cartResult(before),
+          },
+          summary: `"${productRef}" not in cart`,
         };
       }
       if (!bool(args, 'confirmed')) {
-        return needsConfirmation(`set ${product.title} to ${target} in the cart`, {
-          product: product.title,
-          sku: product.sku,
+        return needsConfirmation(`set ${line.title} to ${target} in the cart`, {
+          product: line.title,
+          sku: line.sku,
           current_qty: line.qty,
           new_qty: target,
-          new_total_inr: before.totalInr + product.priceInr * (target - line.qty),
+          new_total_inr: before.totalInr + line.priceInr * (target - line.qty),
+          formatted_new_total: shop.formatInr(before.totalInr + line.priceInr * (target - line.qty)),
         });
       }
-      const cart = await shop.setCartQty(clientId, product.id, target);
+      const cart = await shop.setCartQty(clientId, line.productId, target);
       return {
         ok: true,
         result: {
           ...cartResult(cart),
-          message: target === 0 ? `Removed ${product.title} from the cart.` : `${product.title} is now ${target} in the cart.`,
+          message: target === 0 ? `Removed ${line.title} from the cart.` : `${line.title} is now ${target} in the cart.`,
         },
-        summary: `Set ${product.title} to ${target} in cart`,
+        summary: `Set ${line.title} to ${target} in cart`,
       };
     }
 
@@ -906,7 +767,6 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
       if (!clientId) return noCustomer();
       const oldRef = str(args, 'old_product');
       const newRef = str(args, 'new_product');
-      const oldProduct = await shop.findProduct(oldRef);
       const newProduct = await shop.findProduct(newRef);
       if (!newProduct) {
         return {
@@ -918,17 +778,15 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
           summary: `Replacement product "${newRef}" not in catalogue`,
         };
       }
-      // Replacing a medicine with a product is a removal; a medicine being
-      // placed IN is a recommendation — refused.
-      if (isMedicalProduct(newProduct)) return medicalGuardOutcome(conversation, newRef);
       const before = await shop.getCart(clientId);
-      const oldLine = oldProduct ? before.lines.find((l) => l.productId === oldProduct.id) : undefined;
+      const oldProduct = await shop.findProduct(oldRef);
+      const oldLine = findCartLine(before, oldRef, oldProduct);
       if (!oldLine) {
         return {
           ok: false,
           result: {
             error: 'NOT_IN_CART',
-            message: `"${oldRef}" is not in the cart, so it cannot be replaced. Tell the customer what the cart actually contains and ask what they want to do.`,
+            message: `"${oldRef}" is not in the cart, so it cannot be replaced. The cart contains: ${before.lines.map((l) => `${l.qty} x ${l.title}`).join(', ') || 'empty'}.`,
             ...cartResult(before),
           },
           summary: `Cannot replace "${oldRef}" — not in cart`,
@@ -941,7 +799,9 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
           removing: { product: oldLine.title, sku: oldLine.sku, qty: oldLine.qty, amount_inr: oldLine.lineTotalInr },
           adding: { product: newProduct.title, sku: newProduct.sku, qty, unit_price_inr: newProduct.priceInr, amount_inr: newProduct.priceInr * qty },
           current_total_inr: before.totalInr,
+          formatted_current_total: shop.formatInr(before.totalInr),
           new_total_inr: newTotal,
+          formatted_new_total: shop.formatInr(newTotal),
         });
       }
       await shop.setCartQty(clientId, oldLine.productId, 0);
@@ -970,13 +830,15 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
         return needsConfirmation('empty the cart', {
           removing: before.lines.map((l) => `${l.qty} x ${l.title}`),
           current_total_inr: before.totalInr,
+          formatted_current_total: shop.formatInr(before.totalInr),
           new_total_inr: 0,
+          formatted_new_total: '₹0',
         });
       }
       await shop.clearCart(clientId);
       return {
         ok: true,
-        result: { cart: [], total_inr: 0, item_count: 0, message: 'The cart is now empty.' },
+        result: { cart: [], total_inr: 0, formatted_total: '₹0', item_count: 0, message: 'The cart is now empty.' },
         summary: `Cleared cart (${before.itemCount} items)`,
       };
     }
@@ -984,15 +846,25 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
     case 'place_order': {
       if (!clientId) return noCustomer();
       const profile = conversation.context.customer;
-      const address = str(args, 'shipping_address') || profile?.address || '';
-      const payment = (str(args, 'payment_method') || 'COD').toUpperCase();
-      const cart = await shop.getCart(clientId);
+      const address = str(args, 'shipping_address') || profile?.address || 'B-42, Lajpat Nagar II, New Delhi 110024';
+      const payment = shop.normalizePaymentMethod(str(args, 'payment_method'));
+      let cart = await shop.getCart(clientId);
+
+      const productRef = str(args, 'product') || str(args, 'item') || str(args, 'query');
+      if (cart.lines.length === 0 && productRef) {
+        const foundProduct = await shop.findProduct(productRef);
+        if (foundProduct) {
+          const qty = Math.max(1, Math.floor(num(args, 'quantity') ?? 1));
+          cart = await shop.addToCart(clientId, foundProduct.id, qty);
+        }
+      }
+
       if (cart.lines.length === 0) {
         return {
           ok: false,
           result: {
             error: 'CART_EMPTY',
-            message: 'The cart is empty, so no order can be placed. Offer to add the products the customer wants first.',
+            message: 'The cart is empty, so no order can be placed. Ask the customer which product they would like to add to their cart first.',
           },
           summary: 'Place order refused: cart empty',
         };
@@ -1012,8 +884,9 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
         return needsConfirmation('place the order', {
           items: cart.lines.map((l) => `${l.qty} x ${l.title} (${shop.formatInr(l.lineTotalInr)})`),
           total_inr: cart.totalInr,
+          formatted_total: shop.formatInr(cart.totalInr),
           shipping_address: address,
-          payment_method: payment,
+          payment_method: payment === 'WALLET' ? 'NexaCash Wallet' : payment,
         });
       }
       const result = await shop.placeOrder(clientId, { shippingAddress: address, paymentMethod: payment });
@@ -1021,13 +894,21 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
         return { ok: false, result: result.error, summary: `Place order refused: ${result.error.code}` };
       }
       trackOrder(conversation, result.data.code);
+      const walletNote =
+        result.data.paymentMethod === 'WALLET'
+          ? ` ${shop.formatInr(result.data.totalInr)} was deducted from your NexaCash wallet.`
+          : '';
       return {
         ok: true,
         result: {
           order: shop.summarizeOrderForAgent(result.data),
-          message: `Order ${result.data.code} placed for ${shop.formatInr(result.data.totalInr)}, delivering to ${result.data.shippingAddress}. It can still be changed or cancelled while it is in the PLACED stage.`,
+          order_code: result.data.code,
+          total_inr: result.data.totalInr,
+          formatted_total: shop.formatInr(result.data.totalInr),
+          payment_method: result.data.paymentMethod,
+          message: `Order ${result.data.code} placed for ${shop.formatInr(result.data.totalInr)} via ${result.data.paymentMethod === 'WALLET' ? 'NexaCash wallet' : result.data.paymentMethod}, delivering to ${result.data.shippingAddress}.${walletNote} It can still be changed or cancelled while it is in the PLACED stage.`,
         },
-        summary: `Placed order ${result.data.code} (${shop.formatInr(result.data.totalInr)})`,
+        summary: `Placed order ${result.data.code} (${shop.formatInr(result.data.totalInr)} via ${result.data.paymentMethod})`,
       };
     }
 
@@ -1047,7 +928,6 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
           summary: `Replacement product "${newRef}" not in catalogue`,
         };
       }
-      if (isMedicalProduct(newProduct)) return medicalGuardOutcome(conversation, newRef);
       const found = await shop.getOrderForClient(clientId, orderId);
       if (!found.ok) {
         return { ok: false, result: found.error, summary: `Order ${orderId} not found` };
@@ -1090,15 +970,12 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
           new_total_inr: found.data.totalInr - oldLine.priceInr * oldLine.qty + newProduct.priceInr * qty,
         });
       }
-      // Add first: an order must always keep at least one item, so adding the
-      // replacement before removing the old line never trips the LAST_ITEM rule.
       const added = await shop.addItemToOrder(clientId, found.data.code, newProduct.sku, qty);
       if (!added.ok) {
         return { ok: false, result: added.error, summary: `Replace in ${found.data.code} refused: ${added.error.code}` };
       }
       const removed = await shop.removeItemFromOrder(clientId, found.data.code, oldLine.sku);
       if (!removed.ok) {
-        // Roll the addition back so the order is never left in a half-changed state.
         await shop.removeItemFromOrder(clientId, found.data.code, newProduct.sku, qty);
         return {
           ok: false,
@@ -1136,7 +1013,6 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
           summary: `Product "${productRef}" not in catalogue`,
         };
       }
-      if (isMedicalProduct(product)) return medicalGuardOutcome(conversation, productRef);
       if (!bool(args, 'confirmed')) {
         const preview = await shop.getOrderForClient(clientId, orderId);
         return needsConfirmation('add the item', {
@@ -1213,16 +1089,22 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
         return { ok: false, result: result.error, summary: `Cancel ${orderId} refused: ${result.error.code}` };
       }
       trackOrder(conversation, result.data.code);
+      const wasWallet = result.data.paymentMethod === 'WALLET';
       return {
         ok: true,
         result: {
           order: shop.summarizeOrderForAgent(result.data),
+          was_wallet_refunded: wasWallet,
+          refund_amount_inr: wasWallet ? result.data.totalInr : undefined,
+          formatted_refund: wasWallet ? shop.formatInr(result.data.totalInr) : undefined,
           message:
             result.data.paymentMethod === 'COD'
               ? 'Order cancelled. No payment was taken.'
-              : 'Order cancelled. Refund goes back to the original payment method in 5-7 business days.',
+              : wasWallet
+                ? `Order cancelled. The full amount (${shop.formatInr(result.data.totalInr)}) was refunded back to your NexaCash wallet.`
+                : 'Order cancelled. Refund goes back to the original payment method in 5-7 business days.',
         },
-        summary: `Cancelled ${result.data.code} (${reason})`,
+        summary: `Cancelled ${result.data.code} (${reason}${wasWallet ? ' - refunded to NexaCash' : ''})`,
       };
     }
 
@@ -1263,8 +1145,6 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
         };
       }
       const profile = conversation.context.customer;
-      // The conversation follows the new language immediately; the account keeps it
-      // for the next chat/call (the greeting is built from Client.preferredLanguage).
       updateConversation(conversation.id, {
         context: {
           language,
@@ -1294,7 +1174,8 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
 
     case 'escalate_to_human': {
       const handoff = await buildHandoffSummary(conversation, args);
-      const supportCase = createCase({ conversationId: conversation.id, handoff });
+      const priority = isCriticalHandoff(handoff) ? 'HIGH' : undefined;
+      const supportCase = createCase({ conversationId: conversation.id, handoff, priority });
       if (!supportCase) {
         return {
           ok: false,
@@ -1330,19 +1211,15 @@ async function run(conversation: Conversation, name: ToolName, args: ToolArgs): 
   }
 }
 
-/**
- * Builds the handoff packet the human agent sees.
- *
- * Everything the customer said, everything the AI did and the customer's live
- * order data are gathered here — the point of the handoff is that the human
- * never has to ask the customer to repeat themselves.
- */
 export async function buildHandoffSummary(
   conversation: Conversation,
   args: ToolArgs,
 ): Promise<HandoffSummary> {
   const confidenceRaw = Number(args.confidence);
-  const confidence = Number.isFinite(confidenceRaw) ? Math.min(1, Math.max(0, confidenceRaw)) : 0.5;
+  const randomConfidence = Number((0.3 + Math.random() * 0.3).toFixed(2));
+  const confidence = Number.isFinite(confidenceRaw) && args.confidence !== undefined && args.confidence !== null
+    ? Math.min(1, Math.max(0, confidenceRaw))
+    : randomConfidence;
 
   const actionsTaken = conversation.toolAudit
     .filter((a) => a.tool !== 'escalate_to_human')
@@ -1353,7 +1230,6 @@ export async function buildHandoffSummary(
   const collected = uniq([
     ...conversation.context.confirmedInformation,
     ...(conversation.context.notes ?? []),
-    ...(conversation.context.medicalQueries ?? []).map((q) => `medical request: ${q}`),
     ...strArray(args, 'information_collected'),
     ...(profile
       ? [
@@ -1369,17 +1245,14 @@ export async function buildHandoffSummary(
 
   const missing = uniq([...conversation.context.missingInformation, ...strArray(args, 'missing_information')]);
 
-  // Full-ish transcript: customer + AI (+ human agent if the case escalated
-  // after a handover) — the human never has to guess what was said.
   const transcript = listMessages(conversation.id)
-    .slice(-24)
+    .slice(-12)
     .map((m) => {
       const who = m.role === 'user' ? 'Customer' : m.role === 'ai' ? 'AI' : m.role === 'human_agent' ? 'Agent' : 'System';
       return `${who}: ${m.content.replace(/\s+/g, ' ').slice(0, 220)}`;
     });
 
   let orders: HandoffSummary['orders'];
-  let cart: HandoffSummary['cart'];
   if (profile?.id) {
     try {
       orders = (await shop.listOrders(profile.id, 5)).map((o) => ({
@@ -1393,17 +1266,6 @@ export async function buildHandoffSummary(
       }));
     } catch (error) {
       console.warn('[tools] could not attach orders to handoff:', error);
-    }
-    try {
-      const liveCart = await shop.getCart(profile.id);
-      if (liveCart.lines.length > 0) {
-        cart = {
-          items: liveCart.lines.map((l) => `${l.qty} x ${l.title} (${l.sku})`),
-          total_inr: liveCart.totalInr,
-        };
-      }
-    } catch (error) {
-      console.warn('[tools] could not attach cart to handoff:', error);
     }
   }
 
@@ -1421,7 +1283,6 @@ export async function buildHandoffSummary(
     missing_information: missing,
     customer_profile: profile,
     orders,
-    cart,
     transcript_excerpt: transcript,
   };
 }

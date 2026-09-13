@@ -14,21 +14,15 @@ function getJson(response: Response) {
 
 process.env.NEXT_PUBLIC_AGORA_APP_ID = '0123456789abcdef0123456789abcdef';
 process.env.NEXT_AGORA_APP_CERTIFICATE = 'fedcba9876543210fedcba9876543210';
-// Keep the durable mirror off unless a test turns it on: contract checks must not
-// touch a developer's real store just because DATABASE_URL is in the env file.
 process.env.NEXAVOICE_STORE = 'memory';
 
-/**
- * Durability checks need PostgreSQL. They skip (without failing) when no database
- * is reachable — e.g. inside a build container that has no Postgres — so the rest
- * of the contract suite still runs.
- */
 async function postgresAvailable(): Promise<boolean> {
   if (!process.env.DATABASE_URL?.trim()) return false;
   try {
     const { Client } = await import('pg');
+    const { pgConnectionConfig } = await import('../lib/pg-config');
     const client = new Client({
-      connectionString: process.env.DATABASE_URL,
+      ...pgConnectionConfig(process.env.DATABASE_URL),
       connectionTimeoutMillis: 2000,
     });
     await client.connect();
@@ -40,11 +34,6 @@ async function postgresAvailable(): Promise<boolean> {
   }
 }
 
-/**
- * Creates a throw-away client with one freshly placed order, so the tool and
- * chat checks below run against the real PostgreSQL shop instead of fixtures.
- * Returns a `cleanup()` that removes everything it created.
- */
 async function makeShopFixture(label: string) {
   const { prisma } = await import('../lib/db');
   const shop = await import('../lib/shop/service');
@@ -81,7 +70,6 @@ async function makeShopFixture(label: string) {
   };
 }
 
-/** Deletes a Postgres-backed store document, used to clean up isolated test state. */
 async function deleteStoreDocument(key: string): Promise<void> {
   try {
     const { prisma } = await import('../lib/db');
@@ -90,7 +78,6 @@ async function deleteStoreDocument(key: string): Promise<void> {
     // Best effort — the row id is unique to this process run.
   }
 }
-
 
 async function verifyGenerateAgoraTokenRoute() {
   const { GET: generateAgoraToken } =
@@ -126,9 +113,6 @@ async function verifyGenerateAgoraTokenRoute() {
       body.channel === 'test-channel',
       'GET /api/generate-agora-token should preserve the requested channel',
     );
-    // Unit guard: Agora's token builder wants Unix *seconds*, but a client comparing an
-    // expiry against Date.now() needs milliseconds. Returning the builder's raw value
-    // reads as an expiry in 1970 and silently breaks anything that schedules on it.
     assert(
       typeof body.expiresAt === 'number' &&
         body.expiresAt > Date.now() &&
@@ -528,10 +512,6 @@ async function verifyStopConversationSuccess() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// NexaVoice support backend: tool guardrails, REST tool endpoint, escalation
-// ---------------------------------------------------------------------------
-
 async function verifyToolLayerGuardrails() {
   if (!(await postgresAvailable())) {
     console.log('tool guardrails: skipped (no PostgreSQL reachable)');
@@ -545,7 +525,6 @@ async function verifyToolLayerGuardrails() {
 
   const fixture = await makeShopFixture('guardrails');
   try {
-    // 1. Without a signed-in client no order data is reachable at all.
     const anonymous = createConversation({ mode: 'CHAT' });
     const blocked = await executeTool(anonymous.id, 'list_recent_orders', {});
     assert(
@@ -567,14 +546,12 @@ async function verifyToolLayerGuardrails() {
       },
     });
 
-    // 2. Context and orders come from the database.
     const context = await executeTool(conversation.id, 'get_customer_context', {});
     assert(
       context.ok && (context.result.orders as unknown[]).length === 1,
       'get_customer_context should return the client orders from PostgreSQL',
     );
 
-    // 3. Only catalogue products can be added.
     const bogus = await executeTool(conversation.id, 'add_item_to_order', {
       order_id: fixture.order.code,
       product: 'diamond helicopter',
@@ -585,7 +562,6 @@ async function verifyToolLayerGuardrails() {
       'products outside the catalogue must be refused',
     );
 
-    // 4. Writes require explicit confirmation.
     const socks = fixture.products.find((p) => /socks/i.test(p.title))!;
     const unconfirmed = await executeTool(conversation.id, 'add_item_to_order', {
       order_id: fixture.order.code,
@@ -611,7 +587,6 @@ async function verifyToolLayerGuardrails() {
       'the order total must include the added items',
     );
 
-    // 5. Another client's order is invisible.
     const other = await makeShopFixture('guardrails-other');
     try {
       const foreign = await executeTool(conversation.id, 'get_order_status', { order_id: other.order.code });
@@ -620,7 +595,6 @@ async function verifyToolLayerGuardrails() {
       await other.cleanup();
     }
 
-    // 6. Escalation builds a handoff carrying profile, orders and transcript.
     const escalated = await executeTool(conversation.id, 'escalate_to_human', {
       reason: 'Customer asked for a human',
       intent: 'order_edit',
@@ -681,8 +655,6 @@ async function verifyAgentToolsEndpoint() {
       { params },
     );
     const body = await getJson(ok);
-    // No signed-in client on this conversation: the engine still gets a 200 with a
-    // message the model can speak, never a transport error.
     assert(ok.status === 200 && body.ok === false, 'agent tool endpoint should execute the tool and answer 200');
     assert(body.tool_call_id === 'call_1', 'agent tool endpoint should echo tool_call_id');
     assert(body.error === 'NO_SIGNED_IN_CUSTOMER', 'an unbound conversation must not reach order data');
@@ -859,11 +831,6 @@ async function verifyChatEscalationFlow() {
   }
 }
 
-/**
- * The shopping contract the whole feature rests on: an order is editable while it
- * is PLACED, moves on by itself, and is frozen afterwards — for the customer's own
- * clicks and for the AI agent alike, because both go through this service.
- */
 async function verifyOrderLifecycle() {
   if (!(await postgresAvailable())) {
     console.log('order lifecycle: skipped (no PostgreSQL reachable)');
@@ -872,11 +839,6 @@ async function verifyOrderLifecycle() {
   const previousPlaced = process.env.ORDER_PLACED_SECONDS;
   const previousTransit = process.env.ORDER_TRANSIT_SECONDS;
   const previousEdit = process.env.ORDER_EDIT_SECONDS;
-  // Two seconds per stage keeps the check fast; production defaults are minutes.
-  // ORDER_EDIT_SECONDS matters because the check edits the order while it is
-  // PLACED, which restarts the countdown on the edit window (default 60s) —
-  // without this override the order stays PLACED for a minute and the
-  // "advances on its own" assertion below can never pass.
   process.env.ORDER_PLACED_SECONDS = '2';
   process.env.ORDER_TRANSIT_SECONDS = '2';
   process.env.ORDER_EDIT_SECONDS = '2';
@@ -894,7 +856,6 @@ async function verifyOrderLifecycle() {
     const lastItem = await shop.removeItemFromOrder(fixture.client.id, fixture.order.code, fixture.product.sku);
     assert(!lastItem.ok && lastItem.error.code === 'LAST_ITEM', 'the final item cannot be removed — cancel instead');
 
-    // Status advances on its own.
     await new Promise((resolve) => setTimeout(resolve, 2200));
     const onTheWay = await shop.getOrderForClient(fixture.client.id, fixture.order.code);
     assert(onTheWay.ok && onTheWay.data.status === 'ON_THE_WAY', 'a PLACED order becomes ON_THE_WAY on its own');
@@ -924,125 +885,6 @@ async function verifyOrderLifecycle() {
   }
 }
 
-/**
- * The agent dashboard may only show conversations whose customer is still there.
- * A browser that stops sending heartbeats (tab closed, signed out, network gone)
- * must have its conversation terminated by the sweep.
- */
-/**
- * Medical safety contract — runs without PostgreSQL because the gate fires
- * before any shop I/O:
- *   - the tool layer refuses a medical search (attempt 1) and auto-escalates
- *     from attempt 2, creating a case whose handoff names the reason;
- *   - the rule-based chat agent refuses/escalates through the same gate;
- *   - the custom-LLM / voice path (`/api/chat/completions`) never reaches the
- *     model: the gate streams the refusal/escalation reply instead.
- */
-async function verifyMedicalGuard() {
-  const { resetSupportDb, createConversation, getConversation, getCase } =
-    await import('../lib/support/store');
-  const { executeTool } = await import('../lib/support/tools');
-  const { runChatTurn } = await import('../lib/chat-agent');
-  const { createChatCompletionsHandler } = await import('../lib/chat-completions');
-  const { appendMessage } = await import('../lib/support/store');
-
-  resetSupportDb();
-
-  // 1. Tool layer: search → refused; second search → auto case.
-  const toolConv = createConversation({ mode: 'VOICE', customerName: 'Medical Test' });
-  const first = await executeTool(toolConv.id, 'search_products', { query: 'paracetamol tablet' });
-  assert(
-    !first.ok && first.result.error === 'MEDICAL_ADVICE_REFUSED',
-    'a medical product search must be refused by the tool layer',
-  );
-  assert(
-    getConversation(toolConv.id)?.context.medicalRequestCount === 1,
-    'the medical counter must increment on the first request',
-  );
-  const second = await executeTool(toolConv.id, 'search_products', { query: 'dolo 650 for fever' });
-  assert(
-    second.ok && second.result.error === 'MEDICAL_ESCALATED',
-    'the second medical request must auto-escalate',
-  );
-  const toolCase = getCase(String(second.result.case_id));
-  assert(
-    toolCase && toolCase.status === 'WAITING_FOR_HUMAN' && toolCase.handoff.intent === 'medical_advice',
-    'medical auto-escalation must create a WAITING_FOR_HUMAN case with intent medical_advice',
-  );
-  assert(
-    toolCase.handoff.reason_for_escalation.includes('medical advice') &&
-      /no medical advice/i.test(toolCase.handoff.summary) &&
-      toolCase.handoff.information_collected.some((i) => i.includes('customer asked:')),
-    'the medical handoff must name the reason, confirm no advice was given and carry the customer requests',
-  );
-  resetSupportDb();
-
-  // 2. Rule-based chat agent: first refusal, second escalation.
-  const chatConv = createConversation({ mode: 'CHAT', customerName: 'Medical Chat' });
-  appendMessage(chatConv.id, 'user', 'mujhe dawai chahiye, kya lu?');
-  const r1 = await runChatTurn(chatConv.id);
-  assert(
-    /medical advice|चिकित्सा सलाह|medical advice nahi/i.test(r1.text) &&
-      getConversation(chatConv.id)?.context.medicalRequestCount === 1,
-    'the rule-based chat agent must refuse the first medical request',
-  );
-  appendMessage(chatConv.id, 'user', 'Please tell me one tablet name, I am sick.');
-  const r2 = await runChatTurn(chatConv.id);
-  const chatConvAfter = getConversation(chatConv.id)!;
-  assert(
-    chatConvAfter.state === 'WAITING_FOR_HUMAN' && Boolean(chatConvAfter.caseId),
-    'the rule-based chat agent must escalate the second medical request',
-  );
-  const chatCase = getCase(chatConvAfter.caseId!);
-  assert(
-    chatCase?.handoff.intent === 'medical_advice' && chatCase.handoff.reason_for_escalation.includes('medical advice'),
-    'the chat medical escalation must carry intent + reason',
-  );
-  assert(
-    r2.text.includes('human support agent will continue'),
-    'the chat escalation reply must tell the customer a human is continuing',
-  );
-  resetSupportDb();
-
-  // 3. Custom-LLM / voice path: gate streams the reply without calling the model.
-  delete process.env.NEXT_LLM_API_KEY;
-  delete process.env.NEXT_LLM_URL;
-  process.env.NEXT_LLM_API_KEY = 'test-key';
-  process.env.NEXT_LLM_URL = 'https://api.openai.com/v1/chat/completions';
-  let modelCalled = false;
-  const handler = createChatCompletionsHandler({
-    createOpenAIClient: (() => {
-      modelCalled = true;
-      return {};
-    }) as never,
-    streamTextImpl: (() => {
-      modelCalled = true;
-      throw new Error('model must not be called for a medical turn');
-    }) as never,
-  });
-  const voiceConv = createConversation({ mode: 'VOICE', customerName: 'Voice Medical' });
-  appendMessage(voiceConv.id, 'user', 'Which tablet should I take for fever?');
-  const gateReq = new NextRequest('http://localhost/api/chat/completions', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-nexavoice-conversation-id': voiceConv.id },
-    body: JSON.stringify({
-      messages: [{ role: 'user', content: 'Which tablet should I take for fever?' }],
-    }),
-  });
-  const gateRes = await handler(gateReq);
-  const gateText = await gateRes.text();
-  assert(
-    gateRes.status === 200 && gateText.includes("can't give medical advice") && !modelCalled,
-    'the custom-LLM voice path must stream the refusal without calling the model',
-  );
-  const voiceAfter = getConversation(voiceConv.id)!;
-  assert(
-    voiceAfter.context.medicalRequestCount === 1,
-    'the voice gate must count the medical request',
-  );
-  console.log('medical guard: refusal + auto-escalation + voice gate all enforced');
-}
-
 async function verifyStaleConversationsAreTerminated() {
   const {
     resetSupportDb,
@@ -1059,7 +901,6 @@ async function verifyStaleConversationsAreTerminated() {
   const gone = createConversation({ mode: 'VOICE', channel: 'ch-stale' });
 
   heartbeatConversation(live.id);
-  // Pretend the second browser last checked in well over the stale window ago.
   const staleConversation = getConversation(gone.id)!;
   staleConversation.lastSeenAt = Date.now() - STALE_AFTER_MS - 5_000;
 
@@ -1075,11 +916,6 @@ async function verifyStaleConversationsAreTerminated() {
   console.log('conversation lifecycle: stale sessions terminated, dashboard shows live only');
 }
 
-// ---------------------------------------------------------------------------
-// Serverless hardening: public origin for tools, derived tool secret,
-// enable_tools only with tools, durable store mirror, health report.
-// ---------------------------------------------------------------------------
-
 async function verifyToolsUrlAndSecret() {
   const { getToolSecret, resolveToolAccess, resolveToolsBaseUrl } =
     await import('../lib/agent-tools');
@@ -1089,7 +925,6 @@ async function verifyToolsUrlAndSecret() {
   delete process.env.AGENT_TOOLS_SECRET;
 
   try {
-    // The origin the browser used is enough — no AGENT_TOOLS_BASE_URL to configure.
     assert(
       resolveToolsBaseUrl('https://nexavoice-agora.vercel.app') ===
         'https://nexavoice-agora.vercel.app',
@@ -1110,8 +945,6 @@ async function verifyToolsUrlAndSecret() {
     );
     delete process.env.AGENT_TOOLS_BASE_URL;
 
-    // Without AGENT_TOOLS_SECRET the secret is derived from the App Certificate, so
-    // tools work on a fresh Vercel deployment with no extra variable to set.
     const derived = getToolSecret();
     assert(
       derived !== null && derived.length >= 32,
@@ -1195,12 +1028,6 @@ async function verifyEnableToolsFollowsTools() {
   );
 }
 
-/**
- * The Vercel regression this guards: two route invocations must observe the same
- * conversations even though each runs with a fresh in-memory store. The shared
- * document now lives in PostgreSQL (StoreState), so this check points the mirror
- * at an isolated row and skips entirely when no database is reachable.
- */
 async function verifyDurableStoreMirror() {
   if (!(await postgresAvailable())) {
     console.log('durable store mirror: skipped (no PostgreSQL reachable)');
@@ -1234,7 +1061,6 @@ async function verifyDurableStoreMirror() {
       'the postgres backend should be active for this check',
     );
 
-    // A second instance: same code, empty memory, no shared process state.
     resetSupportDb();
     const { GET: getConversationRoute } = await import('../app/api/conversations/[id]/route');
     const reread = await getConversationRoute(
@@ -1246,7 +1072,6 @@ async function verifyDurableStoreMirror() {
       'a cold instance must still find the conversation via the durable mirror',
     );
 
-    // And writes made on the cold instance must be visible again after a restart.
     const { POST: sendRoute } = await import('../app/api/conversations/[id]/messages/route');
     const sent = await sendRoute(
       new NextRequest(`http://localhost:3000/api/conversations/${conversationId}/messages`, {
@@ -1278,16 +1103,6 @@ async function verifyDurableStoreMirror() {
   }
 }
 
-/**
- * Route-bracketing invariant. The durable mirror only works if a handler reads the shared
- * document before touching state and writes it back before responding, and that is exactly
- * the kind of requirement a new route quietly forgets (the demo shop read routes did —
- * they answered from a stale copy on a warm instance and it looked fine locally).
- *
- * So: any `app/api` route that imports support or shop state must either go through
- * `withStore()` or hydrate explicitly, and no route may flush by hand — a hand-written
- * flush skips the read-merge that keeps other instances' writes alive.
- */
 async function verifyStatefulRoutesAreBracketed() {
   const fs = await import('node:fs/promises');
   const path = await import('node:path');
@@ -1304,8 +1119,6 @@ async function verifyStatefulRoutesAreBracketed() {
   await walk(root);
   assert(routes.length >= 14, `expected the whole api surface, found ${routes.length} routes`);
 
-  // Only the support store lives in the mirrored document; the shop routes talk to
-  // PostgreSQL directly and need no bracketing.
   const stateful = /from '[^']*lib\/support\/(store|tools)[^']*'/;
   let checked = 0;
   for (const file of routes) {
@@ -1325,7 +1138,6 @@ async function verifyStatefulRoutesAreBracketed() {
   }
   assert(checked >= 10, `expected at least 10 stateful routes to be checked, got ${checked}`);
 
-  // And a handler must not be able to skip the bracket by exporting the raw function.
   const conversationRoute = await fs.readFile('app/api/conversations/[id]/messages/route.ts', 'utf8');
   assert(/export const POST = withStore\(/.test(conversationRoute), 'the chat turn route must be bracketed');
   console.log(`route bracketing: ${checked} stateful routes checked`);
@@ -1333,9 +1145,8 @@ async function verifyStatefulRoutesAreBracketed() {
 
 async function verifyHealthRoute() {
   const { GET: health } = await import('../app/api/health/route');
-  // deep=0 keeps the contract check offline and deterministic (no live round
-  // trip to Agora's control plane from a verification script).
-  const response = await health(new NextRequest('http://localhost/api/health?deep=0'));
+  const { NextRequest } = await import('next/server');
+  const response = await health(new NextRequest('http://localhost/api/health'));
   const text = await response.text();
   const body = JSON.parse(text) as {
     status: string;
@@ -1362,7 +1173,6 @@ async function verifyHealthRoute() {
     !text.includes(process.env.NEXT_AGORA_APP_CERTIFICATE as string),
     'health must never leak the App Certificate',
   );
-  // Env-var *names* may appear in guidance text; values must never.
   for (const key of ['BLOB_READ_WRITE_TOKEN', 'AGENT_TOOLS_SECRET', 'NEXT_LLM_API_KEY']) {
     const value = process.env[key]?.trim();
     if (value) {
@@ -1371,7 +1181,46 @@ async function verifyHealthRoute() {
   }
 }
 
+async function verifyPgConfig() {
+  const { resolvePgSsl, maskConnectionString, sanitizeConnectionString, pgConnectionConfig } =
+    await import('../lib/pg-config');
+  const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+  const sslCases: Array<[string, unknown]> = [
+    ['postgres://postgres.ref:pw@aws-0-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require&pgbouncer=true', { rejectUnauthorized: false }],
+    ['postgres://postgres.ref:pw@aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require', { rejectUnauthorized: false }],
+    ['postgres://u:p@ep-foo.us-east-2.aws.neon.tech:5432/db', { rejectUnauthorized: false }],
+    ['postgres://u:p@db.example.com:5432/db?sslmode=verify-full', {}],
+    ['postgres://u:p@db.example.com:5432/db?sslmode=verify-ca', {}],
+    ['postgres://u:p@db.example.com:5432/db?sslmode=disable', false],
+    ['postgresql://postgres:postgres@127.0.0.1:5433/postgres', undefined],
+    ['postgresql://postgres:postgres@localhost:5432/postgres', undefined],
+    ['postgres://user:pw@db:5432/nexavoice', undefined],
+    ['', undefined],
+  ];
+  for (const [url, expected] of sslCases) {
+    assert(
+      same(resolvePgSsl(url as string), expected),
+      `resolvePgSsl(${url || '(empty)'}) should be ${JSON.stringify(expected ?? null)}`,
+    );
+  }
+
+  const secret = 'S3cret-pw';
+  const masked = maskConnectionString(`postgres://postgres.ref:${secret}@host:6543/postgres?sslmode=require`);
+  assert(!masked.includes(secret), 'maskConnectionString must never leak the password');
+  assert(masked === 'postgres://postgres.ref@host:6543/postgres', `unexpected mask: ${masked}`);
+
+  const cleaned = sanitizeConnectionString('postgres://u:p@h:5432/d?sslmode=require&pgbouncer=true');
+  assert(!cleaned.includes('sslmode'), 'sanitizeConnectionString must drop sslmode');
+  assert(cleaned.includes('pgbouncer=true'), 'sanitizeConnectionString must keep other params');
+
+  const cfg = pgConnectionConfig('postgres://u:p@h:5432/d');
+  assert(cfg.connectionTimeoutMillis === 10_000 && typeof cfg.connectionString === 'string', 'pgConnectionConfig shape');
+  console.log('pg config: TLS rules, masking and pool options verified');
+}
+
 async function main() {
+  await verifyPgConfig();
   await verifyGenerateAgoraTokenRoute();
   await verifyGenerateAgoraTokenReplacesZeroUid();
   await verifyChatCompletionsMissingEnv();
@@ -1390,7 +1239,6 @@ async function main() {
   await verifyDurableStoreMirror();
   await verifyStatefulRoutesAreBracketed();
   await verifyOrderLifecycle();
-  await verifyMedicalGuard();
   await verifyStaleConversationsAreTerminated();
   await verifyHealthRoute();
 

@@ -1,12 +1,3 @@
-/**
- * Writes the fixed 60-product NexaMart catalogue into PostgreSQL.
- *
- * The app also seeds it lazily on the first catalogue read (`ensureCatalog()`),
- * so this script is only needed when you want the products in place before
- * anyone opens the shopping page:
- *
- *   pnpm db:push && pnpm seed
- */
 import { config as loadEnv } from 'dotenv';
 
 loadEnv({ path: '.env.local', quiet: true });

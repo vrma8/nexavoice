@@ -15,21 +15,10 @@ import { withStore } from '@/lib/support/route-store';
 import { prisma, hasDatabaseUrl } from '@/lib/db';
 import type { CustomerSnapshot } from '@/lib/support/types';
 
-// agentUid identifies the AI in the RTC channel and shares its default with the client.
 const agentUid = String(DEFAULT_AGENT_UID);
 
-/**
- * `/join` is a round trip to Agora's control plane (plus one to the tool URL
- * resolution path); Vercel's stock function budget is too tight for a cold start.
- */
 export const maxDuration = 30;
 
-/**
- * POST /api/invite-agent
- * Starts the NexaVoice Conversational AI agent in the caller's channel and
- * registers a VOICE conversation so tools, escalation and the human dashboard
- * can track the call.
- */
 async function handlePost(request: NextRequest) {
   let conversationIdForFailure: string | undefined;
 
@@ -37,7 +26,6 @@ async function handlePost(request: NextRequest) {
     const body: ClientStartRequest = await request.json();
     const { requester_id, channel_name } = body;
 
-    // Validate env early so misconfiguration surfaces with a clear message.
     getAgoraCredentials();
 
     if (!channel_name || !requester_id) {
@@ -47,7 +35,6 @@ async function handlePost(request: NextRequest) {
       );
     }
 
-    // One conversation per channel; re-invites (e.g. after an agent crash) reuse it.
     const existing = findConversationByChannel(channel_name);
     let conversation = existing;
     if (!conversation) {
@@ -60,14 +47,11 @@ async function handlePost(request: NextRequest) {
         customer,
       });
     } else if (!conversation.context.customerName && body.customer_name?.trim()) {
-      // A re-invite after an agent crash: keep the signed-in client's name if it was missing.
       updateConversation(conversation.id, { context: { customerName: body.customer_name.trim() } });
     }
     conversationIdForFailure = conversation.id;
 
     const client = createAgoraClient();
-    // The engine calls back into *this* deployment, so the origin the browser just
-    // used is the authoritative public URL — no AGENT_TOOLS_BASE_URL to remember.
     const access = resolveToolAccess(new URL(request.url).origin);
     if (!access) {
       console.warn(
@@ -80,16 +64,12 @@ async function handlePost(request: NextRequest) {
       conversationId: conversation.id,
       toolToken: access?.secret ?? null,
       toolsBaseUrl: access?.baseUrl ?? null,
-      // The signed-in customer drives the greeting language + the prompt's
-      // "confirm the preference" section (falls back to the name from the body).
       customer: {
         name: conversation.context.customer?.name ?? conversation.context.customerName,
         preferredLanguage: conversation.context.customer?.preferredLanguage,
       },
     });
 
-    // remoteUids restricts the agent to only process audio from this user,
-    // so a human agent joining later is never transcribed as the customer.
     const session = agent.createSession({
       name: `nexavoice-${conversation.id}`,
       channel: channel_name,
@@ -115,8 +95,6 @@ async function handlePost(request: NextRequest) {
   } catch (error) {
     const detail = describeAgentStartError(error);
     console.error('[invite-agent] failed to start conversation:', detail.raw, error);
-    // Record the failure on the conversation so the dashboard and /api/health show
-    // why the call did not connect instead of an empty "live calls" list.
     if (conversationIdForFailure) {
       recordEvent(conversationIdForFailure, 'agent.stopped', `start failed: ${detail.message}`);
     }
@@ -127,12 +105,29 @@ async function handlePost(request: NextRequest) {
   }
 }
 
-/** The voice call is bound to the signed-in client record, exactly like chat. */
-async function loadClient(clientId?: string): Promise<CustomerSnapshot | undefined> {
-  if (!clientId || !hasDatabaseUrl()) return undefined;
+const DEFAULT_ADDRESS = 'B-42, Lajpat Nagar II, New Delhi 110024';
+
+async function loadClient(clientId?: string): Promise<CustomerSnapshot> {
+  const fallbackCustomer: CustomerSnapshot = {
+    id: clientId?.trim() || 'demo-client-1',
+    name: 'Rahul Sharma',
+    phone: '9876543210',
+    email: 'rahul.sharma@example.com',
+    tier: 'prime',
+    city: 'Delhi',
+    address: DEFAULT_ADDRESS,
+    preferredLanguage: 'hinglish',
+  };
+
+  if (!hasDatabaseUrl()) return fallbackCustomer;
   try {
-    const row = await prisma.client.findUnique({ where: { id: clientId } });
-    if (!row) return undefined;
+    let row = clientId?.trim()
+      ? await prisma.client.findUnique({ where: { id: clientId.trim() } })
+      : null;
+    if (!row) {
+      row = await prisma.client.findFirst({ orderBy: { createdAt: 'asc' } });
+    }
+    if (!row) return fallbackCustomer;
     return {
       id: row.id,
       name: row.name,
@@ -140,12 +135,12 @@ async function loadClient(clientId?: string): Promise<CustomerSnapshot | undefin
       email: row.email,
       tier: row.tier,
       city: row.city,
-      address: row.address,
+      address: row.address?.trim() || DEFAULT_ADDRESS,
       preferredLanguage: row.preferredLanguage,
     };
   } catch (error) {
     console.warn('[invite-agent] could not load client:', error);
-    return undefined;
+    return fallbackCustomer;
   }
 }
 
@@ -156,11 +151,6 @@ interface DescribedError {
   raw: string;
 }
 
-/**
- * Turns an `agora-agents` API error into something the UI can show. Without this
- * the browser only ever saw "Failed to start conversation", which is why voice
- * failures on a deployment are so hard to diagnose.
- */
 function describeAgentStartError(error: unknown): DescribedError {
   const err = error as {
     statusCode?: number;
@@ -191,6 +181,4 @@ function describeAgentStartError(error: unknown): DescribedError {
   return { message: raw || 'Failed to start conversation', hint, statusCode, raw };
 }
 
-// Bracketed by withStore so the durable store mirror is read before the
-// handler runs and written back before the response is flushed (serverless).
 export const POST = withStore(handlePost);

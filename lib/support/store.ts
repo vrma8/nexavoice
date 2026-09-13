@@ -1,14 +1,3 @@
-/**
- * Conversation / case store shared by chat, voice, tools and the human dashboard.
- * Backend-owned state (v1.md §21). Lives on `globalThis` so it survives dev hot
- * reloads, and is mirrored to a durable backend (`persist.ts`) so every serverless
- * invocation — on every instance — sees the same conversations.
- *
- * Reads and writes here stay synchronous; routes bracket their work with
- * `hydrateStore()` / `flushStore()` (see `withStore` in `route-store.ts`), which
- * pull and push that mirror. Swap for a database by re-implementing this module's
- * exported functions.
- */
 import { randomUUID } from 'crypto';
 import { normalizeLanguageName } from '../agent-prompt';
 import {
@@ -45,13 +34,10 @@ interface SupportDb {
   events: ConversationEvent[];
   counters: { case: number };
   listeners: Set<(event: ConversationEvent) => void>;
-  /** Bumped by every local mutation, so we know when the durable mirror is behind. */
   revision: number;
-  /** Revision last pushed to (or pulled from) the durable mirror. */
   syncedRevision: number;
   lastSyncAt: number;
   lastError: string | null;
-  /** `rev` of the snapshot we last merged — for logs and /api/health only. */
   remoteRev: number;
 }
 
@@ -78,7 +64,6 @@ function db(): SupportDb {
   return globalThis.__nexavoiceSupportDb;
 }
 
-/** Records that memory is now ahead of the durable mirror. */
 function markDirty(): void {
   db().revision += 1;
 }
@@ -86,10 +71,6 @@ function markDirty(): void {
 export function resetSupportDb(): void {
   globalThis.__nexavoiceSupportDb = undefined;
 }
-
-// ---------------------------------------------------------------------------
-// Durable mirror (serverless support)
-// ---------------------------------------------------------------------------
 
 export interface StoreSyncStatus {
   backend: string;
@@ -101,7 +82,6 @@ export interface StoreSyncStatus {
   lastError: string | null;
 }
 
-/** Reported by /api/health — the quickest way to tell if state is shared. */
 export function getStoreSyncStatus(): StoreSyncStatus {
   const store = db();
   const active = activeBackend();
@@ -123,7 +103,6 @@ function activeBackend(): PersistenceBackend {
   return backend;
 }
 
-/** Tests re-point NEXAVOICE_STORE between cases. */
 export function resetPersistenceClient(): void {
   backend = null;
 }
@@ -140,11 +119,6 @@ function toSnapshot(store: SupportDb): StoreSnapshot {
   return pruneSnapshot(snapshot);
 }
 
-/**
- * Folds a remote snapshot into this instance's memory. Conversations and cases
- * merge newest-first, so another customer's session never vanishes because this
- * instance happened to hold an older copy of the document.
- */
 function applySnapshot(store: SupportDb, remote: StoreSnapshot): void {
   const merged = mergeSnapshots(toSnapshot(store), remote);
   store.counters.case = Math.max(store.counters.case, merged.caseCounter);
@@ -156,16 +130,6 @@ function applySnapshot(store: SupportDb, remote: StoreSnapshot): void {
   store.events = merged.events;
 }
 
-/**
- * Pulls the durable snapshot into memory before a handler reads or writes state.
- *
- * There is deliberately no "read recently enough, skip it" cache here: on Vercel
- * consecutive requests from one browser land on different instances, so a TTL made
- * the next request answer from a copy that was up to a TTL old — a customer would
- * be asked for their phone number again on the very next turn. Every request reads
- * the shared document instead, and concurrent requests on one instance coalesce
- * into the in-flight read (`queueSync`) so a burst of polls costs one round trip.
- */
 export async function hydrateStore(): Promise<void> {
   const store = db();
   const active = activeBackend();
@@ -178,12 +142,7 @@ export async function hydrateStore(): Promise<void> {
         store.remoteRev = remote.rev;
       }
       store.lastSyncAt = Date.now();
-      // Hydrating is not a local change: keep the marker level with reality so a
-      // read-only request does not write the document straight back.
       store.syncedRevision = store.revision;
-      // A conversation whose browser went away (possibly on another instance)
-      // is terminated here, after the merge and after the synced marker — the
-      // closes it performs are local changes that must reach the mirror.
       sweepStaleConversations();
       store.lastError = null;
     } catch (error) {
@@ -193,7 +152,6 @@ export async function hydrateStore(): Promise<void> {
   });
 }
 
-/** Pushes local changes to the durable mirror, re-merging remote state first. */
 export async function flushStore(): Promise<void> {
   const store = db();
   const active = activeBackend();
@@ -218,11 +176,6 @@ export async function flushStore(): Promise<void> {
 
 let syncChain: Promise<void> = Promise.resolve();
 
-/**
- * Serialises durable reads/writes per instance. Two concurrent requests sharing a
- * warm instance would otherwise interleave `read → merge → write` and the slower
- * one could publish a document that misses the faster one's write.
- */
 function queueSync(task: () => Promise<void>): Promise<void> {
   const run = syncChain.then(task, task);
   syncChain = run.catch(() => {});
@@ -256,24 +209,17 @@ export function listEvents(since = 0): ConversationEvent[] {
   return db().events.filter((e) => e.at > since);
 }
 
-// ---------------------------------------------------------------------------
-// Conversations
-// ---------------------------------------------------------------------------
-
 export interface CreateConversationInput {
   mode: ConversationMode;
   channel?: string;
   customerUid?: string;
   id?: string;
-  /** Signed-in client details (from /login) attached when the conversation starts. */
   customerName?: string;
   customer?: CustomerSnapshot;
 }
 
 export function createConversation(input: CreateConversationInput): Conversation {
   const now = Date.now();
-  // Start in the language saved on the client's account (set at login or by a
-  // previous set_preferred_language call) — the agent confirms it on turn one.
   const preferredLanguage = normalizeLanguageName(input.customer?.preferredLanguage);
   const conversation: Conversation = {
     id: input.id ?? `conv_${randomUUID().replace(/-/g, '').slice(0, 16)}`,
@@ -346,15 +292,6 @@ export function touchConversation(id: string): void {
   }
 }
 
-/**
- * The customer's browser is still on the page.
- *
- * The dashboard must only ever show conversations that are *really* running, so
- * every open chat/call pings this every few seconds. `sweepStaleConversations()`
- * closes anything that stops pinging (tab closed, network gone, laptop shut) —
- * that is the only mechanism that decides a conversation is over besides an
- * explicit close.
- */
 export function heartbeatConversation(id: string): Conversation | null {
   const conversation = db().conversations.get(id);
   if (!conversation) return null;
@@ -367,26 +304,12 @@ export function heartbeatConversation(id: string): Conversation | null {
   return conversation;
 }
 
-/**
- * A conversation whose customer stopped sending heartbeats for this long is
- * treated as gone. Two missed 8s heartbeats plus slack — long enough to survive
- * a slow network, short enough that the dashboard never shows a ghost chat.
- */
-export const STALE_AFTER_MS = 30_000;
+export const STALE_AFTER_MS = 120_000;
 
 export interface SweepResult {
   closed: string[];
 }
 
-/**
- * Terminates conversations the customer has left (logged out, closed the tab,
- * lost the network). Runs before every dashboard read and on every store
- * hydration, so "live" on the agent dashboard means live.
- *
- * A conversation a human agent is already handling is closed too — the case
- * stays in the queue and is flagged `customerLeftAt`, so the agent sees
- * "customer left" instead of talking to an empty channel.
- */
 export function sweepStaleConversations(now = Date.now()): SweepResult {
   const closed: string[] = [];
   for (const conversation of [...db().conversations.values()]) {
@@ -418,10 +341,6 @@ export function recordEvent(
   return emit({ conversationId, type, detail });
 }
 
-// ---------------------------------------------------------------------------
-// Messages
-// ---------------------------------------------------------------------------
-
 export function appendMessage(
   conversationId: string,
   role: MessageRole,
@@ -431,7 +350,6 @@ export function appendMessage(
   const store = db();
   if (!store.conversations.has(conversationId)) return null;
   const list = store.messages.get(conversationId) ?? [];
-  // Voice transcripts arrive as repeated updates for the same turn — upsert.
   if (opts?.turnId !== undefined) {
     const existing = list.find((m) => m.role === role && m.turnId === opts.turnId);
     if (existing) {
@@ -471,10 +389,6 @@ export function appendToolAudit(
   return full;
 }
 
-// ---------------------------------------------------------------------------
-// Cases
-// ---------------------------------------------------------------------------
-
 export interface CreateCaseInput {
   conversationId: string;
   handoff: HandoffSummary;
@@ -485,7 +399,6 @@ export function createCase(input: CreateCaseInput): SupportCase | null {
   const store = db();
   const conversation = store.conversations.get(input.conversationId);
   if (!conversation) return null;
-  // Idempotent: one open case per conversation.
   if (conversation.caseId) {
     const existing = store.cases.get(conversation.caseId);
     if (existing && (existing.status === 'WAITING_FOR_HUMAN' || existing.status === 'HUMAN_HANDLING')) {
@@ -513,9 +426,19 @@ export function createCase(input: CreateCaseInput): SupportCase | null {
   return supportCase;
 }
 
+const CRITICAL_CASE_PATTERN =
+  /safety|self[- ]?harm|suicid|abuse|threat|violence|medical|emergency|ambulance|overdose|poison|fraud|unauthori[sz]ed|dispute|legal/;
+
+export function isCriticalHandoff(handoff: HandoffSummary): boolean {
+  return CRITICAL_CASE_PATTERN.test(
+    `${handoff.reason_for_escalation} ${handoff.intent} ${handoff.summary}`.toLowerCase(),
+  );
+}
+
 function derivePriority(handoff: HandoffSummary): CasePriority {
+  if (isCriticalHandoff(handoff)) return 'HIGH';
   const reason = handoff.reason_for_escalation.toLowerCase();
-  if (/refund|payment|fraud|charged|angry|complaint|damaged|urgent|legal|medical|health/.test(reason)) return 'HIGH';
+  if (/refund|payment|charged|angry|complaint|damaged|urgent/.test(reason)) return 'HIGH';
   if (handoff.confidence < 0.5) return 'HIGH';
   if (handoff.confidence < 0.75) return 'MEDIUM';
   return 'LOW';
@@ -552,14 +475,6 @@ export function acceptCase(id: string, agentName: string, agentEmail?: string): 
   return supportCase;
 }
 
-/**
- * The human agent resolved the case.
- *
- * The conversation (and its full transcript) is KEPT in state RESOLVED: the
- * customer's open chat/call polls this state and ends itself, and the case page
- * keeps the complete AI + customer + human transcript. Finished conversations
- * are pruned from the durable mirror after 24h by `pruneSnapshot`.
- */
 export function resolveCase(id: string, note?: string): SupportCase | null {
   const store = db();
   const supportCase = store.cases.get(id);
@@ -572,38 +487,10 @@ export function resolveCase(id: string, note?: string): SupportCase | null {
   if (conversation) {
     conversation.state = 'RESOLVED';
     conversation.endedAt = Date.now();
-    conversation.endedBy = 'human';
     conversation.updatedAt = conversation.endedAt;
+    deleteConversation(conversation.id);
   }
   emit({ conversationId: supportCase.conversationId, type: 'case.resolved', detail: note });
-  return supportCase;
-}
-
-/**
- * The human agent left the call without resolving the case. Requirement: a call
- * is a two-sided conversation — when the human ends it, the customer's side
- * ends too, so the conversation is closed (`endedBy: 'human'`) while the case
- * stays visible and flagged `humanLeftAt` for follow-up.
- */
-export function humanLeaveCase(id: string): SupportCase | null {
-  const store = db();
-  const supportCase = store.cases.get(id);
-  if (!supportCase) return null;
-  if (!supportCase.humanLeftAt) {
-    supportCase.humanLeftAt = Date.now();
-    supportCase.updatedAt = supportCase.humanLeftAt;
-  }
-  const conversation = store.conversations.get(supportCase.conversationId);
-  if (conversation && conversation.state !== 'RESOLVED' && conversation.state !== 'CLOSED') {
-    conversation.state = 'CLOSED';
-    conversation.endedAt = Date.now();
-    conversation.endedBy = 'human';
-    conversation.updatedAt = conversation.endedAt;
-  }
-  emit({ conversationId: supportCase.conversationId, type: 'human.left', detail: 'agent ended the call' });
-  if (conversation) {
-    emit({ conversationId: conversation.id, type: 'conversation.closed', detail: 'human agent ended the call' });
-  }
   return supportCase;
 }
 
@@ -617,27 +504,24 @@ export function deleteConversation(id: string): void {
 export function closeConversation(id: string, detail?: string): Conversation | null {
   const conversation = db().conversations.get(id);
   if (!conversation) return null;
-  if (conversation.state !== 'RESOLVED') {
-    conversation.state = 'CLOSED';
-    conversation.endedBy = 'customer';
-  }
+  if (conversation.state !== 'RESOLVED') conversation.state = 'CLOSED';
   conversation.endedAt = Date.now();
   conversation.updatedAt = conversation.endedAt;
-
-  const supportCase = conversation.caseId ? db().cases.get(conversation.caseId) : undefined;
-  if (supportCase && (supportCase.status === 'WAITING_FOR_HUMAN' || supportCase.status === 'HUMAN_HANDLING')) {
-    // Customer hung up before the case was resolved: keep it visible but mark it
-    // so the human agent knows to call back instead of joining the channel.
-    supportCase.customerLeftAt = Date.now();
-    supportCase.updatedAt = supportCase.customerLeftAt;
+  
+  let shouldDelete = true;
+  
+  if (conversation.caseId) {
+    const supportCase = db().cases.get(conversation.caseId);
+    if (supportCase && (supportCase.status === 'WAITING_FOR_HUMAN' || supportCase.status === 'HUMAN_HANDLING')) {
+      supportCase.customerLeftAt = Date.now();
+      supportCase.updatedAt = supportCase.customerLeftAt;
+      shouldDelete = false; 
+    }
   }
 
   const finalSnapshot = { ...conversation };
 
-  // A conversation that produced a case keeps its transcript (customer + AI +
-  // human) so the case page stays complete; only pure AI conversations that
-  // nobody escalates are dropped here. pruneSnapshot TTLs the rest after 24h.
-  if (!supportCase) {
+  if (shouldDelete) {
     deleteConversation(id);
   }
 
@@ -645,10 +529,7 @@ export function closeConversation(id: string, detail?: string): Conversation | n
   return finalSnapshot;
 }
 
-/** Dashboard snapshot: everything the human UI needs in one round trip. */
 export function getDashboardSnapshot() {
-  // Ghost busting first: only conversations whose customer is still connected
-  // may appear as live activity (see sweepStaleConversations).
   sweepStaleConversations();
   const conversations = listConversations();
   const cases = listCases();

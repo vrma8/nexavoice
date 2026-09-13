@@ -27,10 +27,8 @@ export function MicrophoneSelector({
   const [currentDeviceId, setCurrentDeviceId] = useState<string>('');
   const [isOpen, setIsOpen] = useState(false);
 
-  // Pull the current browser microphone list and reconcile it with the active Agora track.
   const fetchMicrophones = useCallback(async () => {
     try {
-      // Import AgoraRTC dynamically to access getMicrophones
       const AgoraRTC = (await import('agora-rtc-react')).default;
       const microphones = await AgoraRTC.getMicrophones();
 
@@ -41,7 +39,6 @@ export function MicrophoneSelector({
 
       setDevices(formattedDevices);
 
-      // Set current device from track
       if (localMicrophoneTrack) {
         const currentLabel = localMicrophoneTrack.getTrackLabel();
         const currentDevice = microphones.find(
@@ -56,14 +53,12 @@ export function MicrophoneSelector({
     }
   }, [localMicrophoneTrack]);
 
-  // Refresh device options once the local mic track exists.
   useEffect(() => {
     if (localMicrophoneTrack) {
       fetchMicrophones();
     }
   }, [fetchMicrophones, localMicrophoneTrack]);
 
-  // Swap the active input device on the already-created local microphone track.
   const handleDeviceChange = async (deviceId: string) => {
     if (!localMicrophoneTrack) return;
 
@@ -76,18 +71,14 @@ export function MicrophoneSelector({
     }
   };
 
-  // Keep the picker in sync when microphones are plugged in, removed, or auto-selected by the browser.
   useEffect(() => {
     const setupDeviceChangeListener = async () => {
       try {
         const AgoraRTC = (await import('agora-rtc-react')).default;
 
         AgoraRTC.onMicrophoneChanged = async (changedDevice) => {
-          // console.log('Microphone changed:', changedDevice);
-          // Refresh device list
           await fetchMicrophones();
 
-          // Auto-switch to new device if it's active
           if (changedDevice.state === 'ACTIVE' && localMicrophoneTrack) {
             await localMicrophoneTrack.setDevice(changedDevice.device.deviceId);
             setCurrentDeviceId(changedDevice.device.deviceId);
@@ -96,7 +87,6 @@ export function MicrophoneSelector({
               localMicrophoneTrack?.getTrackLabel() &&
             changedDevice.state === 'INACTIVE'
           ) {
-            // Switch to first available device if current device was unplugged
             const microphones = await AgoraRTC.getMicrophones();
             if (microphones[0] && localMicrophoneTrack) {
               await localMicrophoneTrack.setDevice(microphones[0].deviceId);
@@ -111,7 +101,6 @@ export function MicrophoneSelector({
 
     setupDeviceChangeListener();
 
-    // Cleanup
     return () => {
       import('agora-rtc-react').then(({ default: AgoraRTC }) => {
         AgoraRTC.onMicrophoneChanged = undefined;
@@ -119,7 +108,6 @@ export function MicrophoneSelector({
     };
   }, [fetchMicrophones, localMicrophoneTrack]);
 
-  // Hide the picker when there is nothing meaningful to choose between.
   if (devices.length <= 1) {
     return null;
   }

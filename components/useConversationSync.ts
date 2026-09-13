@@ -1,41 +1,27 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import type { IMessageListItem } from 'agora-agent-uikit';
-import { getConversation, mirrorVoiceState, type TranscriptMirrorItem } from '@/lib/api';
+import { getConversation, mirrorVoiceState, sendHeartbeat, type TranscriptMirrorItem } from '@/lib/api';
+import type { TranscriptMessage } from '@/lib/conversation';
 import type { Conversation, SupportCase } from '@/lib/support/types';
 
 const MIRROR_DEBOUNCE_MS = 900;
 const POLL_MS = 3000;
 
-/**
- * Keeps the backend conversation record in sync with a live voice call:
- *  - pushes completed transcript turns + agent state (debounced) so the human
- *    dashboard can watch the call in real time and escalation summaries have
- *    context;
- *  - polls the conversation so the caller UI can show "waiting for human" /
- *    "human agent joined" states driven by the backend (never by the browser).
- */
 export function useConversationSync(opts: {
   conversationId?: string;
   agentUID: string;
   localUID: string;
-  messageList: IMessageListItem[];
+  messageList: TranscriptMessage[];
   agentState: string | null;
+  onConversation?: (conversation: Conversation | null) => void;
 }) {
-  const { conversationId, agentUID, localUID, messageList, agentState } = opts;
+  const { conversationId, agentUID, localUID, messageList, agentState, onConversation } = opts;
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [supportCase, setSupportCase] = useState<SupportCase | null>(null);
-  /**
-   * The conversation ended on the OTHER side: the human agent resolved or left
-   * the call (state RESOLVED/CLOSED, `endedBy: 'human'`), or the conversation
-   * disappeared. Sticky — a closed conversation never reopens.
-   */
-  const [ended, setEnded] = useState(false);
   const sentTurns = useRef<Map<string, string>>(new Map());
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Mirror transcript turns (only new/changed ones).
   useEffect(() => {
     if (!conversationId) return;
     const pending: TranscriptMirrorItem[] = [];
@@ -45,7 +31,12 @@ export function useConversationSync(opts: {
       const key = `${role}:${item.turn_id}`;
       if (sentTurns.current.get(key) === item.text || !item.text?.trim()) continue;
       sentTurns.current.set(key, item.text);
-      pending.push({ role, content: item.text, turnId: item.turn_id });
+      const turnId = Number(item.turn_id);
+      pending.push({
+        role,
+        content: item.text,
+        turnId: Number.isFinite(turnId) && item.turn_id !== undefined ? turnId : undefined,
+      });
     }
     if (pending.length === 0) return;
     if (timer.current) clearTimeout(timer.current);
@@ -54,13 +45,11 @@ export function useConversationSync(opts: {
     }, MIRROR_DEBOUNCE_MS);
   }, [messageList, conversationId, agentUID, localUID]);
 
-  // Mirror agent state changes immediately (cheap, low frequency).
   useEffect(() => {
     if (!conversationId || !agentState) return;
     void mirrorVoiceState(conversationId, { agentState });
   }, [agentState, conversationId]);
 
-  // Poll backend state for escalation / human takeover.
   useEffect(() => {
     if (!conversationId) return;
     let cancelled = false;
@@ -70,18 +59,10 @@ export function useConversationSync(opts: {
         if (cancelled) return;
         setConversation(snapshot.conversation);
         setSupportCase(snapshot.case);
-        if (
-          snapshot.conversation.state === 'CLOSED' ||
-          snapshot.conversation.state === 'RESOLVED'
-        ) {
-          setEnded(true);
-        }
-      } catch (err) {
-        // The human resolving/leaving used to delete the conversation, which
-        // made the client poll get 404s forever — treat "not found" as ended.
-        if (err instanceof Error && /not found/i.test(err.message)) {
-          setEnded(true);
-        }
+        onConversation?.(snapshot.conversation);
+        void sendHeartbeat(conversationId);
+      } catch {
+        // transient
       }
     };
     void tick();
@@ -90,7 +71,7 @@ export function useConversationSync(opts: {
       cancelled = true;
       clearInterval(id);
     };
-  }, [conversationId]);
+  }, [conversationId, onConversation]);
 
-  return { conversation, supportCase, ended };
+  return { conversation, supportCase };
 }

@@ -16,7 +16,6 @@ interface LoginBody {
   title?: string;
 }
 
-/** Normalises Indian mobile numbers to 10 digits (drops +91 / 0 prefix, spaces, dashes). */
 function normalizePhone(input: string): string | null {
   const digits = String(input ?? '').replace(/\D/g, '');
   if (digits.length === 10) return digits;
@@ -25,13 +24,6 @@ function normalizePhone(input: string): string | null {
   return null;
 }
 
-/**
- * POST /api/auth/login  { role: 'client' | 'agent', ... }
- *
- * Collects the details of a client (customer) or a support agent and maintains
- * them in PostgreSQL (Client / Agent tables) via Prisma. Returns the stored
- * record so the browser can keep it as the session.
- */
 export async function POST(request: NextRequest) {
   if (!hasDatabaseUrl()) {
     return NextResponse.json(

@@ -4,14 +4,12 @@ import { addToCart, clearCart, getCart, setCartQty } from '@/lib/shop/service';
 
 export const dynamic = 'force-dynamic';
 
-/** GET /api/shop/cart — the signed-in client's cart. */
 export async function GET(request: NextRequest) {
   const lookup = await requireClient(request);
   if (!lookup.ok) return lookup.response;
   return NextResponse.json({ cart: await getCart(lookup.client.id) });
 }
 
-/** POST /api/shop/cart  { productId, qty? } — add a catalogue product. */
 export async function POST(request: NextRequest) {
   const lookup = await requireClient(request);
   if (!lookup.ok) return lookup.response;
@@ -25,7 +23,6 @@ export async function POST(request: NextRequest) {
   }
 }
 
-/** PATCH /api/shop/cart  { productId, qty } — set a line quantity (0 removes). */
 export async function PATCH(request: NextRequest) {
   const lookup = await requireClient(request);
   if (!lookup.ok) return lookup.response;
@@ -35,7 +32,6 @@ export async function PATCH(request: NextRequest) {
   return NextResponse.json({ cart });
 }
 
-/** DELETE /api/shop/cart — empty the cart. */
 export async function DELETE(request: NextRequest) {
   const lookup = await requireClient(request);
   if (!lookup.ok) return lookup.response;

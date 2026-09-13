@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   RemoteUser,
   useJoin,
@@ -9,10 +9,8 @@ import {
   useRemoteUsers,
 } from 'agora-rtc-react';
 import { MISSING_APP_ID_MESSAGE, resolveAppId } from '@/lib/agora';
-import { sendMessage } from '@/lib/api';
-import { useSpeechRecognition } from '@/hooks/use-speech-recognition';
 import { Button } from '@/components/ui/button';
-import { AudioLines, Loader2, Mic, MicOff, PhoneOff } from 'lucide-react';
+import { Loader2, Mic, MicOff, PhoneOff, RefreshCw, Users } from 'lucide-react';
 
 export type HumanVoiceBridgeProps = {
   channel: string;
@@ -20,27 +18,11 @@ export type HumanVoiceBridgeProps = {
   uid: string;
   agentUid: string;
   customerUid?: string;
-  /** App ID served by the API route; falls back to the inlined NEXT_PUBLIC_ value. */
   appId?: string | null;
-  /**
-   * Backend conversation to store the human agent's speech on. Without it the
-   * call still works but the case transcript misses what the human said.
-   */
-  conversationId?: string;
-  /** Conversation language (hindi | english | hinglish) → recognition locale. */
-  language?: string;
-  /** Called once when the RTC join succeeds — the page then triggers the AI takeover. */
   onJoined: () => void;
   onLeave: () => void;
 };
 
-/**
- * Human agent side of a voice takeover: joins the *same* Agora RTC channel as
- * the customer (uid 654321), publishes the mic and plays remote audio. The AI
- * agent is asked to leave via POST /api/cases/:id/takeover after the join.
- * Must be rendered inside an <AgoraRTCProvider>; the provider owns the client
- * lifecycle (no manual client.leave()/track.close() here — see AGENTS.md).
- */
 export default function HumanVoiceBridge({
   channel,
   token,
@@ -48,13 +30,11 @@ export default function HumanVoiceBridge({
   agentUid,
   customerUid,
   appId: appIdFromServer,
-  conversationId,
-  language,
   onJoined,
   onLeave,
 }: HumanVoiceBridgeProps) {
-  // StrictMode guard (same pattern as ConversationComponent): join exactly once.
   const [isReady, setIsReady] = useState(false);
+  const [joinEnabled, setJoinEnabled] = useState(true);
   useEffect(() => {
     let cancelled = false;
     const id = setTimeout(() => {
@@ -75,17 +55,21 @@ export default function HumanVoiceBridge({
       token,
       uid: parseInt(uid, 10),
     },
-    isReady && Boolean(appId),
+    isReady && joinEnabled && Boolean(appId),
   );
 
-  // A failed join used to leave the panel spinning on "Joining the call…" forever,
-  // which is indistinguishable from a slow network when a takeover is needed fast.
   const joinFailure = !appId
     ? MISSING_APP_ID_MESSAGE
     : joinError
       ? (joinError.message ?? 'The RTC join failed. Check the App ID, token and channel.')
       : null;
-  const { localMicrophoneTrack } = useLocalMicrophoneTrack(isReady);
+
+  const retryJoin = () => {
+    setJoinEnabled(false);
+    setTimeout(() => setJoinEnabled(true), 150);
+  };
+
+  const { localMicrophoneTrack } = useLocalMicrophoneTrack(isReady && joinEnabled);
   usePublish([localMicrophoneTrack]);
   const remoteUsers = useRemoteUsers();
   const [micOn, setMicOn] = useState(true);
@@ -108,34 +92,6 @@ export default function HumanVoiceBridge({
     setMicOn(next);
   };
 
-  // Full-transcript captions: the Agora toolkit only transcribes the AI agent,
-  // so the human agent's speech is captured here (Web Speech API) and stored on
-  // the conversation as human_agent messages → the case shows what BOTH sides
-  // said, not just the AI. Recognition is browser-supported (Chrome/Edge/Safari).
-  const lastCaption = useRef<{ text: string; at: number }>({ text: '', at: 0 });
-  const handleCaptionFinal = useCallback(
-    (text: string) => {
-      if (!conversationId) return;
-      const now = Date.now();
-      // Web Speech emits the same final result repeatedly; store it once.
-      if (text === lastCaption.current.text && now - lastCaption.current.at < 8000) return;
-      lastCaption.current = { text, at: now };
-      void sendMessage(conversationId, text, 'human_agent').catch(() => {
-        // Caption loss must never break the call.
-      });
-    },
-    [conversationId],
-  );
-  const speechLocale = language === 'hindi' ? 'hi-IN' : 'en-IN';
-  const {
-    supported: captionsSupported,
-    listening: captionsListening,
-  } = useSpeechRecognition({
-    enabled: isConnected && micOn && Boolean(conversationId),
-    language: speechLocale,
-    onFinal: handleCaptionFinal,
-  });
-
   const aiStillInChannel = remoteUsers.some((u) => u.uid.toString() === agentUid);
   const customerInChannel = customerUid
     ? remoteUsers.some((u) => u.uid.toString() === customerUid)
@@ -146,6 +102,8 @@ export default function HumanVoiceBridge({
       <div className="flex items-center gap-2">
         {isConnected ? (
           <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+        ) : joinFailure ? (
+          <span className="h-2 w-2 rounded-full bg-red-400" />
         ) : (
           <Loader2 className="h-3.5 w-3.5 animate-spin text-purple-300" />
         )}
@@ -159,27 +117,25 @@ export default function HumanVoiceBridge({
         <span className="ml-auto font-mono text-[10px] text-purple-300/70">{channel}</span>
       </div>
       {joinFailure && (
-        <p className="mt-2 rounded bg-red-950/60 px-2 py-1.5 text-[11px] text-red-200">
-          {joinFailure}
-        </p>
+        <div className="mt-2 space-y-2">
+          <p className="rounded bg-red-950/60 px-2 py-1.5 text-[11px] text-red-200">
+            {joinFailure}
+          </p>
+          <Button size="sm" variant="outline" className="border-purple-700" onClick={retryJoin}>
+            <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Retry join
+          </Button>
+        </div>
       )}
       <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-purple-200/80">
-        <span className="rounded bg-purple-900/50 px-1.5 py-0.5">
+        <span className="inline-flex items-center gap-1 rounded bg-purple-900/50 px-1.5 py-0.5">
+          <Users className="h-3 w-3" />
           Customer: {customerInChannel ? 'connected' : 'not detected'}
         </span>
         <span className="rounded bg-purple-900/50 px-1.5 py-0.5">
           AI agent: {aiStillInChannel ? 'leaving…' : 'left the channel'}
         </span>
       </div>
-      <div className="mt-2 flex items-center gap-1.5 text-[10px] text-purple-300/80">
-        <AudioLines className={`h-3 w-3 ${captionsListening ? 'text-purple-300' : 'text-purple-400/40'}`} />
-        {captionsSupported
-          ? captionsListening
-            ? `Live transcript is recording your words (${speechLocale})`
-            : 'Live transcript starting…'
-          : 'Live transcript is not supported in this browser (use Chrome/Edge/Safari)'}
-      </div>
-      <div className="mt-2 flex gap-2">
+      <div className="mt-3 flex gap-2">
         <Button size="sm" variant="outline" className="border-purple-700" onClick={() => void toggleMic()}>
           {micOn ? <Mic className="mr-1.5 h-3.5 w-3.5" /> : <MicOff className="mr-1.5 h-3.5 w-3.5" />}
           {micOn ? 'Mute' : 'Unmute'}
